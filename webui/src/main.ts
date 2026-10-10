@@ -1,0 +1,89 @@
+import "./style.css";
+
+type Transcript = {
+  session_id: string;
+  cwd: string | null;
+  hook_event: string | null;
+  content: string;
+  created_at: string;
+  updated_at: string;
+  bytes: number;
+  preview: string;
+};
+
+const status = document.querySelector<HTMLParagraphElement>("#status");
+const rows = document.querySelector<HTMLTableSectionElement>("#rows");
+const refresh = document.querySelector<HTMLButtonElement>("#refresh");
+
+function cell(text: string): HTMLTableCellElement {
+  const td = document.createElement("td");
+  td.textContent = text;
+  return td;
+}
+
+function formatTranscript(content: string): string {
+  return content
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => {
+      try {
+        return JSON.stringify(JSON.parse(line), null, 2);
+      } catch {
+        return line;
+      }
+    })
+    .join("\n\n");
+}
+
+function render(transcripts: Transcript[]): void {
+  if (!rows || !status) {
+    return;
+  }
+  rows.replaceChildren();
+  if (transcripts.length === 0) {
+    status.textContent = "No transcripts yet.";
+    return;
+  }
+  status.textContent = `${transcripts.length} transcript${transcripts.length === 1 ? "" : "s"}.`;
+  for (const transcript of transcripts) {
+    const tr = document.createElement("tr");
+    tr.append(
+      cell(transcript.session_id),
+      cell(transcript.updated_at),
+      cell(transcript.cwd ?? ""),
+      cell(transcript.hook_event ?? ""),
+      cell(String(transcript.bytes)),
+    );
+    const transcriptCell = document.createElement("td");
+    const pre = document.createElement("pre");
+    pre.className = "transcript";
+    pre.textContent = formatTranscript(transcript.content);
+    transcriptCell.append(pre);
+    tr.append(transcriptCell);
+    rows.append(tr);
+  }
+}
+
+async function load(): Promise<void> {
+  if (!status) {
+    return;
+  }
+  status.textContent = "Loading…";
+  try {
+    const response = await fetch("/api/transcripts");
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    const transcripts = (await response.json()) as Transcript[];
+    render(transcripts);
+  } catch (error) {
+    status.textContent =
+      error instanceof Error ? `Could not load transcripts: ${error.message}` : "Could not load transcripts.";
+  }
+}
+
+refresh?.addEventListener("click", () => {
+  void load();
+});
+
+void load();

@@ -1,0 +1,8 @@
+{
+  "name": "cadri",
+  "description": "Upload full Claude Code session transcripts to a local Cadri server.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Cadri"
+  }
+}
