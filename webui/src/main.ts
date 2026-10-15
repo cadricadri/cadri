@@ -1,4 +1,5 @@
 import "./style.css";
+import { type Auth, type AuthContext, fetchAuthMode, noAuth, tokenAuth } from "./auth";
 
 type Transcript = {
   session_id: string;
@@ -14,6 +15,9 @@ type Transcript = {
 const status = document.querySelector<HTMLParagraphElement>("#status");
 const rows = document.querySelector<HTMLTableSectionElement>("#rows");
 const refresh = document.querySelector<HTMLButtonElement>("#refresh");
+const actions = document.querySelector<HTMLDivElement>("#actions");
+
+let auth: Auth = noAuth;
 
 function cell(text: string): HTMLTableCellElement {
   const td = document.createElement("td");
@@ -64,13 +68,24 @@ function render(transcripts: Transcript[]): void {
   }
 }
 
+function show(message: string): void {
+  rows?.replaceChildren();
+  if (status) {
+    status.textContent = message;
+  }
+}
+
 async function load(): Promise<void> {
-  if (!status) {
+  if (!status || !auth.ready()) {
     return;
   }
   status.textContent = "Loading…";
   try {
-    const response = await fetch("/api/transcripts");
+    const response = await fetch("/api/transcripts", { headers: auth.headers() });
+    if (response.status === 401) {
+      auth.unauthorized();
+      return;
+    }
     if (!response.ok) {
       throw new Error(`${response.status} ${response.statusText}`);
     }
@@ -82,8 +97,26 @@ async function load(): Promise<void> {
   }
 }
 
-refresh?.addEventListener("click", () => {
-  void load();
-});
+async function setupAuth(ctx: AuthContext): Promise<Auth> {
+  const mode = await fetchAuthMode();
+  if (mode === "token") {
+    return tokenAuth(ctx);
+  }
+  if (mode === "workos") {
+    const { workosAuth } = await import("./ee/workos");
+    return workosAuth(ctx);
+  }
+  return noAuth;
+}
 
-void load();
+async function start(): Promise<void> {
+  if (actions) {
+    auth = await setupAuth({ actions, show, reload: () => void load() });
+  }
+  refresh?.addEventListener("click", () => {
+    void load();
+  });
+  await load();
+}
+
+void start();
