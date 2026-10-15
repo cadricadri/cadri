@@ -26,7 +26,7 @@ cadri/
     package.json
     src/
     ee/                # commercially licensed UI code
-  deploy/              # Dockerfile, docker compose, Helm _(planned)_
+  docker/              # self-hosted Compose file
   docs/
 ```
 
@@ -34,21 +34,30 @@ cadri/
 - Rust lives under `engine/`, TypeScript under `webui/`.
 - `ee/` is where enterprise gated features live, code in `ee/` may depend on the core, but the core must never depend on `ee/`.
 
-## Getting started
+## Run it
 
-### Prerequisites
+From the repository root. Each command starts the engine and the web UI, then prints the address to open.
 
-- Rust (stable toolchain)
-- Node.js and pnpm
+**On this machine.** Requires [Rust](https://rustup.rs) and Node.js. There is no login, and transcripts are stored in `engine/data/`, which git ignores. The first run compiles the engine, which can take a few minutes. Ctrl-C stops both processes.
 
-_(These recipes are placeholders until the `justfile` is written.)_
+```sh
+./scripts/run
+```
+
+**Self-hosted, with Docker.** Requires Docker Compose. The first run builds the images. The script creates `docker/.env` with an API token when that file is missing, then prints the token. Paste it into the web UI when the page asks.
+
+```sh
+./scripts/run-with-docker
+```
+
+Stop the Docker setup with `docker compose -f docker/docker-compose.yml down`.
 
 ## Deployment
 
-Cadri is designed to run in two ways from the same codebase:
+Cadri runs in two ways from the same codebase:
 
-- **Self-hosted.** One container image plus Postgres and S3-compatible object storage, started with a single `docker compose up`. Intended for teams whose transcripts cannot leave their own environment. _(planned)_
-- **Hosted.** A managed multi-tenant service for teams who prefer not to run it themselves. Tenant isolation is built into the data model from the start (`org_id` on every row). _(planned)_
+- **Self-hosted.** `./scripts/run-with-docker` runs the engine and the web UI on one machine. Transcripts stay in a SQLite file on that machine.
+- **Hosted.** A managed multi-tenant service for teams who prefer not to run it themselves. Tenant isolation is built into the data model from the start (`org_id` on every row).
 
 
 ## Contributing
@@ -57,7 +66,9 @@ Contributions are welcome! Please reach out to Cadri team beforehand, to make su
 
 ## License
 
-This repository is MIT licensed, except for the `ee` folders, where enterprise features are held.
+This repository is MIT licensed, except for the `ee` folders, where enterprise features are held. We made this decision, as we believe deeply in open source (hence very permissive MIT license), but have some paranoia about a large cloud company ripping us off if we become successful (e.g. what happened to Elasticsearch/Opensearch). 
+
+What's current in the `ee` folders allows us to provide a fully hosted, managed service (e.g. we handle hosting and auth, etc.). If you'd like us to host Cadri within your team's private cloud, please reach out to `nelson@cadri.io`, and he'll help you out. 
 
 ## Security
 

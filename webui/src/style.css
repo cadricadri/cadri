@@ -25,14 +25,35 @@ h1 {
 }
 
 #actions,
-#token-form {
+.token-fields {
   display: flex;
   align-items: center;
   gap: 0.5rem;
 }
 
 #token-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
   margin-bottom: 1rem;
+}
+
+.token-hint {
+  margin: 0;
+  max-width: 40rem;
+  color: #57534e;
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.token-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+}
+
+.token-fields {
+  flex-wrap: wrap;
 }
 
 #token-form[hidden] {
