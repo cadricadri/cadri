@@ -24,6 +24,34 @@ h1 {
   font-size: 1.25rem;
 }
 
+#actions,
+#token-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+#token-form {
+  margin-bottom: 1rem;
+}
+
+#token-form[hidden] {
+  display: none;
+}
+
+#token-form input {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid #d6d3d1;
+  border-radius: 0.375rem;
+  min-width: 18rem;
+}
+
+.account {
+  color: #57534e;
+  font-size: 0.875rem;
+}
+
 button {
   font: inherit;
   padding: 0.35rem 0.7rem;

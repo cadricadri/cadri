@@ -1,0 +1,34 @@
+# Self-hosted Cadri: engine + webui on one machine.
+#
+#   cd deploy
+#   echo "CADRI_API_TOKEN=$(openssl rand -hex 32)" > .env
+#   docker compose up --build -d
+#
+# Then open http://localhost:8080 and paste the token when prompted. Point the
+# Claude Code plugin at it with CADRI_URL=http://localhost:8080 and the same
+# CADRI_API_TOKEN.
+services:
+  engine:
+    build:
+      context: ../engine
+      args:
+        EDITION: core
+    environment:
+      CADRI_API_TOKEN: ${CADRI_API_TOKEN:?set CADRI_API_TOKEN in deploy/.env}
+    volumes:
+      - cadri-data:/data
+    restart: unless-stopped
+
+  webui:
+    build:
+      context: ../webui
+    environment:
+      CADRI_ENGINE_UPSTREAM: http://engine:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      - engine
+    restart: unless-stopped
+
+volumes:
+  cadri-data:

@@ -1,15 +1,17 @@
-[package]
-name = "engine"
+[workspace]
+members = ["core", "ee"]
+default-members = ["core"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+[workspace.dependencies]
+cadri-core = { path = "core" }
 axum = "0.8.9"
-chrono = { version = "0.4.45", features = ["clock"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1.53.2", features = ["macros", "net", "rt-multi-thread"] }
-tower-http = { version = "0.7.1", features = ["cors"] }
+subtle = "2.6.1"
+tokio = { version = "1.53.2", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tower = { version = "0.5.3", features = ["util"] }

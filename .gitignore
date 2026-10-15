@@ -2,3 +2,4 @@ engine/target*
 engine/data/
 webui/node_modules/
 webui/dist/
+deploy/.env
