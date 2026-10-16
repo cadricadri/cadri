@@ -12,11 +12,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     set -eu; \
     case "$EDITION" in \
-      core) bin=cadri-engine ;; \
-      ee) bin=cadri-engine-ee ;; \
+      core) pkg=cadri-core; bin=cadri-engine ;; \
+      ee) pkg=cadri-ee; bin=cadri-engine-ee ;; \
       *) echo "EDITION must be 'core' or 'ee', got '$EDITION'" >&2; exit 1 ;; \
     esac; \
-    cargo build --release --locked --bin "$bin"; \
+    cargo build --release --locked --package "$pkg" --bin "$bin"; \
     install -D "target/release/$bin" /out/cadri-engine
 
 FROM debian:bookworm-slim
