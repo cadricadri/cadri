@@ -52,6 +52,14 @@ From the repository root. Each command starts the engine and the web UI, then pr
 
 Stop the Docker setup with `docker compose -f docker/docker-compose.yml down`.
 
+## Rust tests
+
+`./scripts/test-rust` builds the engine workspace and runs its tests. `git push` runs that same script and stops if it fails. A fresh clone needs the hook path once:
+
+```sh
+git config core.hooksPath .githooks
+```
+
 ## Deployment
 
 Cadri runs in two ways from the same codebase:
