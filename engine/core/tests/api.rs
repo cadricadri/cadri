@@ -159,12 +159,15 @@ async fn orgs_cannot_see_each_others_transcripts() {
     let (_, _, listed_a) = send(&app, get_request("/api/transcripts", &a)).await;
     let (_, _, listed_b) = send(&app, get_request("/api/transcripts", &b)).await;
     let ids = |listed: &Value| -> Vec<String> {
-        listed
+        let mut ids: Vec<String> = listed
             .as_array()
             .unwrap()
             .iter()
             .map(|t| format!("{}={}", t["session_id"], t["content"]))
-            .collect()
+            .collect();
+        // Rows written in the same second share updated_at, so list order is not stable.
+        ids.sort();
+        ids
     };
     assert_eq!(
         ids(&listed_a),
