@@ -98,8 +98,12 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("data/transcripts.db"));
     let bind = std::env::var("CADRI_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
-    let tls_cert = std::env::var("CADRI_TLS_CERT").ok().filter(|value| !value.is_empty());
-    let tls_key = std::env::var("CADRI_TLS_KEY").ok().filter(|value| !value.is_empty());
+    let tls_cert = std::env::var("CADRI_TLS_CERT")
+        .ok()
+        .filter(|value| !value.is_empty());
+    let tls_key = std::env::var("CADRI_TLS_KEY")
+        .ok()
+        .filter(|value| !value.is_empty());
 
     let connection = db::open(&db_path).unwrap_or_else(|err| {
         eprintln!("failed to open database {}: {err}", db_path.display());
@@ -116,10 +120,12 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
     let result = match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => serve_tls(&bind, &cert, &key, app).await,
         (None, None) => {
-            let listener = tokio::net::TcpListener::bind(&bind).await.unwrap_or_else(|err| {
-                eprintln!("failed to listen on {bind}: {err}");
-                std::process::exit(1);
-            });
+            let listener = tokio::net::TcpListener::bind(&bind)
+                .await
+                .unwrap_or_else(|err| {
+                    eprintln!("failed to listen on {bind}: {err}");
+                    std::process::exit(1);
+                });
             axum::serve(listener, app)
                 .with_graceful_shutdown(shutdown_signal())
                 .await
@@ -135,19 +141,15 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
     });
 }
 
-async fn serve_tls(
-    bind: &str,
-    cert: &str,
-    key: &str,
-    app: Router,
-) -> Result<(), std::io::Error> {
+async fn serve_tls(bind: &str, cert: &str, key: &str, app: Router) -> Result<(), std::io::Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(Path::new(cert), Path::new(key))
-        .await
-        .unwrap_or_else(|err| {
-            eprintln!("failed to load TLS certificate {cert}: {err}");
-            std::process::exit(1);
-        });
+    let config =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(Path::new(cert), Path::new(key))
+            .await
+            .unwrap_or_else(|err| {
+                eprintln!("failed to load TLS certificate {cert}: {err}");
+                std::process::exit(1);
+            });
     let addr: SocketAddr = bind.parse().unwrap_or_else(|err| {
         eprintln!("CADRI_BIND {bind} is not a socket address: {err}");
         std::process::exit(1);
