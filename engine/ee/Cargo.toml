@@ -1,0 +1,30 @@
+[package]
+name = "cadri-ee"
+version.workspace = true
+edition.workspace = true
+license-file = "LICENSE"
+
+[lib]
+name = "cadri_ee"
+
+[[bin]]
+name = "cadri-engine-ee"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+axum-extra = { version = "0.12.6", default-features = false, features = ["cookie-private"] }
+base64 = "0.23.1"
+cadri-core.workspace = true
+cookie = { version = "0.18.2", default-features = false }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
+rand = "0.10.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+tower.workspace = true

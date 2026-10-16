@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Start the engine and the web UI on this machine, without Docker.
+# No API token: anything that can reach these ports can read and write data.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+engine_pid=""
+webui_pid=""
+
+stop() {
+  if [ -n "$webui_pid" ]; then
+    kill "$webui_pid" 2>/dev/null || true
+  fi
+  if [ -n "$engine_pid" ]; then
+    kill "$engine_pid" 2>/dev/null || true
+  fi
+}
+trap stop EXIT INT TERM
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Rust is required. Install it from https://rustup.rs" >&2
+  exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Node.js, which includes npm, is required." >&2
+  exit 1
+fi
+
+require_free() {
+  # curl exits 7 when nothing is listening. Any other result means the port is taken.
+  status=0
+  curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$1/" >/dev/null 2>&1 || status=$?
+  if [ "$status" -ne 7 ]; then
+    echo "Port $1 is already in use. Stop that process, then run ./scripts/run again." >&2
+    exit 1
+  fi
+}
+require_free 8080
+require_free 5173
+
+echo "Starting the engine. The first build can take a few minutes."
+mkdir -p "$root/engine/data"
+(
+  cd "$root/engine"
+  CADRI_BIND=127.0.0.1:8080 \
+    CADRI_DB="$root/engine/data/transcripts.db" \
+    cargo run --bin cadri-engine
+) &
+engine_pid=$!
+
+if [ ! -d "$root/webui/node_modules" ]; then
+  echo "Installing web UI dependencies."
+  (cd "$root/webui" && npm ci)
+fi
+
+echo "Starting the web UI."
+(
+  cd "$root/webui"
+  npm run dev -- --strictPort
+) &
+webui_pid=$!
+
+url=http://127.0.0.1:5173
+ready=0
+i=0
+while [ "$i" -lt 600 ]; do
+  if ! kill -0 "$engine_pid" 2>/dev/null; then
+    echo "The engine exited before it was ready." >&2
+    exit 1
+  fi
+  if ! kill -0 "$webui_pid" 2>/dev/null; then
+    echo "The web UI exited before it was ready." >&2
+    exit 1
+  fi
+  if curl -fsS "$url/" >/dev/null 2>&1 && curl -fsS "http://127.0.0.1:8080/healthz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+
+if [ "$ready" -ne 1 ]; then
+  echo "Cadri did not become ready in time." >&2
+  exit 1
+fi
+
+echo
+echo "Cadri is running."
+echo "Open the web UI: $url"
+echo "Press Ctrl-C to stop."
+
+while kill -0 "$engine_pid" 2>/dev/null && kill -0 "$webui_pid" 2>/dev/null; do
+  sleep 1
+done
+echo "Cadri stopped." >&2
+exit 1
