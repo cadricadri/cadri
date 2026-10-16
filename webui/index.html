@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cadri transcripts</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Transcripts</h1>
+        <div id="actions">
+          <button id="refresh" type="button">Refresh</button>
+        </div>
+      </header>
+      <p id="status"></p>
+      <form id="token-form" hidden>
+        <p class="token-hint">
+          The API token is saved in <code>docker/.env</code> and printed when Docker starts Cadri.
+          Share it with other people on your local network so they can open Cadri.
+          Anyone with the token can read and write transcripts.
+        </p>
+        <div class="token-fields">
+          <label for="token-input">API token</label>
+          <input id="token-input" type="password" autocomplete="off" required />
+          <button type="submit">Save</button>
+        </div>
+      </form>
+      <table>
+        <thead>
+          <tr>
+            <th>Session</th>
+            <th>Updated</th>
+            <th>Directory</th>
+            <th>Hook</th>
+            <th>Bytes</th>
+            <th>Transcript</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

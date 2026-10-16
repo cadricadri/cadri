@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Sign in to a hosted Cadri server with the device flow and save credentials.
+
+Usage: cadri-login [--url URL] [--no-browser] [--logout]
+The server defaults to CADRI_URL, then https://app.cadri.io.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+import webbrowser
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import cadri_auth  # noqa: E402
+
+REQUEST_TIMEOUT_SECONDS = 15
+SLOW_DOWN_SECONDS = 5
+
+
+class LoginError(Exception):
+    pass
+
+
+def start(base: str) -> dict:
+    status, body = cadri_auth.post_json(f"{base}/auth/device/start", {}, REQUEST_TIMEOUT_SECONDS)
+    if status == 404:
+        raise LoginError(f"{base} does not support sign-in; set CADRI_API_TOKEN instead")
+    if status != 200 or not isinstance(body.get("device_code"), str):
+        raise LoginError(f"could not start sign-in ({status}): {body.get('error', 'bad response')}")
+    return body
+
+
+def seconds(value: object, default: float) -> float:
+    return float(value) if isinstance(value, (int, float)) and value >= 0 else default
+
+
+def poll(base: str, device: dict) -> dict:
+    interval = max(1.0, seconds(device.get("interval"), 5))
+    deadline = time.monotonic() + seconds(device.get("expires_in"), 600)
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        status, body = cadri_auth.post_json(
+            f"{base}/auth/device/token",
+            {"device_code": device["device_code"]},
+            REQUEST_TIMEOUT_SECONDS,
+        )
+        error = body.get("error")
+        if status == 200:
+            entry = cadri_auth.token_entry(body)
+            if entry is None:
+                raise LoginError("server returned an invalid token response")
+            return entry
+        if status == 428:
+            continue
+        if status == 429:
+            interval += SLOW_DOWN_SECONDS
+            continue
+        if error == "expired_token":
+            raise LoginError("the code expired; run cadri-login again")
+        if error == "access_denied":
+            raise LoginError("sign-in was denied")
+        raise LoginError(f"unexpected response ({status}): {error or 'no error message'}")
+    raise LoginError("the code expired; run cadri-login again")
+
+
+def login(base: str, open_browser: bool) -> None:
+    device = start(base)
+    url = device.get("verification_uri_complete") or device.get("verification_uri")
+    print(f"To sign in to {base}, open:\n\n  {url}\n\nand confirm the code: {device.get('user_code')}\n")
+    if open_browser:
+        try:
+            webbrowser.open(url)
+        except webbrowser.Error:
+            pass
+    print("Waiting for confirmation...", flush=True)
+    cadri_auth.update_entry(base, poll(base, device))
+    print(f"Signed in. Credentials saved to {cadri_auth.credentials_path()}")
+
+
+def logout(base: str) -> None:
+    if base not in cadri_auth.load_credentials():
+        print(f"Not signed in to {base}.")
+        return
+    cadri_auth.update_entry(base, None)
+    print(f"Signed out of {base}.")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Sign in to a Cadri server.")
+    parser.add_argument("--url", help="server URL (default: CADRI_URL or https://app.cadri.io)")
+    parser.add_argument("--logout", action="store_true", help="remove saved credentials for the server")
+    parser.add_argument("--no-browser", action="store_true", help="do not try to open a browser")
+    args = parser.parse_args()
+    base = cadri_auth.server_url(args.url)
+    try:
+        if args.logout:
+            logout(base)
+        else:
+            login(base, open_browser=not args.no_browser)
+    except LoginError as exc:
+        print(f"cadri-login: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"cadri-login: could not reach {base}: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

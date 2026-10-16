@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Build and start the self-hosted engine and web UI with Docker Compose.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$root/docker"
+
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Docker Compose is required." >&2
+  exit 1
+fi
+
+# curl exits 7 when nothing is listening. Any other result means the port is taken.
+status=0
+curl -s -o /dev/null --max-time 1 "http://127.0.0.1:8080/" >/dev/null 2>&1 || status=$?
+if [ "$status" -ne 7 ]; then
+  echo "Port 8080 is already in use. Stop that process, then run ./scripts/run-with-docker again." >&2
+  exit 1
+fi
+
+if [ ! -f .env ]; then
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "openssl is required to create the API token in docker/.env" >&2
+    exit 1
+  fi
+  umask 077
+  printf 'CADRI_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+  echo "Wrote a new API token to docker/.env"
+fi
+
+token=$(sed -n 's/^CADRI_API_TOKEN=//p' .env | head -n 1)
+if [ -z "$token" ]; then
+  echo "docker/.env must set CADRI_API_TOKEN." >&2
+  exit 1
+fi
+
+echo "Starting Cadri. The first image build can take several minutes."
+docker compose up --build -d
+
+url=http://127.0.0.1:8080
+ready=0
+i=0
+while [ "$i" -lt 90 ]; do
+  if curl -fsS "$url/healthz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+
+if [ "$ready" -ne 1 ]; then
+  echo "Cadri did not become ready. Recent logs:" >&2
+  docker compose logs --tail 50 >&2 || true
+  exit 1
+fi
+
+echo
+echo "Cadri is running."
+echo "Open the web UI: $url"
+echo "API token: $token"
+echo "Paste the token into the page when it asks. It is also saved in docker/.env."
+echo "Stop with: docker compose -f docker/docker-compose.yml down"

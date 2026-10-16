@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Build the engine workspace and run its Rust tests.
+# The pre-push hook in .githooks runs this and stops the push if it fails.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Rust is required. Install it from https://rustup.rs" >&2
+  exit 1
+fi
+
+cd "$root/engine"
+echo "Building and testing the engine workspace..."
+cargo test --workspace
