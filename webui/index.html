@@ -10,10 +10,35 @@
       <header>
         <h1>Transcripts</h1>
         <div id="actions">
+          <form id="invite-form" hidden>
+            <label for="invite-email">Teammate's email</label>
+            <input
+              id="invite-email"
+              type="email"
+              autocomplete="email"
+              required
+              placeholder="teammate@company.com"
+            />
+            <button type="submit">Send invite</button>
+            <span id="invite-status"></span>
+          </form>
           <button id="refresh" type="button">Refresh</button>
         </div>
       </header>
       <p id="status"></p>
+      <form id="org-form" hidden>
+        <p class="token-hint">
+          Name the team this account belongs to. Transcripts are shared with that team.
+          Someone joins this team only when they accept an email invite. Signing up without an
+          invite starts a separate team.
+        </p>
+        <div class="token-fields">
+          <label for="org-name">Team name</label>
+          <input id="org-name" name="name" required maxlength="100" autocomplete="organization" />
+          <button type="submit">Create team</button>
+        </div>
+        <p id="org-status" class="form-status"></p>
+      </form>
       <form id="token-form" hidden>
         <p class="token-hint">
           The API token is saved in <code>docker/.env</code> and printed when Docker starts Cadri.
@@ -26,7 +51,7 @@
           <button type="submit">Save</button>
         </div>
       </form>
-      <table>
+      <table id="transcripts">
         <thead>
           <tr>
             <th>Session</th>

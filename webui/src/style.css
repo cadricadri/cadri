@@ -16,6 +16,7 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 1rem;
 }
 
@@ -25,13 +26,22 @@ h1 {
 }
 
 #actions,
-.token-fields {
+.token-fields,
+#invite-form {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.5rem;
 }
 
-#token-form {
+#actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+#token-form,
+#org-form {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -56,16 +66,37 @@ h1 {
   flex-wrap: wrap;
 }
 
-#token-form[hidden] {
+#token-form[hidden],
+#org-form[hidden],
+#invite-form[hidden] {
   display: none;
 }
 
-#token-form input {
+#token-form input,
+#org-form input,
+#invite-form input {
   font: inherit;
   padding: 0.35rem 0.5rem;
   border: 1px solid #d6d3d1;
   border-radius: 0.375rem;
-  min-width: 18rem;
+}
+
+#token-form input,
+#org-form input {
+  min-width: min(18rem, 100%);
+  max-width: 100%;
+}
+
+#invite-form input {
+  width: 16rem;
+  max-width: 100%;
+}
+
+.form-status,
+#invite-status {
+  margin: 0;
+  color: #57534e;
+  font-size: 0.875rem;
 }
 
 .account {
