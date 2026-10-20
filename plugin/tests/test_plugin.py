@@ -168,6 +168,13 @@ class CaptureTests(PluginTestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("401", result.stderr)
 
+    def test_no_organization_hints_at_the_team_form(self):
+        self.write_credentials({"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 3600})
+        self.server.respond("/api/transcripts", (403, {"error": "no_organization"}))
+        result = self.capture()
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("create your team", result.stderr)
+
     def test_unreachable_server_exits_zero(self):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))

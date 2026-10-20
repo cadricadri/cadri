@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -38,10 +39,21 @@ fn sign(key: &[u8], claims: Value) -> String {
     jsonwebtoken::encode(&header, &claims, &EncodingKey::from_rsa_pem(key).unwrap()).unwrap()
 }
 
+#[derive(Default)]
+struct Directory {
+    memberships: Vec<(String, String, String)>,
+    organizations: Vec<(String, String)>,
+    invitations: Vec<Value>,
+    admin_roles: Vec<(String, String)>,
+    /// WorkOS `list_metadata.after`. A non-empty cursor means more memberships exist.
+    membership_after: Option<String>,
+}
+
 #[derive(Clone)]
 struct Mock {
     base: String,
     refreshes: Arc<AtomicUsize>,
+    directory: Arc<Mutex<Directory>>,
 }
 
 impl Mock {
@@ -69,14 +81,16 @@ impl Mock {
 }
 
 async fn mock_authenticate(State(mock): State<Mock>, Json(body): Json<Value>) -> Response {
-    let tokens = |refresh_token: &str| {
-        Json(json!({
+    let issue = |refresh_token: &str, org_id: Option<&str>| {
+        let mut payload = json!({
             "user": { "id": "user_1", "email": "user1@example.com" },
-            "organization_id": "org_1",
-            "access_token": mock.valid_token("org_1"),
+            "access_token": mock.token(org_id, now() + 300),
             "refresh_token": refresh_token,
-        }))
-        .into_response()
+        });
+        if let Some(org_id) = org_id {
+            payload["organization_id"] = json!(org_id);
+        }
+        Json(payload).into_response()
     };
     let error = |code: &str| {
         (
@@ -90,7 +104,7 @@ async fn mock_authenticate(State(mock): State<Mock>, Json(body): Json<Value>) ->
         "authorization_code" => {
             assert_eq!(body["client_secret"], API_KEY);
             if body["code"] == "good-code" {
-                tokens("refresh-from-code")
+                issue("refresh-from-code", Some("org_1"))
             } else {
                 error("invalid_grant")
             }
@@ -98,15 +112,23 @@ async fn mock_authenticate(State(mock): State<Mock>, Json(body): Json<Value>) ->
         "refresh_token" => {
             assert_eq!(body["client_secret"], API_KEY);
             mock.refreshes.fetch_add(1, Ordering::SeqCst);
-            if body["refresh_token"] == "good-refresh" {
-                tokens("rotated-refresh")
-            } else {
-                error("invalid_grant")
+            let refresh = body["refresh_token"].as_str().unwrap_or("");
+            let requested = body["organization_id"]
+                .as_str()
+                .filter(|org_id| !org_id.is_empty())
+                .map(str::to_string);
+            match (requested, refresh) {
+                (Some(org_id), "good-refresh" | "no-org-refresh") => {
+                    issue("rotated-refresh", Some(&org_id))
+                }
+                (None, "good-refresh") => issue("rotated-refresh", Some("org_1")),
+                (None, "no-org-refresh") => issue("rotated-no-org", None),
+                _ => error("invalid_grant"),
             }
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
             match body["device_code"].as_str().unwrap() {
-                "approved" => tokens("device-refresh"),
+                "approved" => issue("device-refresh", Some("org_1")),
                 pending_or_error => error(pending_or_error),
             }
         }
@@ -147,12 +169,134 @@ async fn mock_user(Path(id): Path<String>, headers: HeaderMap) -> Response {
     Json(json!({ "object": "user", "id": id, "email": "user1@example.com" })).into_response()
 }
 
-async fn mock_organization(Path(id): Path<String>, headers: HeaderMap) -> Response {
+async fn mock_organization(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     if !has_api_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let name = if id == "org_1" { "Org One" } else { "Org Two" };
+    let directory = mock.directory.lock().unwrap();
+    let name = directory
+        .organizations
+        .iter()
+        .find(|(org_id, _)| org_id == &id)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| {
+            if id == "org_1" {
+                "Org One".to_string()
+            } else {
+                "Org Two".to_string()
+            }
+        });
     Json(json!({ "object": "organization", "id": id, "name": name })).into_response()
+}
+
+fn api_error(code: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "code": code, "message": "test" })),
+    )
+        .into_response()
+}
+
+async fn mock_list_memberships(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let user_id = query.get("user_id").cloned().unwrap_or_default();
+    let directory = mock.directory.lock().unwrap();
+    let data: Vec<Value> = directory
+        .memberships
+        .iter()
+        .filter(|(user, _, _)| user == &user_id)
+        .map(|(user, org_id, status)| {
+            json!({
+                "object": "organization_membership",
+                "user_id": user,
+                "organization_id": org_id,
+                "status": status,
+            })
+        })
+        .collect();
+    let after = directory.membership_after.clone();
+    Json(json!({ "data": data, "list_metadata": { "before": null, "after": after } }))
+        .into_response()
+}
+
+async fn mock_create_organization(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let name = body["name"].as_str().unwrap_or("").to_string();
+    let mut directory = mock.directory.lock().unwrap();
+    let id = format!("org_new_{}", directory.organizations.len() + 1);
+    directory.organizations.push((id.clone(), name.clone()));
+    Json(json!({ "object": "organization", "id": id, "name": name })).into_response()
+}
+
+async fn mock_create_membership(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let user_id = body["user_id"].as_str().unwrap_or("").to_string();
+    let organization_id = body["organization_id"].as_str().unwrap_or("").to_string();
+    let role = body["role_slug"].as_str().unwrap_or("").to_string();
+    let mut directory = mock.directory.lock().unwrap();
+    directory.admin_roles.push((user_id.clone(), role));
+    directory
+        .memberships
+        .push((user_id, organization_id.clone(), "active".to_string()));
+    Json(json!({
+        "object": "organization_membership",
+        "user_id": body["user_id"],
+        "organization_id": organization_id,
+        "status": "active",
+    }))
+    .into_response()
+}
+
+async fn mock_create_invitation(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let email = body["email"].as_str().unwrap_or("");
+    if email == "member@example.com" {
+        return api_error("user_already_organization_member");
+    }
+    if email == "pending@example.com" {
+        return api_error("invitation_already_exists");
+    }
+    mock.directory
+        .lock()
+        .unwrap()
+        .invitations
+        .push(body.clone());
+    Json(json!({
+        "object": "invitation",
+        "id": "invitation_1",
+        "email": email,
+        "state": "pending",
+        "organization_id": body["organization_id"],
+    }))
+    .into_response()
 }
 
 async fn setup() -> (Router, Mock) {
@@ -161,12 +305,19 @@ async fn setup() -> (Router, Mock) {
     let mock = Mock {
         base: base.clone(),
         refreshes: Arc::new(AtomicUsize::new(0)),
+        directory: Arc::new(Mutex::new(Directory::default())),
     };
     let mock_app = Router::new()
         .route("/user_management/authenticate", post(mock_authenticate))
         .route("/user_management/authorize/device", post(mock_device_start))
+        .route(
+            "/user_management/organization_memberships",
+            get(mock_list_memberships).post(mock_create_membership),
+        )
+        .route("/user_management/invitations", post(mock_create_invitation))
         .route("/sso/jwks/{client_id}", get(mock_jwks))
         .route("/user_management/users/{id}", get(mock_user))
+        .route("/organizations", post(mock_create_organization))
         .route("/organizations/{id}", get(mock_organization))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, mock_app).await.unwrap() });
@@ -660,6 +811,320 @@ async fn logout_clears_the_cookie_and_returns_the_workos_url() {
     assert_eq!(body, json!({ "logout_url": "/" }));
 }
 
+fn no_org_cookie(mock: &Mock) -> String {
+    encrypted_session(&mock.token(None, now() + 300), "no-org-refresh")
+}
+
+fn seed_membership(mock: &Mock, org_id: &str) {
+    seed_membership_with_status(mock, org_id, "active");
+}
+
+fn seed_membership_with_status(mock: &Mock, org_id: &str, status: &str) {
+    mock.directory.lock().unwrap().memberships.push((
+        "user_1".to_string(),
+        org_id.to_string(),
+        status.to_string(),
+    ));
+}
+
+#[tokio::test]
+async fn naming_a_team_creates_an_organization_and_selects_it() {
+    let (app, mock) = setup().await;
+    let cookie = no_org_cookie(&mock);
+    let (status, headers, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "  Company A  " })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["org_id"], "org_new_1");
+    assert_eq!(body["org_name"], "Company A");
+    assert_eq!(body["user_id"], "user_1");
+    assert_eq!(body["email"], "user1@example.com");
+    let (organizations, admin_roles) = {
+        let directory = mock.directory.lock().unwrap();
+        (
+            directory.organizations.clone(),
+            directory.admin_roles.clone(),
+        )
+    };
+    assert_eq!(
+        organizations,
+        vec![("org_new_1".to_string(), "Company A".to_string())]
+    );
+    assert_eq!(
+        admin_roles,
+        vec![("user_1".to_string(), "admin".to_string())]
+    );
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 1);
+
+    let session = cookie_pair(set_cookie(&headers, cadri_ee::SESSION_COOKIE).unwrap());
+    let (status, _, me) = send(&app, get_with("/api/me", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["org_id"], "org_new_1");
+}
+
+#[tokio::test]
+async fn an_existing_membership_is_selected_instead_of_creating_another_team() {
+    let (app, mock) = setup().await;
+    seed_membership(&mock, "org_1");
+    let cookie = no_org_cookie(&mock);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Other Name" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["org_id"], "org_1");
+    assert_eq!(body["org_name"], "Org One");
+    assert!(mock.directory.lock().unwrap().organizations.is_empty());
+}
+
+#[tokio::test]
+async fn an_inactive_membership_does_not_count_as_a_team() {
+    let (app, mock) = setup().await;
+    seed_membership_with_status(&mock, "org_old", "inactive");
+    let cookie = no_org_cookie(&mock);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company A" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["org_id"], "org_new_1");
+    assert_eq!(body["org_name"], "Company A");
+}
+
+#[tokio::test]
+async fn another_page_of_memberships_is_not_a_team_switcher() {
+    let (app, mock) = setup().await;
+    seed_membership(&mock, "org_1");
+    mock.directory.lock().unwrap().membership_after = Some("next-page".to_string());
+    let cookie = no_org_cookie(&mock);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company A" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, json!({ "error": "multiple_organizations" }));
+    assert!(mock.directory.lock().unwrap().organizations.is_empty());
+}
+
+#[tokio::test]
+async fn several_memberships_are_not_a_team_switcher() {
+    let (app, mock) = setup().await;
+    seed_membership(&mock, "org_1");
+    seed_membership(&mock, "org_2");
+    let cookie = no_org_cookie(&mock);
+    let (status, headers, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company A" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, json!({ "error": "multiple_organizations" }));
+    assert!(set_cookie(&headers, cadri_ee::SESSION_COOKIE).is_none());
+    assert!(mock.directory.lock().unwrap().organizations.is_empty());
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_session_that_already_has_an_organization_does_not_create_another() {
+    let (app, mock) = setup().await;
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+    let (status, headers, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company B" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body, json!({ "error": "already_in_organization" }));
+    assert!(set_cookie(&headers, cadri_ee::SESSION_COOKIE).is_none());
+    assert!(mock.directory.lock().unwrap().organizations.is_empty());
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_expired_session_keeps_its_organization() {
+    let (app, mock) = setup().await;
+    let cookie = encrypted_session(&mock.token(Some("org_1"), now() - 3600), "good-refresh");
+    let (status, headers, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company B" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["org_id"], "org_1");
+    assert!(set_cookie(&headers, cadri_ee::SESSION_COOKIE).is_some());
+    assert!(mock.directory.lock().unwrap().organizations.is_empty());
+}
+
+#[tokio::test]
+async fn creating_a_team_requires_a_session_and_a_name() {
+    let (app, _) = setup().await;
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[],
+            Some(json!({ "name": "Company A" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "unauthorized" }));
+
+    let (app, mock) = setup().await;
+    let cookie = no_org_cookie(&mock);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "   " })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "invalid_organization_name" }));
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_member_invites_by_email_into_the_session_organization() {
+    let (app, mock) = setup().await;
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[("cookie", &cookie)],
+            Some(json!({ "email": " Dev2@CompanyA.example ", "organization_id": "org_evil" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({ "email": "Dev2@CompanyA.example", "state": "pending" })
+    );
+    let invitations = mock.directory.lock().unwrap().invitations.clone();
+    assert_eq!(invitations.len(), 1);
+    assert_eq!(invitations[0]["email"], "Dev2@CompanyA.example");
+    assert_eq!(invitations[0]["organization_id"], "org_1");
+    assert_eq!(invitations[0]["inviter_user_id"], "user_1");
+    assert!(invitations[0].get("organization_id") != Some(&json!("org_evil")));
+}
+
+#[tokio::test]
+async fn invitations_report_an_existing_member_or_invite() {
+    let (app, mock) = setup().await;
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+    for (email, error) in [
+        ("member@example.com", "already_member"),
+        ("pending@example.com", "already_invited"),
+    ] {
+        let (status, _, body) = send(
+            &app,
+            request(
+                Method::POST,
+                "/auth/invitations",
+                &[("cookie", &cookie)],
+                Some(json!({ "email": email })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{email}");
+        assert_eq!(body, json!({ "error": error }));
+    }
+    assert!(mock.directory.lock().unwrap().invitations.is_empty());
+}
+
+#[tokio::test]
+async fn an_invitation_requires_an_organization() {
+    let (app, mock) = setup().await;
+    let cookie = no_org_cookie(&mock);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[("cookie", &cookie)],
+            Some(json!({ "email": "dev2@companya.example" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body, json!({ "error": "no_organization" }));
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[],
+            Some(json!({ "email": "dev2@companya.example" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "unauthorized" }));
+
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[("cookie", &cookie)],
+            Some(json!({ "email": "not-an-email" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "invalid_email" }));
+    assert!(mock.directory.lock().unwrap().invitations.is_empty());
+}
+
 #[test]
 fn cookie_key_must_be_long_base64() {
     assert!(cadri_ee::cookie_key_from_base64("not base64!").is_err());
@@ -684,4 +1149,262 @@ fn binary_fails_fast_without_required_env() {
     ] {
         assert!(stderr.contains(name), "{stderr}");
     }
+}
+
+/// Creates a real WorkOS user with no organization, then drives the Cadri engine against
+/// `https://api.workos.com`. Run with `--ignored` and `WORKOS_API_KEY` / `WORKOS_CLIENT_ID`
+/// from the staging environment. The user and organization are deleted before the test returns.
+#[tokio::test]
+#[ignore = "creates a staging WorkOS user; set WORKOS_API_KEY and WORKOS_CLIENT_ID"]
+async fn staging_user_without_an_organization_can_name_a_team() {
+    if let Err(err) = staging_signup().await {
+        panic!("{err}");
+    }
+}
+
+async fn staging_signup() -> Result<(), String> {
+    let api_key =
+        std::env::var("WORKOS_API_KEY").map_err(|_| "WORKOS_API_KEY is not set".to_string())?;
+    let client_id =
+        std::env::var("WORKOS_CLIENT_ID").map_err(|_| "WORKOS_CLIENT_ID is not set".to_string())?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| err.to_string())?
+        .as_nanos();
+    let email = format!("cadri-signup-{stamp}@cadri.io");
+    let password = format!("Cadri-Signup-{stamp}aA!");
+    let team = format!("Signup Check {stamp}");
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|err| err.to_string())?;
+
+    let mut created = StagingCreated::default();
+    let result = staging_signup_attempt(
+        &http,
+        &StagingAccount {
+            api_key: api_key.clone(),
+            client_id,
+            email,
+            password,
+            team,
+        },
+        &mut created,
+    )
+    .await;
+    let cleaned = staging_cleanup(
+        &http,
+        &api_key,
+        created.user_id.as_deref(),
+        created.org_id.as_deref(),
+    )
+    .await;
+    match (result, cleaned) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(()), Err(err)) => Err(format!("cleanup failed: {err}")),
+        (Err(err), Err(cleanup)) => Err(format!("{err}; cleanup failed: {cleanup}")),
+    }
+}
+
+struct StagingAccount {
+    api_key: String,
+    client_id: String,
+    email: String,
+    password: String,
+    team: String,
+}
+
+#[derive(Default)]
+struct StagingCreated {
+    user_id: Option<String>,
+    org_id: Option<String>,
+}
+
+async fn staging_signup_attempt(
+    http: &reqwest::Client,
+    account: &StagingAccount,
+    created: &mut StagingCreated,
+) -> Result<(), String> {
+    let created_user = workos_call(
+        http.post("https://api.workos.com/user_management/users")
+            .bearer_auth(&account.api_key)
+            .json(&json!({
+                "email": account.email,
+                "password": account.password,
+                "email_verified": true,
+                "first_name": "Signup",
+                "last_name": "Check",
+            })),
+    )
+    .await?;
+    created.user_id = created_user
+        .get("id")
+        .and_then(|id| id.as_str())
+        .map(str::to_string);
+    if created.user_id.is_none() {
+        return Err("WorkOS create user returned no id".to_string());
+    }
+
+    let session = workos_call(
+        http.post("https://api.workos.com/user_management/authenticate")
+            .json(&json!({
+                "client_id": account.client_id,
+                "client_secret": account.api_key,
+                "grant_type": "password",
+                "email": account.email,
+                "password": account.password,
+            })),
+    )
+    .await?;
+    let access_token = session
+        .get("access_token")
+        .and_then(|token| token.as_str())
+        .ok_or("WorkOS password grant returned no access_token")?;
+    let refresh_token = session
+        .get("refresh_token")
+        .and_then(|token| token.as_str())
+        .ok_or("WorkOS password grant returned no refresh_token")?;
+    let cookie = encrypted_session(access_token, refresh_token);
+
+    let workos = Arc::new(WorkOs::new(Config {
+        api_key: account.api_key.clone(),
+        client_id: account.client_id.clone(),
+        cookie_key: cookie_key(),
+        public_url: PUBLIC_URL.to_string(),
+        api_base: "https://api.workos.com".to_string(),
+    })?);
+    let app = cadri_core::router(
+        cadri_core::db::open_in_memory().map_err(|err| err.to_string())?,
+        workos.clone(),
+        Some(cadri_ee::router(workos)),
+    );
+
+    let (status, headers, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": account.team })),
+        ),
+    )
+    .await;
+    if status == StatusCode::CONFLICT && body["error"] == "already_in_organization" {
+        return Err(
+            "a brand-new user already belonged to an organization; domain auto-join may be on"
+                .to_string(),
+        );
+    }
+    if status != StatusCode::OK {
+        return Err(format!(
+            "POST /auth/organization returned {status} {}",
+            body["error"].as_str().unwrap_or("unknown")
+        ));
+    }
+    let created_org = body["org_id"]
+        .as_str()
+        .ok_or("organization response has no org_id")?
+        .to_string();
+    if body["org_name"] != account.team || body["email"] != account.email {
+        return Err("organization response did not echo the team name and email".to_string());
+    }
+    created.org_id = Some(created_org.clone());
+
+    let session_cookie = set_cookie(&headers, cadri_ee::SESSION_COOKIE)
+        .map(cookie_pair)
+        .ok_or("naming a team did not set a session cookie")?;
+    let (status, _, me) = send(&app, get_with("/api/me", &[("cookie", &session_cookie)])).await;
+    if status != StatusCode::OK || me["org_id"] != created_org {
+        return Err(format!(
+            "GET /api/me returned {status} for org {}",
+            me["error"].as_str().unwrap_or("unknown")
+        ));
+    }
+
+    let transcript_id = format!("signup-{}", created_org.trim_start_matches("org_"));
+    let (status, _, stored) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/transcripts",
+            &[("cookie", &session_cookie)],
+            Some(json!({
+                "session_id": transcript_id,
+                "content": "signup check",
+                "cwd": "/signup",
+                "hook_event": "SignupCheck",
+            })),
+        ),
+    )
+    .await;
+    if status != StatusCode::OK || stored["session_id"] != transcript_id {
+        return Err(format!(
+            "POST /api/transcripts returned {status} {}",
+            stored["error"].as_str().unwrap_or("unknown")
+        ));
+    }
+
+    let (status, _, invite) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[("cookie", &session_cookie)],
+            Some(json!({ "email": account.email, "organization_id": "org_evil" })),
+        ),
+    )
+    .await;
+    if status != StatusCode::CONFLICT || invite["error"] != "already_member" {
+        return Err(format!(
+            "inviting the founder returned {status} {}",
+            invite["error"].as_str().unwrap_or("unknown")
+        ));
+    }
+    Ok(())
+}
+
+async fn workos_call(request: reqwest::RequestBuilder) -> Result<Value, String> {
+    let response = request.send().await.map_err(|err| err.to_string())?;
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(|err| err.to_string())?;
+    let body: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    if !status.is_success() {
+        let code = body
+            .get("code")
+            .or_else(|| body.get("error"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        return Err(format!("WorkOS HTTP {} {code}", status.as_u16()));
+    }
+    Ok(body)
+}
+
+async fn staging_cleanup(
+    http: &reqwest::Client,
+    api_key: &str,
+    user_id: Option<&str>,
+    org_id: Option<&str>,
+) -> Result<(), String> {
+    if let Some(user_id) = user_id {
+        workos_call(
+            http.delete(format!(
+                "https://api.workos.com/user_management/users/{user_id}"
+            ))
+            .bearer_auth(api_key),
+        )
+        .await?;
+    }
+    if let Some(org_id) = org_id {
+        workos_call(
+            http.delete(format!("https://api.workos.com/organizations/{org_id}"))
+                .bearer_auth(api_key),
+        )
+        .await?;
+    }
+    Ok(())
 }
