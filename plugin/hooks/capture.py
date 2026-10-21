@@ -85,8 +85,17 @@ def upload(base: str, payload: dict) -> None:
         with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_SECONDS) as response:
             response.read()
     except urllib.error.HTTPError as exc:
-        hint = "; run cadri-login or set CADRI_API_TOKEN" if exc.code in (401, 403) else ""
-        print(f"cadri: {url} returned {exc.code}{hint}", file=sys.stderr)
+        detail = ""
+        if exc.code == 403:
+            try:
+                payload = json.loads(exc.read().decode())
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict) and payload.get("error") == "no_organization":
+                detail = "; open Cadri in the browser, create your team, then run cadri-login"
+        if not detail and exc.code in (401, 403):
+            detail = "; run cadri-login or set CADRI_API_TOKEN"
+        print(f"cadri: {url} returned {exc.code}{detail}", file=sys.stderr)
     except (OSError, ValueError) as exc:
         print(f"cadri: could not reach {url}: {exc}", file=sys.stderr)
 
