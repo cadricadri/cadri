@@ -98,6 +98,43 @@ pub(crate) struct Session {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct Invitation {
+    pub email: String,
+    pub state: String,
+}
+
+enum Membership {
+    None,
+    One(String),
+    Many,
+}
+
+#[derive(Deserialize)]
+struct WorkOsOrganization {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct WorkOsMembership {
+    organization_id: String,
+    #[serde(default)]
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct MembershipPage {
+    #[serde(default)]
+    data: Vec<WorkOsMembership>,
+    #[serde(default)]
+    list_metadata: ListMetadata,
+}
+
+#[derive(Default, Deserialize)]
+struct ListMetadata {
+    after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct Claims {
     pub sub: String,
     pub org_id: Option<String>,
@@ -220,6 +257,22 @@ impl WorkOs {
             "client_id": self.config.client_id,
             "client_secret": self.config.api_key,
             "refresh_token": refresh_token,
+        }))
+        .await
+    }
+
+    /// Issues a new access token that carries `organization_id`. WorkOS rotates the refresh token.
+    pub(crate) async fn refresh_into(
+        &self,
+        refresh_token: &str,
+        organization_id: &str,
+    ) -> Result<Session, WorkOsError> {
+        self.authenticate_grant(json!({
+            "grant_type": "refresh_token",
+            "client_id": self.config.client_id,
+            "client_secret": self.config.api_key,
+            "refresh_token": refresh_token,
+            "organization_id": organization_id,
         }))
         .await
     }
@@ -382,6 +435,175 @@ impl WorkOs {
         Ok(session)
     }
 
+    /// Gives the signed-in user one organization and a session token that carries it.
+    ///
+    /// AuthKit can register a user who was not invited. That access token has no `org_id`, and
+    /// Cadri stores every transcript under the organization on the token. This creates the
+    /// organization they name and adds them as its admin. An email invitation joins an existing
+    /// organization during signup, so the invitee never reaches here. A token that already names
+    /// an organization is not given a second one. Someone with several memberships is rejected:
+    /// there is no organization switcher.
+    pub(crate) async fn establish_team(
+        &self,
+        headers: &HeaderMap,
+        name: &str,
+    ) -> Result<(Identity, Session), ApiError> {
+        let session = read_session(&self.cookie_jar(headers)).ok_or_else(ApiError::unauthorized)?;
+        let claims = self
+            .verify(&session.access_token, false)
+            .await
+            .map_err(token_error)?;
+        if let Some(org_id) = nonempty(&claims.org_id) {
+            match self.verify(&session.access_token, true).await {
+                Ok(_) => {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "already_in_organization",
+                    ))
+                }
+                Err(TokenError::Expired) => {
+                    let fresh = self
+                        .refresh_into(&session.refresh_token, org_id)
+                        .await
+                        .map_err(workos_call)?;
+                    return self.ready(fresh).await;
+                }
+                Err(err) => return Err(token_error(err)),
+            }
+        }
+        let org_id = match self.memberships(&claims.sub).await.map_err(workos_call)? {
+            Membership::None => {
+                let org = self.create_organization(name).await.map_err(workos_call)?;
+                self.create_admin(&claims.sub, &org.id)
+                    .await
+                    .map_err(workos_call)?;
+                org.id
+            }
+            Membership::One(org_id) => org_id,
+            Membership::Many => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "multiple_organizations",
+                ))
+            }
+        };
+        let fresh = self
+            .refresh_into(&session.refresh_token, &org_id)
+            .await
+            .map_err(workos_call)?;
+        self.ready(fresh).await
+    }
+
+    /// Sends a WorkOS invitation email. The organization is the one on the session token.
+    pub(crate) async fn invite_member(
+        &self,
+        headers: &HeaderMap,
+        email: &str,
+    ) -> Result<(HeaderMap, Invitation), ApiError> {
+        let authenticated = self.authenticate_session(headers).await?;
+        let invitation = self
+            .send_invitation(
+                email,
+                &authenticated.identity.org_id,
+                &authenticated.identity.user_id,
+            )
+            .await
+            .map_err(workos_call)?;
+        Ok((authenticated.headers, invitation))
+    }
+
+    async fn ready(&self, session: Session) -> Result<(Identity, Session), ApiError> {
+        let claims = self
+            .verify(&session.access_token, true)
+            .await
+            .map_err(token_error)?;
+        let identity = self.identity(claims).await?;
+        Ok((identity, session))
+    }
+
+    async fn memberships(&self, user_id: &str) -> Result<Membership, WorkOsError> {
+        let url = reqwest::Url::parse_with_params(
+            &self.url("/user_management/organization_memberships"),
+            [("user_id", user_id), ("limit", "10")],
+        )
+        .expect("WorkOS API base is a valid URL");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("organization memberships", err))?;
+        let page: MembershipPage = parse_response(response, "organization memberships").await?;
+        let mut orgs: Vec<String> = page
+            .data
+            .into_iter()
+            .filter(|membership| membership.status == "active")
+            .map(|membership| membership.organization_id)
+            .collect();
+        orgs.sort();
+        orgs.dedup();
+        let more = page
+            .list_metadata
+            .after
+            .is_some_and(|cursor| !cursor.is_empty());
+        Ok(match (orgs.len(), more) {
+            (0, false) => Membership::None,
+            (1, false) => Membership::One(orgs.remove(0)),
+            _ => Membership::Many,
+        })
+    }
+
+    async fn create_organization(&self, name: &str) -> Result<WorkOsOrganization, WorkOsError> {
+        let response = self
+            .http
+            .post(self.url("/organizations"))
+            .bearer_auth(&self.config.api_key)
+            .json(&json!({ "name": name }))
+            .send()
+            .await
+            .map_err(|err| unavailable("create organization", err))?;
+        parse_response(response, "create organization").await
+    }
+
+    async fn create_admin(&self, user_id: &str, organization_id: &str) -> Result<(), WorkOsError> {
+        let response = self
+            .http
+            .post(self.url("/user_management/organization_memberships"))
+            .bearer_auth(&self.config.api_key)
+            .json(&json!({
+                "user_id": user_id,
+                "organization_id": organization_id,
+                "role_slug": "admin",
+            }))
+            .send()
+            .await
+            .map_err(|err| unavailable("create organization membership", err))?;
+        let _: Value = parse_response(response, "create organization membership").await?;
+        Ok(())
+    }
+
+    async fn send_invitation(
+        &self,
+        email: &str,
+        organization_id: &str,
+        inviter_user_id: &str,
+    ) -> Result<Invitation, WorkOsError> {
+        let response = self
+            .http
+            .post(self.url("/user_management/invitations"))
+            .bearer_auth(&self.config.api_key)
+            .json(&json!({
+                "email": email,
+                "organization_id": organization_id,
+                "inviter_user_id": inviter_user_id,
+            }))
+            .send()
+            .await
+            .map_err(|err| unavailable("invitation", err))?;
+        parse_response(response, "invitation").await
+    }
+
     async fn authenticate_session(&self, headers: &HeaderMap) -> Result<Authenticated, ApiError> {
         if let Some(token) = bearer_token(headers) {
             let claims = self.verify(token, true).await.map_err(token_error)?;
@@ -436,6 +658,31 @@ pub(crate) fn session_cookie(session: &Session) -> Cookie<'static> {
 
 pub(crate) fn workos_unavailable() -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, "workos_unavailable")
+}
+
+fn nonempty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn workos_call(err: WorkOsError) -> ApiError {
+    match err {
+        WorkOsError::Unavailable => workos_unavailable(),
+        WorkOsError::Api(code) => {
+            eprintln!("WorkOS rejected the request: {code}");
+            match code.as_str() {
+                "user_already_organization_member" => {
+                    ApiError::new(StatusCode::CONFLICT, "already_member")
+                }
+                "invitation_already_exists" | "invite_already_sent" | "email_already_invited" => {
+                    ApiError::new(StatusCode::CONFLICT, "already_invited")
+                }
+                _ => ApiError::new(StatusCode::BAD_GATEWAY, "workos_rejected"),
+            }
+        }
+    }
 }
 
 fn token_error(err: TokenError) -> ApiError {

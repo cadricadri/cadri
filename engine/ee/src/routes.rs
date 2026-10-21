@@ -29,6 +29,8 @@ pub fn router(workos: Arc<WorkOs>) -> Router {
         .route("/auth/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
+        .route("/auth/organization", post(create_organization))
+        .route("/auth/invitations", post(create_invitation))
         .route("/auth/device/start", post(device_start))
         .route("/auth/device/token", post(device_token))
         .route("/auth/refresh", post(refresh))
@@ -70,6 +72,16 @@ struct DeviceTokenRequest {
 #[derive(Deserialize)]
 struct RefreshRequest {
     refresh_token: String,
+}
+
+#[derive(Deserialize)]
+struct OrganizationRequest {
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct InvitationRequest {
+    email: String,
 }
 
 #[derive(Serialize)]
@@ -156,6 +168,67 @@ async fn callback(
         .remove(Cookie::build(LOGIN_COOKIE).path(LOGIN_COOKIE_PATH))
         .add(session_cookie(&session));
     Ok((jar, Redirect::to(&state.return_to)).into_response())
+}
+
+const MAX_ORGANIZATION_NAME: usize = 100;
+const MAX_EMAIL: usize = 254;
+
+fn organization_name(raw: &str) -> Result<String, ApiError> {
+    let name = raw.trim();
+    if name.is_empty()
+        || name.chars().count() > MAX_ORGANIZATION_NAME
+        || name.chars().any(char::is_control)
+    {
+        return Err(bad_request("invalid_organization_name"));
+    }
+    Ok(name.to_string())
+}
+
+/// One `@`, a domain with a dot, and no whitespace. WorkOS sends the invitation to this address.
+fn invitation_email(raw: &str) -> Result<String, ApiError> {
+    let email = raw.trim();
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(bad_request("invalid_email"));
+    };
+    if local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || !domain.contains('.')
+        || email.len() > MAX_EMAIL
+        || email.chars().any(char::is_whitespace)
+    {
+        return Err(bad_request("invalid_email"));
+    }
+    Ok(email.to_string())
+}
+
+async fn create_organization(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+    body: Result<Json<OrganizationRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body?;
+    let name = organization_name(&body.name)?;
+    let (identity, session) = workos.establish_team(&headers, &name).await?;
+    let jar = workos.cookie_jar(&headers).add(session_cookie(&session));
+    Ok((jar, Json(identity)).into_response())
+}
+
+async fn create_invitation(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+    body: Result<Json<InvitationRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(body) = body?;
+    let email = invitation_email(&body.email)?;
+    let (session_headers, invitation) = workos.invite_member(&headers, &email).await?;
+    let mut response = Json(json!({
+        "email": invitation.email,
+        "state": invitation.state,
+    }))
+    .into_response();
+    response.headers_mut().extend(session_headers);
+    Ok(response)
 }
 
 async fn logout(State(workos): State<Arc<WorkOs>>, headers: HeaderMap) -> Response {
@@ -269,5 +342,31 @@ mod tests {
         assert_eq!(decoded.nonce, "n");
         assert_eq!(decoded.return_to, "/x");
         assert!(decode_state("not base64!").is_none());
+    }
+
+    #[test]
+    fn organization_name_is_trimmed_and_bounded() {
+        assert_eq!(organization_name("  Company A  ").unwrap(), "Company A");
+        assert!(organization_name("   ").is_err());
+        assert!(organization_name(&"a".repeat(MAX_ORGANIZATION_NAME + 1)).is_err());
+        assert!(organization_name("line\nbreak").is_err());
+    }
+
+    #[test]
+    fn invitation_email_requires_a_domain() {
+        assert_eq!(
+            invitation_email("  Dev@CompanyA.example ").unwrap(),
+            "Dev@CompanyA.example"
+        );
+        for bad in [
+            "",
+            "dev",
+            "dev@",
+            "@company.example",
+            "dev@company",
+            "a b@company.example",
+        ] {
+            assert!(invitation_email(bad).is_err(), "{bad}");
+        }
     }
 }
