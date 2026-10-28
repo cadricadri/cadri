@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -34,6 +35,9 @@ pub fn router(workos: Arc<WorkOs>) -> Router {
         .route("/auth/device/start", post(device_start))
         .route("/auth/device/token", post(device_token))
         .route("/auth/refresh", post(refresh))
+        .route("/api/billing", get(billing_status))
+        .route("/api/billing/portal", post(billing_portal))
+        .route("/api/stripe/webhook", post(stripe_webhook))
         .with_state(workos)
 }
 
@@ -82,6 +86,11 @@ struct OrganizationRequest {
 #[derive(Deserialize)]
 struct InvitationRequest {
     email: String,
+}
+
+#[derive(Deserialize)]
+struct BillingQuery {
+    portal_return: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -229,6 +238,54 @@ async fn create_invitation(
     .into_response();
     response.headers_mut().extend(session_headers);
     Ok(response)
+}
+
+async fn billing_status(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+    query: Result<Query<BillingQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (authenticated, claims) = workos.authenticate_session(&headers).await?;
+    let portal_return = query.portal_return.as_deref() == Some("1");
+    let (summary, refreshed) = workos
+        .billing_summary(
+            &authenticated.identity,
+            &claims.entitlements,
+            &headers,
+            portal_return,
+        )
+        .await?;
+    let mut response = Json(summary).into_response();
+    let extra = if refreshed.is_empty() {
+        &authenticated.headers
+    } else {
+        &refreshed
+    };
+    response.headers_mut().extend(extra.clone());
+    Ok(response)
+}
+
+async fn billing_portal(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (authenticated, _) = workos.authenticate_session(&headers).await?;
+    let url = workos.billing_portal(&authenticated.identity).await?;
+    Ok(Json(json!({ "url": url })))
+}
+
+async fn stripe_webhook(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let signature = headers
+        .get("stripe-signature")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    workos.handle_stripe_webhook(&body, signature).await?;
+    Ok(StatusCode::OK)
 }
 
 async fn logout(State(workos): State<Arc<WorkOs>>, headers: HeaderMap) -> Response {
