@@ -260,9 +260,11 @@ button {
 
 h1 {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-weight: 800;
+  font-size: clamp(32px, 4vw, 44px);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  text-shadow: 3px 0 var(--pink), -3px 0 var(--cyan);
 }
 
 .lede,
@@ -1155,6 +1157,9 @@ tr.transcript-hit td {
 
 .memory-preview h1 {
   font-size: 1.45rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-shadow: none;
 }
 
 .memory-preview h2 {
@@ -1289,14 +1294,6 @@ a.author-mark:hover span {
   .tree-chevron {
     transition: none;
   }
-}
-
-.team-title {
-  font-weight: 800;
-  font-size: clamp(32px, 4vw, 44px);
-  line-height: 1.05;
-  letter-spacing: -0.04em;
-  text-shadow: 3px 0 var(--pink), -3px 0 var(--cyan);
 }
 
 .team-invite {
