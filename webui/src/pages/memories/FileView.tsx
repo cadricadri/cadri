@@ -142,20 +142,23 @@ export function FileView({
               )}
           </div>
         </div>
-        <div className="memory-tabs" role="tablist" aria-label="File view">
-          {(["preview", "code"] as const).map((item) => (
-            <button
-              key={item}
-              type="button"
-              role="tab"
-              id={`file-tab-${item}`}
-              aria-selected={tab === item}
-              aria-controls={`file-panel-${item}`}
-              onClick={() => onTab(item)}
-            >
-              {item === "preview" ? "Preview" : "Code"}
-            </button>
-          ))}
+        <div className="memory-tabbar">
+          <div className="memory-tabs" role="tablist" aria-label="File view">
+            {(["preview", "code"] as const).map((item) => (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                id={`file-tab-${item}`}
+                aria-selected={tab === item}
+                aria-controls={`file-panel-${item}`}
+                onClick={() => onTab(item)}
+              >
+                {item === "preview" ? "Preview" : "Code"}
+              </button>
+            ))}
+          </div>
+          <Contributors file={file} />
         </div>
       </div>
       {tab === "preview" ? (
@@ -164,7 +167,7 @@ export function FileView({
         </section>
       ) : (
         <section className="memory-edit" id="file-panel-code" role="tabpanel" aria-labelledby="file-tab-code">
-          {blameOpen ? <BlameLegend file={file} /> : null}
+          {blameOpen ? <BlameLegend /> : null}
           <div className="memory-editor">
             <button
               className="code-blame-bar"
@@ -224,8 +227,24 @@ function CodeLines({ lines, numbersRef }: { lines: string[]; numbersRef?: Ref<HT
 
 const heatStops = ["1", "2", "3", "4", "5"] as const;
 
-function BlameLegend({ file }: { file: MemoryFile }) {
+function Contributors({ file }: { file: MemoryFile }) {
   const people = contributors(file);
+  return (
+    <div className="blame-contributors">
+      <span className="blame-faces">
+        {people.slice(0, 4).map((author) => (
+          <span key={authorKey(author)} title={author.kind === "human" ? author.label : author.session_id}>
+            {author.kind === "human" ? <HumanMark /> : <RobotMark />}
+          </span>
+        ))}
+      </span>
+      <span>Contributors</span>
+      <strong>{people.length}</strong>
+    </div>
+  );
+}
+
+function BlameLegend() {
   return (
     <div className="blame-legend">
       <div className="blame-scale" aria-hidden="true">
@@ -234,17 +253,6 @@ function BlameLegend({ file }: { file: MemoryFile }) {
           <i key={stop} className="blame-swatch" data-heat={stop} />
         ))}
         <span>Newer</span>
-      </div>
-      <div className="blame-contributors">
-        <span className="blame-faces">
-          {people.slice(0, 4).map((author) => (
-            <span key={authorKey(author)} title={author.kind === "human" ? author.label : author.session_id}>
-              {author.kind === "human" ? <HumanMark /> : <RobotMark />}
-            </span>
-          ))}
-        </span>
-        <span>Contributors</span>
-        <strong>{people.length}</strong>
       </div>
     </div>
   );

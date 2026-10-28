@@ -840,10 +840,19 @@ tr.transcript-hit td {
   border-bottom: 1px solid var(--line);
 }
 
+.memory-tabbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 12px;
+}
+
 .memory-tabs {
   display: flex;
   gap: 2px;
   padding: 0 8px;
+  min-width: 0;
 }
 
 .memory-tabs button {
