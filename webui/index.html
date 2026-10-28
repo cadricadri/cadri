@@ -3,68 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Cadri transcripts</title>
+    <title>Cadri</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="icon" href="/favicon/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon/favicon.ico" sizes="48x48" />
+    <link rel="icon" href="/favicon/favicon-32.png" type="image/png" sizes="32x32" />
+    <link rel="apple-touch-icon" href="/favicon/favicon-180.png" />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400&family=Silkscreen:wght@400;700&display=swap"
+    />
   </head>
   <body>
-    <main>
-      <header>
-        <h1>Transcripts</h1>
-        <div id="actions">
-          <form id="invite-form" hidden>
-            <label for="invite-email">Teammate's email</label>
-            <input
-              id="invite-email"
-              type="email"
-              autocomplete="email"
-              required
-              placeholder="teammate@company.com"
-            />
-            <button type="submit">Send invite</button>
-            <span id="invite-status"></span>
-          </form>
-          <button id="refresh" type="button">Refresh</button>
-        </div>
-      </header>
-      <p id="status"></p>
-      <form id="org-form" hidden>
-        <p class="token-hint">
-          Name the team this account belongs to. Transcripts are shared with that team.
-          Someone joins this team only when they accept an email invite. Signing up without an
-          invite starts a separate team.
-        </p>
-        <div class="token-fields">
-          <label for="org-name">Team name</label>
-          <input id="org-name" name="name" required maxlength="100" autocomplete="organization" />
-          <button type="submit">Create team</button>
-        </div>
-        <p id="org-status" class="form-status"></p>
-      </form>
-      <form id="token-form" hidden>
-        <p class="token-hint">
-          The API token is saved in <code>docker/.env</code> and printed when Docker starts Cadri.
-          Share it with other people on your local network so they can open Cadri.
-          Anyone with the token can read and write transcripts.
-        </p>
-        <div class="token-fields">
-          <label for="token-input">API token</label>
-          <input id="token-input" type="password" autocomplete="off" required />
-          <button type="submit">Save</button>
-        </div>
-      </form>
-      <table id="transcripts">
-        <thead>
-          <tr>
-            <th>Session</th>
-            <th>Updated</th>
-            <th>Directory</th>
-            <th>Hook</th>
-            <th>Bytes</th>
-            <th>Transcript</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </main>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
