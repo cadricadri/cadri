@@ -18,6 +18,9 @@ use tower::ServiceExt;
 const CLIENT_ID: &str = "client_test";
 const API_KEY: &str = "sk_test_key";
 const PUBLIC_URL: &str = "https://cadri.test";
+const STRIPE_KEY: &str = "sk_test_stripe";
+const STRIPE_PRICE: &str = "price_test";
+const STRIPE_WEBHOOK: &str = "whsec_test";
 const SIGNING_KEY: &[u8] = include_bytes!("fixtures/test-only-signing-key.pem");
 const OTHER_KEY: &[u8] = include_bytes!("fixtures/test-only-other-key.pem");
 const JWKS: &str = include_str!("fixtures/test-only-jwks.json");
@@ -47,6 +50,16 @@ struct Directory {
     admin_roles: Vec<(String, String)>,
     /// WorkOS `list_metadata.after`. A non-empty cursor means more memberships exist.
     membership_after: Option<String>,
+    /// WorkOS organization id -> Stripe customer id, set by the billing update.
+    stripe_customers: Vec<(String, String)>,
+    subscription_status: String,
+    trial_end: Option<i64>,
+    payment_method: Option<String>,
+    meter_events: Vec<String>,
+    resumes: usize,
+    portal_sessions: usize,
+    cancels: usize,
+    portal_configuration: Option<String>,
 }
 
 #[derive(Clone)]
@@ -210,11 +223,15 @@ async fn mock_list_memberships(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let user_id = query.get("user_id").cloned().unwrap_or_default();
+    let organization_id = query.get("organization_id").cloned().unwrap_or_default();
     let directory = mock.directory.lock().unwrap();
     let data: Vec<Value> = directory
         .memberships
         .iter()
-        .filter(|(user, _, _)| user == &user_id)
+        .filter(|(user, org, _)| {
+            (user_id.is_empty() || user == &user_id)
+                && (organization_id.is_empty() || org == &organization_id)
+        })
         .map(|(user, org_id, status)| {
             json!({
                 "object": "organization_membership",
@@ -224,7 +241,13 @@ async fn mock_list_memberships(
             })
         })
         .collect();
-    let after = directory.membership_after.clone();
+    // The "another page" flag is for user lookups. Seat counts list by organization and
+    // must not follow a cursor that never ends.
+    let after = if user_id.is_empty() {
+        None
+    } else {
+        directory.membership_after.clone()
+    };
     Json(json!({ "data": data, "list_metadata": { "before": null, "after": after } }))
         .into_response()
 }
@@ -299,7 +322,194 @@ async fn mock_create_invitation(
     .into_response()
 }
 
+fn stripe_authorized(headers: &HeaderMap) -> bool {
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some(&format!("Bearer {STRIPE_KEY}"));
+    let version = headers
+        .get("stripe-version")
+        .and_then(|value| value.to_str().ok());
+    bearer && version == Some(cadri_ee::API_VERSION)
+}
+
+fn subscription_json(directory: &Directory) -> Value {
+    let status = if directory.subscription_status.is_empty() {
+        "trialing"
+    } else {
+        directory.subscription_status.as_str()
+    };
+    json!({
+        "id": "sub_1",
+        "object": "subscription",
+        "customer": "cus_1",
+        "status": status,
+        "trial_end": directory.trial_end.unwrap_or(now() + 30 * 24 * 60 * 60),
+        "default_payment_method": directory.payment_method,
+    })
+}
+
+async fn mock_update_organization(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let customer = body["stripe_customer_id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    mock.directory
+        .lock()
+        .unwrap()
+        .stripe_customers
+        .push((id.clone(), customer.clone()));
+    Json(json!({ "id": id, "name": body["name"], "stripe_customer_id": customer })).into_response()
+}
+
+async fn mock_stripe_customer(headers: HeaderMap, body: String) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    assert!(
+        body.contains("organization_id"),
+        "stripe customer is not tied to a team: {body}"
+    );
+    Json(json!({ "id": "cus_1" })).into_response()
+}
+
+async fn mock_stripe_get_customer(headers: HeaderMap, State(mock): State<Mock>) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let method = mock.directory.lock().unwrap().payment_method.clone();
+    Json(json!({
+        "id": "cus_1",
+        "invoice_settings": { "default_payment_method": method }
+    }))
+    .into_response()
+}
+
+async fn mock_stripe_subscription(
+    headers: HeaderMap,
+    State(mock): State<Mock>,
+    body: String,
+) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    assert!(body.contains("trial_period_days=30"), "{body}");
+    assert!(
+        body.contains("missing_payment_method=pause") || body.contains("pause"),
+        "{body}"
+    );
+    let mut directory = mock.directory.lock().unwrap();
+    if directory.trial_end.is_none() {
+        directory.trial_end = Some(now() + 30 * 24 * 60 * 60);
+    }
+    Json(subscription_json(&directory)).into_response()
+}
+
+async fn mock_stripe_get_subscription(headers: HeaderMap, State(mock): State<Mock>) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let directory = mock.directory.lock().unwrap();
+    Json(subscription_json(&directory)).into_response()
+}
+
+async fn mock_stripe_resume(headers: HeaderMap, State(mock): State<Mock>) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut directory = mock.directory.lock().unwrap();
+    directory.resumes += 1;
+    directory.subscription_status = "active".to_string();
+    Json(subscription_json(&directory)).into_response()
+}
+
+async fn mock_stripe_cancel(headers: HeaderMap, State(mock): State<Mock>) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut directory = mock.directory.lock().unwrap();
+    directory.cancels += 1;
+    directory.subscription_status = "canceled".to_string();
+    Json(subscription_json(&directory)).into_response()
+}
+
+async fn mock_list_portal_configurations(headers: HeaderMap, State(mock): State<Mock>) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let id = mock.directory.lock().unwrap().portal_configuration.clone();
+    let data = id
+        .map(|id| json!([{ "id": id, "metadata": { "cadri": "portal" } }]))
+        .unwrap_or_else(|| json!([]));
+    Json(json!({ "data": data })).into_response()
+}
+
+async fn mock_save_portal_configuration(
+    headers: HeaderMap,
+    State(mock): State<Mock>,
+    body: String,
+) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    assert!(
+        body.contains("features%5Bpayment_method_update%5D%5Benabled%5D=true"),
+        "{body}"
+    );
+    assert!(
+        body.contains("features%5Binvoice_history%5D%5Benabled%5D=false"),
+        "{body}"
+    );
+    assert!(
+        body.contains("features%5Bsubscription_cancel%5D%5Benabled%5D=false"),
+        "{body}"
+    );
+    let mut directory = mock.directory.lock().unwrap();
+    if directory.portal_configuration.is_none() {
+        directory.portal_configuration = Some("bpc_1".to_string());
+    }
+    let id = directory.portal_configuration.clone().unwrap_or_default();
+    Json(json!({ "id": id, "metadata": { "cadri": "portal" } })).into_response()
+}
+
+async fn mock_stripe_portal(
+    headers: HeaderMap,
+    State(mock): State<Mock>,
+    body: String,
+) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    assert!(body.contains("bpc_1"), "{body}");
+    mock.directory.lock().unwrap().portal_sessions += 1;
+    Json(json!({ "url": "https://billing.stripe.test/p/session_test" })).into_response()
+}
+
+async fn mock_stripe_meter(headers: HeaderMap, State(mock): State<Mock>, body: String) -> Response {
+    if !stripe_authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    mock.directory.lock().unwrap().meter_events.push(body);
+    Json(json!({ "object": "billing.meter_event" })).into_response()
+}
+
 async fn setup() -> (Router, Mock) {
+    setup_inner(false).await
+}
+
+async fn setup_billing() -> (Router, Mock) {
+    setup_inner(true).await
+}
+
+async fn setup_inner(billing: bool) -> (Router, Mock) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mock = Mock {
@@ -318,18 +528,47 @@ async fn setup() -> (Router, Mock) {
         .route("/sso/jwks/{client_id}", get(mock_jwks))
         .route("/user_management/users/{id}", get(mock_user))
         .route("/organizations", post(mock_create_organization))
-        .route("/organizations/{id}", get(mock_organization))
+        .route(
+            "/organizations/{id}",
+            get(mock_organization).put(mock_update_organization),
+        )
+        .route("/v1/customers", post(mock_stripe_customer))
+        .route("/v1/customers/{id}", get(mock_stripe_get_customer))
+        .route("/v1/subscriptions", post(mock_stripe_subscription))
+        .route(
+            "/v1/subscriptions/{id}",
+            get(mock_stripe_get_subscription).delete(mock_stripe_cancel),
+        )
+        .route("/v1/subscriptions/{id}/resume", post(mock_stripe_resume))
+        .route(
+            "/v1/billing_portal/configurations",
+            get(mock_list_portal_configurations).post(mock_save_portal_configuration),
+        )
+        .route(
+            "/v1/billing_portal/configurations/{id}",
+            post(mock_save_portal_configuration),
+        )
+        .route("/v1/billing_portal/sessions", post(mock_stripe_portal))
+        .route("/v1/billing/meter_events", post(mock_stripe_meter))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, mock_app).await.unwrap() });
 
     let workos = Arc::new(
-        WorkOs::new(Config {
-            api_key: API_KEY.to_string(),
-            client_id: CLIENT_ID.to_string(),
-            cookie_key: cookie_key(),
-            public_url: PUBLIC_URL.to_string(),
-            api_base: base,
-        })
+        WorkOs::with_stripe(
+            Config {
+                api_key: API_KEY.to_string(),
+                client_id: CLIENT_ID.to_string(),
+                cookie_key: cookie_key(),
+                public_url: PUBLIC_URL.to_string(),
+                api_base: base.clone(),
+            },
+            billing.then(|| cadri_ee::StripeConfig {
+                secret_key: STRIPE_KEY.to_string(),
+                price_id: STRIPE_PRICE.to_string(),
+                webhook_secret: STRIPE_WEBHOOK.to_string(),
+                api_base: base,
+            }),
+        )
         .unwrap(),
     );
     let engine = cadri_core::router(
@@ -1407,4 +1646,396 @@ async fn staging_cleanup(
         .await?;
     }
     Ok(())
+}
+
+async fn open_team(app: &Router, mock: &Mock) -> (String, String) {
+    let cookie = no_org_cookie(mock);
+    let (status, headers, body) = send(
+        app,
+        request(
+            Method::POST,
+            "/auth/organization",
+            &[("cookie", &cookie)],
+            Some(json!({ "name": "Company A" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let session = cookie_pair(set_cookie(&headers, cadri_ee::SESSION_COOKIE).unwrap());
+    let org_id = body["org_id"].as_str().unwrap().to_string();
+    (session, org_id)
+}
+
+fn entitled_token(mock: &Mock, org_id: &str) -> String {
+    sign(
+        SIGNING_KEY,
+        json!({
+            "iss": mock.issuer(),
+            "sub": "user_1",
+            "sid": "session_1",
+            "org_id": org_id,
+            "exp": now() + 300,
+            "iat": now(),
+            "entitlements": ["cadri"],
+        }),
+    )
+}
+
+#[tokio::test]
+async fn billing_stays_off_until_stripe_is_configured() {
+    let (app, mock) = setup().await;
+    let auth = bearer(&mock.valid_token("org_1"));
+    let (status, _, body) = send(&app, get_with("/api/billing", &[("authorization", &auth)])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "billing_disabled" }));
+    let (status, _, _) = send(
+        &app,
+        get_with("/api/transcripts", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn naming_a_team_starts_a_thirty_day_trial() {
+    let (app, mock) = setup_billing().await;
+    let (session, org_id) = open_team(&app, &mock).await;
+    assert_eq!(org_id, "org_new_1");
+    assert_eq!(
+        mock.directory.lock().unwrap().stripe_customers,
+        vec![("org_new_1".to_string(), "cus_1".to_string())]
+    );
+    let (status, _, billing) = send(&app, get_with("/api/billing", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::OK, "{billing}");
+    assert_eq!(billing["status"], "trialing");
+    assert_eq!(billing["access"], true);
+    assert_eq!(billing["seat_count"], 1);
+    assert!(billing["trial_end"].as_i64().unwrap() > now());
+    let (status, _, _) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_paused_trial_locks_the_product_until_the_entitlement_returns() {
+    let (app, mock) = setup_billing().await;
+    let (session, org_id) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_pause",
+        "type": "customer.subscription.paused",
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "paused",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    let raw = payload.to_string();
+    let signature = cadri_ee::sign_webhook(STRIPE_WEBHOOK, now(), raw.as_bytes());
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/stripe/webhook",
+            &[("stripe-signature", &signature)],
+            Some(payload),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let (status, _, body) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body, json!({ "error": "payment_required" }));
+    let (status, _, _) = send(&app, get_with("/api/me", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations",
+            &[("cookie", &session)],
+            Some(json!({ "email": "new@company.example" })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body, json!({ "error": "payment_required" }));
+
+    let auth = bearer(&entitled_token(&mock, &org_id));
+    let (status, _, _) = send(
+        &app,
+        get_with("/api/transcripts", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_active_subscription_reports_the_current_seat_count() {
+    let (app, mock) = setup_billing().await;
+    let (_session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_active",
+        "type": "customer.subscription.updated",
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "active",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    let raw = payload.to_string();
+    let signature = cadri_ee::sign_webhook(STRIPE_WEBHOOK, now(), raw.as_bytes());
+    let (status, _, _) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/stripe/webhook",
+            &[("stripe-signature", &signature)],
+            Some(payload),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = mock.directory.lock().unwrap().meter_events.clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(events[0].contains("workos_seat_count"), "{}", events[0]);
+    assert!(events[0].contains("cus_1"), "{}", events[0]);
+    assert!(events[0].contains("=1"), "{}", events[0]);
+}
+
+#[tokio::test]
+async fn a_bad_webhook_signature_is_rejected() {
+    let (app, _) = setup_billing().await;
+    let payload = json!({ "id": "evt", "type": "customer.subscription.updated" });
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/stripe/webhook",
+            &[("stripe-signature", "t=1,v1=00")],
+            Some(payload),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, json!({ "error": "invalid_signature" }));
+}
+
+#[tokio::test]
+async fn the_billing_portal_resumes_a_paused_trial_that_has_a_card() {
+    let (app, mock) = setup_billing().await;
+    let (session, _) = open_team(&app, &mock).await;
+    {
+        let mut directory = mock.directory.lock().unwrap();
+        directory.subscription_status = "paused".to_string();
+        directory.payment_method = Some("pm_1".to_string());
+    }
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/billing/portal",
+            &[("cookie", &session)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["url"], "https://billing.stripe.test/p/session_test");
+
+    let (status, _, billing) = send(
+        &app,
+        get_with("/api/billing?portal_return=1", &[("cookie", &session)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{billing}");
+    assert_eq!(billing["status"], "active");
+    assert_eq!(mock.directory.lock().unwrap().resumes, 1);
+}
+
+async fn post_webhook(app: &Router, payload: Value) -> StatusCode {
+    let raw = payload.to_string();
+    let signature = cadri_ee::sign_webhook(STRIPE_WEBHOOK, now(), raw.as_bytes());
+    let (status, _, _) = send(
+        app,
+        request(
+            Method::POST,
+            "/api/stripe/webhook",
+            &[("stripe-signature", &signature)],
+            Some(payload),
+        ),
+    )
+    .await;
+    status
+}
+
+#[tokio::test]
+async fn a_repeated_active_event_reports_the_seat_count_once() {
+    let (app, mock) = setup_billing().await;
+    let (_session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_active_once",
+        "type": "customer.subscription.updated",
+        "created": now(),
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "active",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload.clone()).await, StatusCode::OK);
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    assert_eq!(mock.directory.lock().unwrap().meter_events.len(), 1);
+}
+
+#[tokio::test]
+async fn an_older_event_does_not_replace_a_newer_subscription() {
+    let (app, mock) = setup_billing().await;
+    let (_session, org_id) = open_team(&app, &mock).await;
+    let active = json!({
+        "id": "evt_newer",
+        "type": "customer.subscription.updated",
+        "created": now(),
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "active",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    let stale = json!({
+        "id": "evt_older",
+        "type": "customer.subscription.updated",
+        "created": now() - 1_000,
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "past_due",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, active).await, StatusCode::OK);
+    assert_eq!(post_webhook(&app, stale).await, StatusCode::OK);
+    let auth = bearer(&entitled_token(&mock, &org_id));
+    let (status, _, _) = send(
+        &app,
+        get_with("/api/transcripts", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_past_due_subscription_stays_locked_while_the_entitlement_remains() {
+    let (app, mock) = setup_billing().await;
+    let (_session, org_id) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_past_due",
+        "type": "customer.subscription.updated",
+        "created": now(),
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "past_due",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    let auth = bearer(&entitled_token(&mock, &org_id));
+    let (status, _, body) = send(
+        &app,
+        get_with("/api/transcripts", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body, json!({ "error": "payment_required" }));
+}
+
+#[tokio::test]
+async fn a_failed_invoice_with_no_retries_left_cancels_the_subscription() {
+    let (app, mock) = setup_billing().await;
+    let (_session, org_id) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_invoice_final",
+        "type": "invoice.payment_failed",
+        "created": now(),
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "customer": "cus_1",
+                "subscription": "sub_1",
+                "next_payment_attempt": null,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload.clone()).await, StatusCode::OK);
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    assert_eq!(mock.directory.lock().unwrap().cancels, 1);
+    let auth = bearer(&entitled_token(&mock, &org_id));
+    let (status, _, _) = send(
+        &app,
+        get_with("/api/transcripts", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+}
+
+#[tokio::test]
+async fn a_failed_invoice_keeps_retrying_until_stripe_stops() {
+    let (app, mock) = setup_billing().await;
+    let (_session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_invoice_retry",
+        "type": "invoice.payment_failed",
+        "created": now(),
+        "api_version": cadri_ee::API_VERSION,
+        "data": {
+            "object": {
+                "customer": "cus_1",
+                "subscription": "sub_1",
+                "next_payment_attempt": 1_800_000_000,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    assert_eq!(mock.directory.lock().unwrap().cancels, 0);
+}
+
+#[tokio::test]
+async fn a_webhook_from_another_api_version_is_rejected() {
+    let (app, mock) = setup_billing().await;
+    let (_session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_old_version",
+        "type": "customer.subscription.updated",
+        "created": now(),
+        "api_version": "2020-08-27",
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "active",
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::BAD_REQUEST);
+    assert!(mock.directory.lock().unwrap().meter_events.is_empty());
 }

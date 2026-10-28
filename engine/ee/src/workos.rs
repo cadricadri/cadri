@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, StatusCode};
@@ -9,6 +9,12 @@ use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
 use base64::Engine;
 use cadri_core::auth::bearer_token;
 use cadri_core::{ApiError, AuthFuture, Authenticated, Authenticator, Identity};
+use rusqlite::Connection;
+
+use crate::stripe::StripeConfig;
+
+pub(crate) mod billing;
+pub use billing::sign_webhook;
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
@@ -134,12 +140,15 @@ struct ListMetadata {
     after: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Claims {
     pub sub: String,
     pub org_id: Option<String>,
     pub sid: Option<String>,
     pub exp: i64,
+    /// Stripe features copied onto the token by the WorkOS Stripe add-on.
+    #[serde(default)]
+    pub entitlements: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -181,6 +190,8 @@ struct Jwks {
 pub struct WorkOs {
     config: Config,
     http: reqwest::Client,
+    stripe: Option<StripeConfig>,
+    db: OnceLock<std::sync::Arc<Mutex<Connection>>>,
     issuers: [String; 2],
     jwks: tokio::sync::Mutex<Jwks>,
     refreshes: tokio::sync::Mutex<HashMap<String, (Instant, Session)>>,
@@ -189,6 +200,10 @@ pub struct WorkOs {
 
 impl WorkOs {
     pub fn new(config: Config) -> Result<WorkOs, String> {
+        Self::with_stripe(config, None)
+    }
+
+    pub fn with_stripe(config: Config, stripe: Option<StripeConfig>) -> Result<WorkOs, String> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
@@ -201,6 +216,8 @@ impl WorkOs {
         Ok(WorkOs {
             config,
             http,
+            stripe,
+            db: OnceLock::new(),
             issuers,
             jwks: Default::default(),
             refreshes: Default::default(),
@@ -462,6 +479,7 @@ impl WorkOs {
                     ))
                 }
                 Err(TokenError::Expired) => {
+                    self.ensure_account(org_id, &claims.sub).await?;
                     let fresh = self
                         .refresh_into(&session.refresh_token, org_id)
                         .await
@@ -487,6 +505,7 @@ impl WorkOs {
                 ))
             }
         };
+        self.ensure_account(&org_id, &claims.sub).await?;
         let fresh = self
             .refresh_into(&session.refresh_token, &org_id)
             .await
@@ -500,7 +519,16 @@ impl WorkOs {
         headers: &HeaderMap,
         email: &str,
     ) -> Result<(HeaderMap, Invitation), ApiError> {
-        let authenticated = self.authenticate_session(headers).await?;
+        let (authenticated, claims) = self.authenticate_session(headers).await?;
+        if !self
+            .access_allowed(&claims.entitlements, &authenticated.identity)
+            .await?
+        {
+            return Err(ApiError::new(
+                StatusCode::PAYMENT_REQUIRED,
+                "payment_required",
+            ));
+        }
         let invitation = self
             .send_invitation(
                 email,
@@ -554,6 +582,67 @@ impl WorkOs {
         })
     }
 
+    pub(crate) async fn set_stripe_customer(
+        &self,
+        organization_id: &str,
+        stripe_customer_id: &str,
+        name: &str,
+    ) -> Result<(), WorkOsError> {
+        let response = self
+            .http
+            .put(self.url(&format!("/organizations/{organization_id}")))
+            .bearer_auth(&self.config.api_key)
+            .json(&json!({
+                "name": name,
+                "stripe_customer_id": stripe_customer_id,
+            }))
+            .send()
+            .await
+            .map_err(|err| unavailable("set stripe customer", err))?;
+        let _: Value = parse_response(response, "set stripe customer").await?;
+        Ok(())
+    }
+
+    pub(crate) async fn active_member_count(
+        &self,
+        organization_id: &str,
+    ) -> Result<u64, WorkOsError> {
+        let mut count = 0u64;
+        let mut after: Option<String> = None;
+        for _ in 0..20 {
+            let mut pairs = vec![
+                ("organization_id", organization_id.to_string()),
+                ("limit", "100".to_string()),
+            ];
+            if let Some(cursor) = &after {
+                pairs.push(("after", cursor.clone()));
+            }
+            let url = reqwest::Url::parse_with_params(
+                &self.url("/user_management/organization_memberships"),
+                pairs.iter().map(|(key, value)| (key, value.as_str())),
+            )
+            .expect("WorkOS API base is a valid URL");
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(&self.config.api_key)
+                .send()
+                .await
+                .map_err(|err| unavailable("organization memberships", err))?;
+            let page: MembershipPage = parse_response(response, "organization memberships").await?;
+            count += page
+                .data
+                .iter()
+                .filter(|membership| membership.status == "active")
+                .count() as u64;
+            after = page.list_metadata.after.filter(|cursor| !cursor.is_empty());
+            if after.is_none() {
+                return Ok(count);
+            }
+        }
+        Ok(count)
+    }
+
     async fn create_organization(&self, name: &str) -> Result<WorkOsOrganization, WorkOsError> {
         let response = self
             .http
@@ -604,27 +693,37 @@ impl WorkOs {
         parse_response(response, "invitation").await
     }
 
-    async fn authenticate_session(&self, headers: &HeaderMap) -> Result<Authenticated, ApiError> {
+    pub(crate) async fn authenticate_session(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(Authenticated, Claims), ApiError> {
         if let Some(token) = bearer_token(headers) {
             let claims = self.verify(token, true).await.map_err(token_error)?;
-            return Ok(self.identity(claims).await?.into());
+            let identity = self.identity(claims.clone()).await?;
+            return Ok((identity.into(), claims));
         }
         let session = read_session(&self.cookie_jar(headers)).ok_or_else(ApiError::unauthorized)?;
         match self.verify(&session.access_token, true).await {
-            Ok(claims) => Ok(self.identity(claims).await?.into()),
+            Ok(claims) => {
+                let identity = self.identity(claims.clone()).await?;
+                Ok((identity.into(), claims))
+            }
             Err(TokenError::Expired) => {
                 let fresh = self.refresh_session(&session.refresh_token).await?;
                 let claims = self
                     .verify(&fresh.access_token, true)
                     .await
                     .map_err(token_error)?;
-                let identity = self.identity(claims).await?;
+                let identity = self.identity(claims.clone()).await?;
                 let jar = PrivateCookieJar::new(self.config.cookie_key.clone())
                     .add(session_cookie(&fresh));
-                Ok(Authenticated {
-                    identity,
-                    headers: jar.into_response().into_parts().0.headers,
-                })
+                Ok((
+                    Authenticated {
+                        identity,
+                        headers: jar.into_response().into_parts().0.headers,
+                    },
+                    claims,
+                ))
             }
             Err(err) => Err(token_error(err)),
         }
@@ -636,8 +735,33 @@ impl Authenticator for WorkOs {
         "workos"
     }
 
+    fn bind_db(&self, db: std::sync::Arc<Mutex<Connection>>) {
+        self.prepare_billing(&db);
+    }
+
     fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> AuthFuture<'a> {
-        Box::pin(self.authenticate_session(headers))
+        Box::pin(async move {
+            self.authenticate_session(headers)
+                .await
+                .map(|(authenticated, _)| authenticated)
+        })
+    }
+
+    fn authorize<'a>(&'a self, headers: &'a HeaderMap, path: &'a str) -> AuthFuture<'a> {
+        Box::pin(async move {
+            let (authenticated, claims) = self.authenticate_session(headers).await?;
+            if path == "/api/me"
+                || self
+                    .access_allowed(&claims.entitlements, &authenticated.identity)
+                    .await?
+            {
+                return Ok(authenticated);
+            }
+            Err(ApiError::new(
+                StatusCode::PAYMENT_REQUIRED,
+                "payment_required",
+            ))
+        })
     }
 }
 

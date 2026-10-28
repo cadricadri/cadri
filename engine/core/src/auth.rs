@@ -1,8 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::http::{header, HeaderMap};
+use rusqlite::Connection;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
@@ -42,6 +43,16 @@ pub trait Authenticator: Send + Sync {
     /// Reported by `GET /api/auth/config`: "none", "token" or "workos".
     fn mode(&self) -> &'static str;
     fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> AuthFuture<'a>;
+
+    /// The hosted edition stores subscription state in the engine database. Other editions ignore it.
+    fn bind_db(&self, _db: Arc<Mutex<Connection>>) {}
+
+    /// `authenticate`, then any edition-specific access check for `path`.
+    /// The default allows every authenticated caller.
+    fn authorize<'a>(&'a self, headers: &'a HeaderMap, path: &'a str) -> AuthFuture<'a> {
+        let _ = path;
+        self.authenticate(headers)
+    }
 }
 
 pub struct NoAuth;

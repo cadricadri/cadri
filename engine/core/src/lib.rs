@@ -64,12 +64,12 @@ struct AppState {
     auth: Arc<dyn Authenticator>,
 }
 
-/// Builds the engine router. `extra` is merged as-is (unauthenticated), e.g. ee's `/auth/*`.
+/// Builds the engine router. `extra` is merged outside `require_auth`, e.g. ee's `/auth/*`
+/// and billing routes, which authenticate themselves.
 pub fn router(db: Connection, auth: Arc<dyn Authenticator>, extra: Option<Router>) -> Router {
-    let state = AppState {
-        db: Arc::new(Mutex::new(db)),
-        auth,
-    };
+    let db = Arc::new(Mutex::new(db));
+    auth.bind_db(Arc::clone(&db));
+    let state = AppState { db, auth };
     let protected = Router::new()
         .route("/api/me", get(me))
         .route(
@@ -188,7 +188,8 @@ async fn shutdown_signal() {
 }
 
 async fn require_auth(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
-    let authenticated = match state.auth.authenticate(request.headers()).await {
+    let path = request.uri().path().to_string();
+    let authenticated = match state.auth.authorize(request.headers(), &path).await {
         Ok(authenticated) => authenticated,
         Err(err) => return err.into_response(),
     };
