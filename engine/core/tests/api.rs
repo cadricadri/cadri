@@ -64,6 +64,17 @@ fn get_request(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
+fn put_json(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::PUT)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
 fn post_transcript(session_id: &str, content: &str, headers: &[(&str, &str)]) -> Request<Body> {
     let mut builder = Request::builder()
         .method(Method::POST)
@@ -227,6 +238,58 @@ async fn extra_routes_are_merged_without_auth() {
     );
     let response = app.oneshot(get_request("/auth/ping", &[])).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn memories_start_from_the_sample_and_stay_inside_the_org() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let a = [("x-test-org", "org-a")];
+    let b = [("x-test-org", "org-b")];
+    let (status, _, body) = send(&app, get_request("/api/memories", &a)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["files"].as_array().unwrap().len(), 8);
+    assert_eq!(body["commits"][0]["id"], "c_oncall01");
+    assert_eq!(body["files"][0]["path"], "README.md");
+
+    let mut edited = body.clone();
+    edited["commits"][0]["message"] = json!("Edited by org a");
+    let (status, _, saved) = send(&app, put_json("/api/memories", &edited, &a)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["commits"][0]["message"], "Edited by org a");
+
+    let (_, _, again) = send(&app, get_request("/api/memories", &a)).await;
+    assert_eq!(again["commits"][0]["message"], "Edited by org a");
+    let (_, _, other) = send(&app, get_request("/api/memories", &b)).await;
+    assert_eq!(
+        other["commits"][0]["message"],
+        "Record the on-call latency finding"
+    );
+
+    let (status, _, rejected) = send(
+        &app,
+        put_json(
+            "/api/memories",
+            &json!({ "files": [{ "path": "../secret", "content": "x", "blame": [] }], "commits": [] }),
+            &a,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid memory path");
+}
+
+#[tokio::test]
+async fn memories_require_the_api_token() {
+    let app = app(Arc::new(TokenAuth::new("secret")));
+    let (status, _, _) = send(&app, get_request("/api/memories", &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, body) = send(
+        &app,
+        get_request("/api/memories", &[("authorization", "Bearer secret")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["files"].as_array().unwrap().len() > 0);
 }
 
 #[tokio::test]

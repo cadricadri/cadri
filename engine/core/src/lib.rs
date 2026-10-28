@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod db;
+mod memories;
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,6 +19,7 @@ use serde_json::{json, Value};
 
 pub use auth::{AuthFuture, Authenticated, Authenticator, Identity};
 use db::{IncomingTranscript, Transcript};
+use memories::{MemoryBooks, MemoryStore};
 
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
@@ -62,6 +65,7 @@ impl From<QueryRejection> for ApiError {
 struct AppState {
     db: Arc<Mutex<Connection>>,
     auth: Arc<dyn Authenticator>,
+    memories: Arc<Mutex<MemoryBooks>>,
 }
 
 /// Builds the engine router. `extra` is merged outside `require_auth`, e.g. ee's `/auth/*`
@@ -69,13 +73,18 @@ struct AppState {
 pub fn router(db: Connection, auth: Arc<dyn Authenticator>, extra: Option<Router>) -> Router {
     let db = Arc::new(Mutex::new(db));
     auth.bind_db(Arc::clone(&db));
-    let state = AppState { db, auth };
+    let state = AppState {
+        db,
+        auth,
+        memories: Arc::new(Mutex::new(HashMap::new())),
+    };
     let protected = Router::new()
         .route("/api/me", get(me))
         .route(
             "/api/transcripts",
             get(list_transcripts).post(post_transcript),
         )
+        .route("/api/memories", get(get_memories).put(put_memories))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     let mut app = Router::new()
         .route("/healthz", get(healthz))
@@ -250,6 +259,38 @@ async fn post_transcript(
         )
     })?;
     Ok(Json(stored))
+}
+
+fn lock_memories(state: &AppState) -> Result<MutexGuard<'_, MemoryBooks>, ApiError> {
+    state.memories.lock().map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "memory store lock poisoned",
+        )
+    })
+}
+
+async fn get_memories(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Json<MemoryStore>, ApiError> {
+    let mut books = lock_memories(&state)?;
+    let store = books
+        .entry(identity.org_id)
+        .or_insert_with(MemoryStore::seed);
+    Ok(Json(store.clone()))
+}
+
+async fn put_memories(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    body: Result<Json<MemoryStore>, JsonRejection>,
+) -> Result<Json<MemoryStore>, ApiError> {
+    let Json(store) = body?;
+    store.check()?;
+    let mut books = lock_memories(&state)?;
+    books.insert(identity.org_id, store.clone());
+    Ok(Json(store))
 }
 
 async fn list_transcripts(

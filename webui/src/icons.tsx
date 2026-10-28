@@ -62,3 +62,78 @@ const glyphs: Record<string, ReactNode> = {
 export function NavGlyph({ name }: { name: keyof typeof glyphs }) {
   return <span className="nav-icon">{glyphs[name]}</span>;
 }
+
+function PixelMark({ children }: { children: ReactNode }) {
+  return (
+    <svg className="author-icon" viewBox="0 0 18 18" width="18" height="18" aria-hidden="true" shapeRendering="crispEdges">
+      {children}
+    </svg>
+  );
+}
+
+function blocks(items: Array<[number, number, number, number, string]>) {
+  return items.map(([x, y, width, height, fill]) => (
+    <rect key={`${x}-${y}-${width}-${fill}`} x={x} y={y} width={width} height={height} fill={fill} />
+  ));
+}
+
+export function HumanMark() {
+  const hat = "#ff9ed2";
+  const brim = "#f06aaf";
+  const skin = "#ffc7a3";
+  const hair = "#2a2438";
+  const shirt = "#6aa6ff";
+  const sleeve = "#4d86e0";
+  const pants = "#3c3a55";
+  return (
+    <PixelMark>
+      {blocks([
+        [6, 1, 6, 1, "#ffe4f4"],
+        [5, 2, 8, 2, hat],
+        [3, 4, 12, 1, brim],
+        [4, 5, 2, 2, hair],
+        [12, 5, 2, 2, hair],
+        [6, 5, 6, 4, skin],
+        [7, 6, 1, 1, "var(--ink)"],
+        [10, 6, 1, 1, "var(--ink)"],
+        [8, 8, 2, 1, "#e08a78"],
+        [5, 9, 8, 4, shirt],
+        [4, 10, 1, 2, sleeve],
+        [13, 10, 1, 2, sleeve],
+        [3, 11, 1, 1, skin],
+        [14, 11, 1, 1, skin],
+        [6, 13, 2, 3, pants],
+        [10, 13, 2, 3, pants],
+      ])}
+    </PixelMark>
+  );
+}
+
+export function RobotMark() {
+  const body = "#4c93e0";
+  const shade = "#2f6cb8";
+  const eye = "#d9f6ff";
+  const star = "#ffe27a";
+  return (
+    <PixelMark>
+      {blocks([
+        [8, 0, 2, 1, star],
+        [7, 1, 4, 1, star],
+        [8, 2, 2, 1, star],
+        [8, 3, 2, 1, shade],
+        [4, 4, 10, 6, body],
+        [4, 4, 10, 1, shade],
+        [6, 6, 2, 2, eye],
+        [10, 6, 2, 2, eye],
+        [6, 6, 1, 1, "#f4fdff"],
+        [10, 6, 1, 1, "#f4fdff"],
+        [7, 9, 4, 1, shade],
+        [5, 10, 8, 4, body],
+        [3, 11, 2, 2, shade],
+        [13, 11, 2, 2, shade],
+        [6, 14, 2, 2, shade],
+        [10, 14, 2, 2, shade],
+      ])}
+    </PixelMark>
+  );
+}
