@@ -23,5 +23,6 @@ export type MemoryCommit = {
 
 export type MemoryStore = {
   files: MemoryFile[];
+  directories: string[];
   commits: MemoryCommit[];
 };

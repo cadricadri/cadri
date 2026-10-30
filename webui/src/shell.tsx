@@ -320,10 +320,63 @@ function AccountFooter() {
   );
 }
 
+const themeKey = "cadri-theme";
+
+type ThemeChoice = "auto" | "dark" | "light";
+
+function readTheme(): ThemeChoice {
+  try {
+    const value = localStorage.getItem(themeKey);
+    return value === "dark" || value === "light" ? value : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function applyTheme(choice: ThemeChoice): void {
+  if (choice === "auto") {
+    document.documentElement.removeAttribute("data-theme");
+    return;
+  }
+  document.documentElement.dataset.theme = choice;
+}
+
+function ThemeToggle() {
+  const [choice, setChoice] = useState<ThemeChoice>(readTheme);
+
+  useEffect(() => {
+    applyTheme(choice);
+    try {
+      if (choice === "auto") {
+        localStorage.removeItem(themeKey);
+      } else {
+        localStorage.setItem(themeKey, choice);
+      }
+    } catch {
+      // The choice still applies for this visit when storage is blocked.
+    }
+  }, [choice]);
+
+  function flip(): void {
+    const mediaDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    const showing = choice === "auto" ? (mediaDark ? "dark" : "light") : choice;
+    setChoice(showing === "light" ? "dark" : "light");
+  }
+
+  return (
+    <button className="theme-toggle" type="button" aria-label="Switch light or dark theme" onClick={flip}>
+      ◐
+    </button>
+  );
+}
+
 function SupportLine() {
   return (
-    <p className="nav-support">
-      questions? <a href="mailto:support@cadri.io">support@cadri.io</a>
-    </p>
+    <div className="nav-meta">
+      <ThemeToggle />
+      <p className="nav-support">
+        questions? <a href="mailto:support@cadri.io">support@cadri.io</a>
+      </p>
+    </div>
   );
 }

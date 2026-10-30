@@ -3,11 +3,13 @@ import { useEffect, type ReactNode } from "react";
 export function Page({
   title,
   actions,
+  beside,
   children,
   fill = false,
 }: {
   title: string;
   actions?: ReactNode;
+  beside?: ReactNode;
   children?: ReactNode;
   fill?: boolean;
 }) {
@@ -18,7 +20,10 @@ export function Page({
   return (
     <section className={fill ? "page page-fill" : "page"}>
       <div className="page-head">
-        <h1>{title}</h1>
+        <div className="page-title">
+          <h1>{title}</h1>
+          {beside}
+        </div>
         {actions}
       </div>
       {children}

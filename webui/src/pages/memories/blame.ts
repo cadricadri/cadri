@@ -92,13 +92,20 @@ export function applySave(
   if (!file || trimmed.length === 0 || (sameContent && samePath)) {
     return store;
   }
-  if (!samePath && (!isMemoryPath(nextPath) || store.files.some((item) => item.path === nextPath))) {
+  if (
+    !samePath &&
+    (!isMemoryPath(nextPath) ||
+      store.files.some((item) => item.path === nextPath) ||
+      store.directories.some((directory) => directory === nextPath || directory.startsWith(`${nextPath}/`)) ||
+      store.files.some((item) => item.path !== path && item.path.startsWith(`${nextPath}/`)))
+  ) {
     return store;
   }
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   const blame = sameContent ? file.blame : reattribute(file.blame, file.content, content, author, commitId);
   return {
     files: store.files.map((item) => (item.path === path ? { ...item, path: nextPath, content, blame } : item)),
+    directories: store.directories,
     commits: [
       {
         id: commitId,
@@ -115,7 +122,7 @@ export function applySave(
   };
 }
 
-function isMemoryPath(path: string): boolean {
+export function isMemoryPath(path: string): boolean {
   if (path.length === 0 || path.startsWith("/") || path.includes("\\")) {
     return false;
   }

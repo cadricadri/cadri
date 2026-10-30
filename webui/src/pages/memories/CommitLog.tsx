@@ -13,6 +13,10 @@ export function CommitLog({ commits, onOpen }: { commits: MemoryCommit[]; onOpen
     [commits],
   );
 
+  if (ordered.length === 0) {
+    return <p className="memory-empty">No commits yet.</p>;
+  }
+
   return (
     <ol className="memory-log">
       {ordered.map((commit) => (

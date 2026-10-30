@@ -13,9 +13,12 @@ export type FileNode = {
 
 export type TreeNode = FolderNode | FileNode;
 
-export function buildTree(paths: string[]): TreeNode[] {
+export function buildTree(filePaths: string[], directories: string[] = []): TreeNode[] {
   const root: FolderNode = { kind: "folder", name: "", path: "", children: [] };
-  for (const path of paths) {
+  for (const path of directories) {
+    ensureFolder(root, path);
+  }
+  for (const path of filePaths) {
     const parts = path.split("/").filter((part) => part.length > 0);
     let cursor = root;
     for (let index = 0; index < parts.length; index += 1) {
@@ -23,21 +26,39 @@ export function buildTree(paths: string[]): TreeNode[] {
       const childPath = parts.slice(0, index + 1).join("/");
       const last = index === parts.length - 1;
       if (last) {
-        cursor.children.push({ kind: "file", name, path: childPath });
+        if (!cursor.children.some((child) => child.name === name)) {
+          cursor.children.push({ kind: "file", name, path: childPath });
+        }
         continue;
       }
-      let folder = cursor.children.find(
-        (child): child is FolderNode => child.kind === "folder" && child.name === name,
-      );
-      if (!folder) {
-        folder = { kind: "folder", name, path: childPath, children: [] };
-        cursor.children.push(folder);
-      }
-      cursor = folder;
+      cursor = ensureChildFolder(cursor, name, childPath);
     }
   }
   sortNodes(root.children);
   return root.children;
+}
+
+function ensureFolder(root: FolderNode, path: string): void {
+  const parts = path.split("/").filter((part) => part.length > 0);
+  let cursor = root;
+  for (let index = 0; index < parts.length; index += 1) {
+    const name = parts[index] ?? "";
+    const childPath = parts.slice(0, index + 1).join("/");
+    cursor = ensureChildFolder(cursor, name, childPath);
+  }
+}
+
+function ensureChildFolder(cursor: FolderNode, name: string, path: string): FolderNode {
+  const existing = cursor.children.find((child) => child.name === name);
+  if (existing?.kind === "folder") {
+    return existing;
+  }
+  if (existing) {
+    return cursor;
+  }
+  const folder: FolderNode = { kind: "folder", name, path, children: [] };
+  cursor.children.push(folder);
+  return folder;
 }
 
 export function folderPaths(nodes: TreeNode[]): string[] {
