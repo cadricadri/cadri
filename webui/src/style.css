@@ -227,6 +227,17 @@ button {
   word-break: break-word;
 }
 
+.nav-support {
+  margin: 0;
+  color: var(--mute);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.nav-support a {
+  color: inherit;
+}
+
 .main {
   flex: 1;
   min-width: 0;
