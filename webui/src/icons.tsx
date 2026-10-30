@@ -45,7 +45,7 @@ const glyphs: Record<string, ReactNode> = {
       <path d="M9.3 10c.75-.35 1.5-.45 2.2-.25 1.05.4 1.75 1.35 2.05 2.85" />
     </Glyph>
   ),
-  support: (
+  docs: (
     <Glyph>
       <path d="M2.6 3.1h4.1A1.7 1.7 0 0 1 8 4.4V13a1.6 1.6 0 0 0-1.3-.45H2.6z" />
       <path d="M13.4 3.1H9.3A1.7 1.7 0 0 0 8 4.4V13c.4-.3.85-.45 1.3-.45h4.1z" />

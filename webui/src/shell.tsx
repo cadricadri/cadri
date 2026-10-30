@@ -8,7 +8,6 @@ const Memories = lazy(() => import("./pages/Memories"));
 const Transcripts = lazy(() => import("./pages/Transcripts"));
 const Usage = lazy(() => import("./pages/Usage"));
 const Team = lazy(() => import("./pages/Team"));
-const Support = lazy(() => import("./pages/Support"));
 const Billing = lazy(() => import("./pages/Billing"));
 
 const NARROW = "(max-width: 959px)";
@@ -36,7 +35,6 @@ export function App() {
           <Route path="/" element={<Memories />} />
           <Route path="/transcripts" element={<Transcripts />} />
           <Route path="/usage" element={<Usage />} />
-          <Route path="/support" element={<Support />} />
           <Route
             path="/team"
             element={
@@ -178,10 +176,10 @@ function Shell({ children }: { children: ReactNode }) {
               Team
             </NavLink>
           ) : null}
-          <NavLink to="/support" className={linkClass} data-tone="cyan">
-            <NavGlyph name="support" />
-            Docs & Support
-          </NavLink>
+          <a className="nav-link" data-tone="cyan" href="https://cadri.io/docs">
+            <NavGlyph name="docs" />
+            Docs
+          </a>
           {session.workos ? (
             <NavLink to="/billing" className={linkClass} data-tone="pink">
               <NavGlyph name="billing" />
@@ -280,11 +278,16 @@ function AccountFooter() {
         <button className="btn ghost" type="button" onClick={session.forgetToken}>
           Forget token
         </button>
+        <SupportLine />
       </footer>
     );
   }
   if (session.mode !== "workos" || !session.me) {
-    return null;
+    return (
+      <footer className="nav-footer">
+        <SupportLine />
+      </footer>
+    );
   }
   const me = session.me;
   return (
@@ -312,6 +315,15 @@ function AccountFooter() {
       >
         Sign out
       </button>
+      <SupportLine />
     </footer>
+  );
+}
+
+function SupportLine() {
+  return (
+    <p className="nav-support">
+      questions? <a href="mailto:support@cadri.io">support@cadri.io</a>
+    </p>
   );
 }
