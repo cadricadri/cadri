@@ -10,44 +10,60 @@ export type FileTab = "preview" | "code";
 
 export function FileView({
   file,
+  createIn,
   commits,
   paths,
+  directories = [],
   tab,
   onTab,
   onSave,
+  onEditingChange,
+  onDiscard,
 }: {
   file: MemoryFile;
+  createIn?: string;
   commits: MemoryCommit[];
   paths: string[];
+  directories?: string[];
   tab: FileTab;
   onTab: (tab: FileTab) => void;
   onSave: (content: string, message: string, nextPath: string) => void;
+  onEditingChange: (editing: boolean) => void;
+  onDiscard?: () => void;
 }) {
-  const filename = file.path.split("/").pop() ?? file.path;
-  const directory = file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
+  const creating = createIn !== undefined;
+  const filename = creating ? "" : (file.path.split("/").pop() ?? file.path);
+  const directory = creating ? createIn : file.path.includes("/") ? file.path.slice(0, file.path.lastIndexOf("/")) : "";
   const [buffer, setBuffer] = useState(file.content);
   const [name, setName] = useState(filename);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(creating);
   const [blameOpen, setBlameOpen] = useState(false);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   const numbersRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLDivElement>(null);
   const focusEdit = useRef(false);
-  const parts = file.path.split("/");
+  const place = directory.length > 0 ? directory.split("/") : [];
   const lines = buffer.split("\n");
   const nextPath = memoryPath(directory, name);
   const nameChanged = nextPath !== null && nextPath !== file.path;
   const contentChanged = buffer !== file.content;
-  const nameTaken = nextPath !== null && nextPath !== file.path && paths.includes(nextPath);
-  const canCommit = nextPath !== null && !nameTaken && (contentChanged || nameChanged);
+  const fileClash = nextPath !== null && nextPath !== file.path && paths.includes(nextPath);
+  const folderClash =
+    nextPath !== null &&
+    directories.some((item) => item === nextPath || item.startsWith(`${nextPath}/`));
+  const nameTaken = fileClash || folderClash;
+  const canCommit = nextPath !== null && !nameTaken && (creating || contentChanged || nameChanged);
   const nameProblem =
     name.trim() === filename
       ? null
       : nextPath === null
         ? "Use a file name without slashes."
-        : nameTaken
+        : fileClash
           ? "A file with this name already exists."
-          : null;
+          : folderClash
+            ? "A folder with this name already exists."
+            : null;
 
   function syncScroll(): void {
     const text = textRef.current;
@@ -63,11 +79,23 @@ export function FileView({
   }
 
   useEffect(() => {
+    if (creating && tab === "code") {
+      nameRef.current?.focus();
+      return;
+    }
     if (editing && tab === "code" && focusEdit.current) {
       focusEdit.current = false;
       textRef.current?.focus();
     }
-  }, [editing, tab]);
+  }, [creating, editing, tab]);
+
+  useEffect(() => {
+    onEditingChange(editing);
+  }, [editing, onEditingChange]);
+
+  useEffect(() => {
+    return () => onEditingChange(false);
+  }, [onEditingChange]);
 
   function startEdit(): void {
     focusEdit.current = true;
@@ -78,6 +106,10 @@ export function FileView({
   }
 
   function cancel(): void {
+    if (creating) {
+      onDiscard?.();
+      return;
+    }
     setBuffer(file.content);
     setName(filename);
     setEditing(false);
@@ -88,8 +120,11 @@ export function FileView({
       return;
     }
     const nextName = nextPath.split("/").pop() ?? nextPath;
-    const message =
-      nameChanged && !contentChanged ? `Rename ${filename} to ${nextName}` : `Update ${nextName}`;
+    const message = creating
+      ? `Create ${nextPath}`
+      : nameChanged && !contentChanged
+        ? `Rename ${filename} to ${nextName}`
+        : `Update ${nextName}`;
     onSave(buffer, message, nextPath);
   }
 
@@ -98,41 +133,46 @@ export function FileView({
       <div className="memory-file-head">
         <div className="memory-slug">
           <p className="memory-crumb">
-            {parts.map((part, index) => {
-              const last = index === parts.length - 1;
-              return (
-                <span key={`${part}-${index}`}>
-                  {index > 0 ? (
-                    <span className="memory-sep" aria-hidden="true">
-                      /
-                    </span>
-                  ) : null}
-                  {last && editing && tab === "code" ? (
-                    <input
-                      className="memory-name"
-                      aria-label="File name"
-                      aria-invalid={nameProblem !== null}
-                      value={name}
-                      size={Math.max(name.length, 8)}
-                      spellCheck={false}
-                      onChange={(event) => setName(event.target.value)}
-                    />
-                  ) : (
-                    <span aria-current={last ? "page" : undefined}>{part}</span>
-                  )}
-                </span>
-              );
-            })}
+            {place.map((part, index) => (
+              <span key={`${part}-${index}`}>
+                {index > 0 ? (
+                  <span className="memory-sep" aria-hidden="true">
+                    /
+                  </span>
+                ) : null}
+                <span>{part}</span>
+              </span>
+            ))}
+            {place.length > 0 ? (
+              <span className="memory-sep" aria-hidden="true">
+                /
+              </span>
+            ) : null}
+            {creating || (editing && tab === "code") ? (
+              <input
+                ref={nameRef}
+                className="memory-name"
+                aria-label="File name"
+                aria-invalid={nameProblem !== null}
+                placeholder={creating ? "filename.md" : undefined}
+                value={name}
+                size={Math.max(name.length, 12)}
+                spellCheck={false}
+                onChange={(event) => setName(event.target.value)}
+              />
+            ) : (
+              <span aria-current="page">{filename}</span>
+            )}
             {nameProblem ? <span className="memory-name-note">{nameProblem}</span> : null}
           </p>
           <div className="memory-file-actions">
-            {tab === "code" && editing ? (
+            {creating || (tab === "code" && editing) ? (
                 <>
                   <button className="btn ghost" type="button" onClick={cancel}>
-                    Cancel changes
+                    {creating ? "Cancel" : "Cancel changes"}
                   </button>
                   <button className="btn" type="button" disabled={!canCommit} onClick={commit}>
-                    Commit Changes
+                    {creating ? "Create file" : "Commit Changes"}
                   </button>
                 </>
               ) : (
@@ -196,7 +236,7 @@ export function FileView({
                 {editing ? (
                   <textarea
                     ref={textRef}
-                    aria-label={`Edit ${file.path}`}
+                    aria-label={creating ? "New file" : `Edit ${file.path}`}
                     value={buffer}
                     wrap="off"
                     spellCheck={false}

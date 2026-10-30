@@ -21,8 +21,24 @@
   font-family: var(--sans);
 }
 
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121016;
+  --paper: #1c1924;
+  --nav: #17141e;
+  --ink: #f6f1e8;
+  --mute: #a39aaf;
+  --line: #2e2a38;
+  --line-strong: #3d384a;
+  --focus: #7be0f0;
+  --pink: #ff9ed2;
+  --cyan: #7be0f0;
+  --lav: #b9a6ff;
+  --sun: #ffe27a;
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --bg: #121016;
     --paper: #1c1924;
@@ -238,6 +254,31 @@ button {
   color: inherit;
 }
 
+.nav-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-toggle {
+  flex: none;
+  height: 24px;
+  padding: 0 8px;
+  border: 2px solid var(--ink);
+  background: none;
+  color: var(--ink);
+  font-family: var(--px);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.theme-toggle:hover,
+.theme-toggle:focus-visible {
+  background: var(--ink);
+  color: var(--paper);
+}
+
 .main {
   flex: 1;
   min-width: 0;
@@ -267,6 +308,14 @@ button {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.page-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 
 h1 {
@@ -340,6 +389,35 @@ h1 {
 
 .panel h1 {
   margin-bottom: 12px;
+}
+
+.upload-alert {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--ink) 32%, transparent);
+}
+
+.upload-alert .panel {
+  box-shadow: 4px 4px 0 var(--pink);
+}
+
+.upload-alert h2 {
+  margin: 0 0 12px;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  text-shadow: 2px 0 var(--pink), -2px 0 var(--cyan);
+}
+
+.add-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .hint {
@@ -558,7 +636,18 @@ tr.transcript-hit td {
 }
 
 .memory-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
   flex-direction: row;
+}
+
+.memory-pane-head {
+  display: flex;
+  justify-content: flex-start;
+  padding: 8px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
 }
 
 .memory-toolbar {
@@ -616,7 +705,9 @@ tr.transcript-hit td {
 
 .memory-tree-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   min-height: 40px;
   padding: 6px 8px;
@@ -627,7 +718,8 @@ tr.transcript-hit td {
 
 .tree-search {
   position: relative;
-  flex: 1;
+  flex: 1 0 100%;
+  width: 100%;
   min-width: 0;
 }
 
@@ -641,6 +733,7 @@ tr.transcript-hit td {
 
 .tree-search input {
   width: 100%;
+  min-width: 0;
   padding: 6px 8px 6px 26px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
@@ -709,21 +802,69 @@ tr.transcript-hit td {
   font-size: 13px;
 }
 
+.tree-upload,
+.tree-folder,
 .tree-collapse {
   display: grid;
   place-items: center;
   width: 28px;
   height: 28px;
-  margin-left: auto;
   padding: 0;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: var(--paper);
+  color: var(--ink);
   flex: none;
 }
 
+.tree-folder {
+  margin-left: auto;
+}
+
+.tree-upload:disabled,
+.tree-folder:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.tree-upload-input {
+  display: none;
+}
+
+.tree-empty,
+.tree-drop,
+.memory-empty {
+  margin: 0;
+  color: var(--mute);
+  font-size: 13px;
+}
+
+.tree-empty,
+.tree-drop {
+  padding: 12px 10px;
+}
+
+.memory-empty {
+  padding: 28px 20px;
+}
+
+.memory-workspace > .memory-empty {
+  flex: 1;
+}
+
+.memory-tree.dropping {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+
 .memory-tree.narrow .tree-search,
+.memory-tree.narrow .tree-upload,
+.memory-tree.narrow .tree-folder,
+.memory-tree.narrow .tree-add,
+.memory-tree.narrow .tree-mini,
 .memory-tree.narrow .tree-label,
+.memory-tree.narrow .tree-empty,
+.memory-tree.narrow .tree-drop,
 .memory-tree.narrow .tree-row .tree-chevron {
   display: none;
 }
@@ -771,6 +912,128 @@ tr.transcript-hit td {
 .tree-row:hover,
 .tree-row.active {
   background: color-mix(in srgb, var(--pink) 22%, transparent);
+}
+
+.tree-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  font-size: 14px;
+}
+
+.tree-mini {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mute);
+  padding: 0;
+}
+
+.tree-mini:hover,
+.tree-mini:focus-visible {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.tree-mini:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.tree-row-main,
+button.tree-row {
+  cursor: grab;
+}
+
+.tree-row.drag-source {
+  opacity: 0.4;
+}
+
+.tree-row.drop-target,
+.memory-tree-scroll.drop-root {
+  background: color-mix(in srgb, var(--cyan) 40%, var(--paper));
+  box-shadow: inset 0 0 0 1px var(--ink);
+}
+
+.tree-add-open {
+  position: relative;
+  z-index: 5;
+}
+
+.tree-add {
+  position: relative;
+  flex: none;
+}
+
+.tree-add-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 148px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: #14121a;
+  box-shadow: 0 6px 16px rgb(20 18 26 / 12%);
+}
+
+.tree-add-menu button {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.tree-add-menu button:hover,
+.tree-add-menu button:focus-visible {
+  background: #f4f1ea;
+}
+
+.tree-draft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding-top: 4px;
+  padding-bottom: 4px;
+  padding-right: 8px;
+}
+
+.tree-row .tree-draft {
+  flex: 1;
+  padding: 0;
+}
+
+.tree-draft input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 3px 6px;
+  font-size: 14px;
 }
 
 .tree-label {
@@ -833,6 +1096,10 @@ tr.transcript-hit td {
   background: var(--paper);
   color: inherit;
   font: inherit;
+}
+
+.memory-name::placeholder {
+  color: var(--mute);
 }
 
 .memory-name-note {
