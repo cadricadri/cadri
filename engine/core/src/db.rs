@@ -5,7 +5,7 @@ use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const MIGRATION_1: &str = "
 CREATE TABLE IF NOT EXISTS transcripts (
@@ -31,6 +31,20 @@ INSERT INTO transcripts_v1 (org_id, session_id, cwd, hook_event, content, create
 DROP TABLE transcripts;
 ALTER TABLE transcripts_v1 RENAME TO transcripts;
 CREATE INDEX transcripts_org_updated ON transcripts (org_id, updated_at DESC);
+";
+
+const MIGRATION_2: &str = "
+CREATE TABLE memory_repos (
+    org_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (org_id, scope, user_id)
+);
+";
+
+const MIGRATION_3: &str = "
+DROP TABLE IF EXISTS memory_repos;
 ";
 
 const PREVIEW_CHARS: usize = 240;
@@ -89,6 +103,12 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
     if version < 1 {
         transaction.execute_batch(MIGRATION_1)?;
+    }
+    if version < 2 {
+        transaction.execute_batch(MIGRATION_2)?;
+    }
+    if version < 3 {
+        transaction.execute_batch(MIGRATION_3)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()
@@ -359,4 +379,5 @@ mod tests {
         assert!(shown.ends_with('…'));
         assert!(shown.chars().count() <= PREVIEW_CHARS + 1);
     }
+
 }

@@ -1,6 +1,6 @@
 export type MemoryAuthor =
   | { kind: "human"; user_id: string; label: string }
-  | { kind: "robot"; session_id: string };
+  | { kind: "robot"; id: string };
 
 export type BlameEntry = {
   author: MemoryAuthor;

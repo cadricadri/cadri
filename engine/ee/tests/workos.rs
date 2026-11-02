@@ -579,6 +579,16 @@ async fn setup_inner(billing: bool) -> (Router, Mock) {
     (engine, mock)
 }
 
+async fn send_raw(app: &Router, request: Request<Body>) -> (StatusCode, Vec<u8>) {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, bytes)
+}
+
 async fn send(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, Value) {
     let response = app.clone().oneshot(request).await.unwrap();
     let status = response.status();
@@ -1666,6 +1676,20 @@ async fn open_team(app: &Router, mock: &Mock) -> (String, String) {
     (session, org_id)
 }
 
+fn member_token(mock: &Mock, user_id: &str, org_id: &str) -> String {
+    sign(
+        SIGNING_KEY,
+        json!({
+            "iss": mock.issuer(),
+            "sub": user_id,
+            "sid": format!("session-{user_id}"),
+            "org_id": org_id,
+            "exp": now() + 300,
+            "iat": now(),
+        }),
+    )
+}
+
 fn entitled_token(mock: &Mock, org_id: &str) -> String {
     sign(
         SIGNING_KEY,
@@ -2038,4 +2062,187 @@ async fn a_webhook_from_another_api_version_is_rejected() {
     });
     assert_eq!(post_webhook(&app, payload).await, StatusCode::BAD_REQUEST);
     assert!(mock.directory.lock().unwrap().meter_events.is_empty());
+}
+
+#[tokio::test]
+async fn workos_token_isolates_team_and_personal_books() {
+    let (app, mock) = setup().await;
+    let ada = bearer(&member_token(&mock, "user_ada", "org_1"));
+    let sam = bearer(&member_token(&mock, "user_sam", "org_1"));
+    let ada_other = bearer(&member_token(&mock, "user_ada", "org_2"));
+    let ada_h = [("authorization", ada.as_str())];
+    let sam_h = [("authorization", sam.as_str())];
+    let other_h = [("authorization", ada_other.as_str())];
+
+    let (status, _, body) = send(&app, get_with("/api/memories", &ada_h)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["files"].as_array().unwrap().len(), 0);
+
+    let team = json!({
+        "message": "Team note",
+        "changes": [{ "op": "write", "path": "team.md", "content": "shared\n" }]
+    });
+    let (status, _, saved) = send(
+        &app,
+        request(Method::POST, "/api/memories/commits", &ada_h, Some(team)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["files"][0]["blame"][0]["author"]["user_id"],
+        "user_ada"
+    );
+
+    let personal = json!({
+        "message": "Ada note",
+        "changes": [{ "op": "write", "path": "ada.md", "content": "private\n" }]
+    });
+    let (status, _, saved) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/memories/commits?scope=user&user_id=user_sam",
+            &ada_h,
+            Some(personal),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let ada_commit = saved["commits"][0]["id"].as_str().unwrap().to_string();
+
+    let (_, _, sam_team) = send(&app, get_with("/api/memories", &sam_h)).await;
+    assert_eq!(sam_team["files"][0]["content"], "shared\n");
+    let (_, _, sam_personal) = send(&app, get_with("/api/memories?scope=user", &sam_h)).await;
+    assert_eq!(sam_personal["files"].as_array().unwrap().len(), 0);
+    let (_, _, ada_personal) = send(&app, get_with("/api/memories?scope=user", &ada_h)).await;
+    assert_eq!(ada_personal["files"][0]["content"], "private\n");
+    let (_, _, other_team) = send(&app, get_with("/api/memories", &other_h)).await;
+    assert_eq!(other_team["files"].as_array().unwrap().len(), 0);
+    let (_, _, other_personal) = send(&app, get_with("/api/memories?scope=user", &other_h)).await;
+    assert_eq!(other_personal["files"].as_array().unwrap().len(), 0);
+
+    let (status, _, rejected) = send(
+        &app,
+        request(
+            Method::POST,
+            "/api/memories/commits?scope=user",
+            &sam_h,
+            Some(json!({
+                "message": "Remove Ada",
+                "changes": [{ "op": "delete", "path": "ada.md" }]
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid memory path");
+    let (_, _, ada_still) = send(&app, get_with("/api/memories?scope=user", &ada_h)).await;
+    assert_eq!(ada_still["files"][0]["content"], "private\n");
+
+    let (status, bytes) = send_raw(
+        &app,
+        get_with("/git/user.git/info/refs?service=git-upload-pack", &ada_h),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes
+        .windows(ada_commit.len())
+        .any(|window| window == ada_commit.as_bytes()));
+    let (status, sam_bytes) = send_raw(
+        &app,
+        get_with("/git/user.git/info/refs?service=git-upload-pack", &sam_h),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!sam_bytes
+        .windows(ada_commit.len())
+        .any(|window| window == ada_commit.as_bytes()));
+    let (status, other_bytes) = send_raw(
+        &app,
+        get_with("/git/team.git/info/refs?service=git-upload-pack", &other_h),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let team_commit = sam_team["commits"][0]["id"].as_str().unwrap();
+    assert!(!other_bytes
+        .windows(team_commit.len())
+        .any(|window| window == team_commit.as_bytes()));
+
+    let (status, _, body) = send(
+        &app,
+        get_with("/git/org_1.git/info/refs?service=git-upload-pack", &ada_h),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "not found");
+
+    let naked = bearer(&mock.token(None, now() + 300));
+    let (status, _, body) = send(
+        &app,
+        get_with("/api/memories", &[("authorization", naked.as_str())]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "no_organization");
+    let (status, _, body) = send(
+        &app,
+        get_with(
+            "/git/team.git/info/refs?service=git-upload-pack",
+            &[("authorization", naked.as_str())],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "no_organization");
+}
+
+#[tokio::test]
+async fn a_paused_trial_locks_memory_books() {
+    let (app, mock) = setup_billing().await;
+    let (session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_pause_memories",
+        "type": "customer.subscription.paused",
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "paused",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    let cookie = [("cookie", session.as_str())];
+    let (status, _, body) = send(&app, get_with("/api/memories", &cookie)).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"], "payment_required");
+    let (status, _, _) = send(&app, get_with("/api/memories?scope=user", &cookie)).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    let (status, _, body) = send(
+        &app,
+        get_with("/git/team.git/info/refs?service=git-upload-pack", &cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"], "payment_required");
+    let (status, _, body) = send(
+        &app,
+        get_with("/git/user.git/info/refs?service=git-upload-pack", &cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"], "payment_required");
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/git/team.git/git-receive-pack",
+            &cookie,
+            Some(json!({})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(body["error"], "payment_required");
 }

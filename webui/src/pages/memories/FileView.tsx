@@ -273,7 +273,7 @@ function Contributors({ file }: { file: MemoryFile }) {
     <div className="blame-contributors">
       <span className="blame-faces">
         {people.slice(0, 4).map((author) => (
-          <span key={authorKey(author)} title={author.kind === "human" ? author.label : author.session_id}>
+          <span key={authorKey(author)} title={author.kind === "human" ? author.label : author.id}>
             {author.kind === "human" ? <HumanMark /> : <RobotMark />}
           </span>
         ))}
@@ -313,7 +313,7 @@ function contributors(file: MemoryFile): MemoryAuthor[] {
 }
 
 function authorKey(author: MemoryAuthor): string {
-  return author.kind === "human" ? `human:${author.user_id}` : `robot:${author.session_id}`;
+  return author.kind === "human" ? `human:${author.user_id}` : `robot:${author.id}`;
 }
 
 function BlameRail({

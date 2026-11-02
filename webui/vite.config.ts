@@ -12,6 +12,7 @@ export default defineConfig({
       "/api": engine,
       "/auth": engine,
       "/healthz": engine,
+      "/git": engine,
     },
   },
 });

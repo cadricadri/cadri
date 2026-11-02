@@ -12,15 +12,22 @@ name = "cadri-engine"
 path = "src/main.rs"
 
 [dependencies]
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-sdk-sts = "1"
 axum.workspace = true
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 chrono = { version = "0.4.45", features = ["clock"] }
+md-5 = "0.10"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
 tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.4"
 
 [dev-dependencies]
 tower.workspace = true

@@ -4,6 +4,7 @@ import type { Me } from "../ee/workos";
 import { Page } from "../page";
 import { useSession } from "../session";
 import { applySave } from "./memories/blame";
+import { changesBetween } from "./memories/changes";
 import { CommitLog } from "./memories/CommitLog";
 import { FileTree } from "./memories/FileTree";
 import { FileView, type FileTab } from "./memories/FileView";
@@ -158,13 +159,17 @@ export default function Memories() {
     });
   }
 
-  async function persist(next: MemoryStore, openPath?: string): Promise<string | null> {
+  async function persist(previous: MemoryStore, next: MemoryStore, openPath?: string): Promise<string | null> {
+    const diff = changesBetween(previous, next);
+    if (!diff) {
+      return null;
+    }
     const id = ++request.current;
     try {
-      const response = await fetch(memoriesUrl(scope), {
-        method: "PUT",
+      const response = await fetch(commitsUrl(scope), {
+        method: "POST",
         headers: { "content-type": "application/json", ...session.headers() },
-        body: JSON.stringify(next),
+        body: JSON.stringify(diff),
       });
       if (id !== request.current) {
         return null;
@@ -174,7 +179,8 @@ export default function Memories() {
         return null;
       }
       if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? `${response.status} ${response.statusText}`);
       }
       setStore(readStore((await response.json()) as MemoryStore));
       setStatus("");
@@ -214,7 +220,7 @@ export default function Memories() {
       setNotice({ title: "Could not create the file", text: "That file could not be saved." });
       return;
     }
-    const problem = await persist(next, path);
+    const problem = await persist(store, next, path);
     if (problem) {
       setNotice({ title: "Could not create the file", text: problem });
       return;
@@ -230,7 +236,7 @@ export default function Memories() {
     if (next === store) {
       return;
     }
-    const problem = await persist(next, nextPath !== file.path ? nextPath : undefined);
+    const problem = await persist(store, next, nextPath !== file.path ? nextPath : undefined);
     if (problem) {
       setStatus(problem);
     }
@@ -264,7 +270,7 @@ export default function Memories() {
     if (next === store) {
       return;
     }
-    const problem = await persist(next, prepared.drafts[0]?.path);
+    const problem = await persist(store, next, prepared.drafts[0]?.path);
     if (problem) {
       setNotice({ title: "Upload failed", text: problem });
     }
@@ -278,7 +284,7 @@ export default function Memories() {
     if (next === store) {
       return;
     }
-    const problem = await persist(next);
+    const problem = await persist(store, next);
     if (problem) {
       setNotice({ title: "Could not create the folder", text: problem });
     }
@@ -296,7 +302,7 @@ export default function Memories() {
       file && (file.path === from || file.path.startsWith(`${from}/`))
         ? `${to}${file.path.slice(from.length)}`
         : undefined;
-    const problem = await persist(next, openPath);
+    const problem = await persist(store, next, openPath);
     if (problem) {
       setNotice({ title: "Could not rename the folder", text: problem });
     }
@@ -322,7 +328,7 @@ export default function Memories() {
       file && (file.path === from || file.path.startsWith(`${from}/`))
         ? `${planned.path}${file.path.slice(from.length)}`
         : undefined;
-    const problem = await persist(next, openPath);
+    const problem = await persist(store, next, openPath);
     if (problem) {
       setNotice({ title: "Could not move", text: problem });
     }
@@ -426,6 +432,10 @@ export default function Memories() {
 
 function memoriesUrl(scope: MemoryScope): string {
   return scope === "user" ? "/api/memories?scope=user" : "/api/memories";
+}
+
+function commitsUrl(scope: MemoryScope): string {
+  return scope === "user" ? "/api/memories/commits?scope=user" : "/api/memories/commits";
 }
 
 function pickFile(store: MemoryStore | null, requested: string | null) {

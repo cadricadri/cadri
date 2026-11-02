@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,8 @@ use crate::ApiError;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Author {
     Human { user_id: String, label: String },
-    Robot { session_id: String },
+    /// Agent that wrote via a memory skill (not a transcript lookup).
+    Robot { id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,17 +35,26 @@ pub struct MemoryCommit {
     pub files: Vec<String>,
 }
 
-/// Stand-in memory store. Each organization gets a copy of the sample in process memory.
-/// A later git-backed store replaces this.
+/// JSON view of one memory book. The git store is what GET returns and what a UI
+/// commit updates. `seed` is a dev fixture and is not copied into a book.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStore {
     pub files: Vec<MemoryFile>,
+    #[serde(default)]
+    pub directories: Vec<String>,
     pub commits: Vec<MemoryCommit>,
 }
 
-pub type MemoryBooks = HashMap<String, MemoryStore>;
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub(crate) enum Change {
+    Write { path: String, content: String },
+    Delete { path: String },
+    Rename { from: String, to: String },
+}
 
 impl MemoryStore {
+    #[allow(dead_code)]
     pub fn seed() -> Self {
         let ada = Author::Human {
             user_id: "user_ada".to_string(),
@@ -55,10 +65,10 @@ impl MemoryStore {
             label: "sam@example.com".to_string(),
         };
         let oncall_bot = Author::Robot {
-            session_id: "sess_7k2m9qpl".to_string(),
+            id: "oncall-bot".to_string(),
         };
         let deploy_bot = Author::Robot {
-            session_id: "sess_4hn8cwra".to_string(),
+            id: "deploy-bot".to_string(),
         };
         MemoryStore {
             files: vec![
@@ -220,6 +230,7 @@ impl MemoryStore {
                     ],
                 ),
             ],
+            directories: Vec::new(),
             commits: vec![
                 commit(
                     "c_oncall01",
@@ -261,10 +272,16 @@ impl MemoryStore {
         }
     }
 
-    pub fn check(&self) -> Result<(), ApiError> {
-        if self.files.is_empty() {
-            return Err(ApiError::new(StatusCode::BAD_REQUEST, "files are required"));
+    pub fn empty() -> Self {
+        MemoryStore {
+            files: Vec::new(),
+            directories: Vec::new(),
+            commits: Vec::new(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn check(&self) -> Result<(), ApiError> {
         let mut seen = HashSet::new();
         for file in &self.files {
             if !valid_path(&file.path) || !seen.insert(file.path.as_str()) {
@@ -280,19 +297,41 @@ impl MemoryStore {
                 ));
             }
         }
+        let mut directories = HashSet::new();
+        for directory in &self.directories {
+            if !valid_path(directory) || !directories.insert(directory.as_str()) {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid memory path",
+                ));
+            }
+        }
+        for file in &self.files {
+            if directories.contains(file.path.as_str())
+                || self
+                    .directories
+                    .iter()
+                    .any(|directory| is_inside(&file.path, directory))
+            {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid memory path",
+                ));
+            }
+        }
         Ok(())
     }
 }
 
 fn oncall_author() -> Author {
     Author::Robot {
-        session_id: "sess_7k2m9qpl".to_string(),
+        id: "oncall-bot".to_string(),
     }
 }
 
 fn deploy_author() -> Author {
     Author::Robot {
-        session_id: "sess_4hn8cwra".to_string(),
+        id: "deploy-bot".to_string(),
     }
 }
 
@@ -339,10 +378,25 @@ fn commit(id: &str, at: &str, author: Author, message: &str, files: &[&str]) -> 
     }
 }
 
+pub(crate) fn memory_path_ok(path: &str) -> bool {
+    if !valid_path(path) {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.iter().any(|part| part.eq_ignore_ascii_case(".git")) {
+        return false;
+    }
+    parts.iter().rev().skip(1).all(|part| *part != ".keep")
+}
+
 fn valid_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
     path.split('/')
         .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn is_inside(parent: &str, child: &str) -> bool {
+    child.starts_with(parent) && child.as_bytes().get(parent.len()) == Some(&b'/')
 }

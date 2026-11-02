@@ -56,7 +56,7 @@ security_headers() {
 app_locations() {
     hsts=$1
     cat <<EOF
-    location ~ ^/(api/|auth/|healthz\$) {
+    location ~ ^/(api/|auth/|git/|healthz\$) {
         proxy_pass ${upstream};
         proxy_http_version 1.1;
         proxy_set_header Connection "";

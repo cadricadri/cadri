@@ -1,22 +1,17 @@
-import { Link } from "react-router";
 import { HumanMark, RobotMark } from "../../icons";
 import type { MemoryAuthor } from "./types";
 
-export function shortSession(sessionId: string): string {
-  return sessionId.slice(0, 8);
+export function shortRobotId(id: string): string {
+  return id.slice(0, 8);
 }
 
 export function AuthorMark({ author }: { author: MemoryAuthor }) {
   if (author.kind === "robot") {
     return (
-      <Link
-        className="author-mark"
-        to={`/transcripts?session=${encodeURIComponent(author.session_id)}`}
-        title={author.session_id}
-      >
+      <span className="author-mark" title={author.id}>
         <RobotMark />
-        <span>{shortSession(author.session_id)}</span>
-      </Link>
+        <span>{shortRobotId(author.id)}</span>
+      </span>
     );
   }
   return (

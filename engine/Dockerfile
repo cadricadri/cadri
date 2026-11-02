@@ -21,14 +21,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 cadri \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin cadri \
     && install -d -o 10001 -g 10001 /data
 COPY --from=build /out/cadri-engine /usr/local/bin/cadri-engine
 ENV CADRI_BIND=0.0.0.0:8080 \
-    CADRI_DB=/data/transcripts.db
+    CADRI_DB=/data/transcripts.db \
+    CADRI_MEMORIES=/data/memories
 VOLUME /data
 EXPOSE 8080
 USER 10001:10001

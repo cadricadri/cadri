@@ -1,3 +1,5 @@
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -22,11 +24,17 @@ impl Authenticator for OrgHeaderAuth {
                 .get("x-test-org")
                 .and_then(|value| value.to_str().ok())
                 .ok_or_else(ApiError::unauthorized)?;
+            let user = headers
+                .get("x-test-user")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("user-{org}"));
             let mut response_headers = HeaderMap::new();
             response_headers.insert(header::SET_COOKIE, HeaderValue::from_static("seen=1"));
             Ok(Authenticated {
                 identity: Identity {
-                    user_id: format!("user-{org}"),
+                    user_id: user,
                     email: None,
                     org_id: org.to_string(),
                     org_name: None,
@@ -64,9 +72,9 @@ fn get_request(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
     builder.body(Body::empty()).unwrap()
 }
 
-fn put_json(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
+fn post_json(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body> {
     let mut builder = Request::builder()
-        .method(Method::PUT)
+        .method(Method::POST)
         .uri(path)
         .header(header::CONTENT_TYPE, "application/json");
     for (name, value) in headers {
@@ -241,41 +249,181 @@ async fn extra_routes_are_merged_without_auth() {
 }
 
 #[tokio::test]
-async fn memories_start_from_the_sample_and_stay_inside_the_org() {
+async fn memories_start_empty_and_stay_inside_the_org() {
     let app = app(Arc::new(OrgHeaderAuth));
-    let a = [("x-test-org", "org-a")];
-    let b = [("x-test-org", "org-b")];
+    let a = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let b = [("x-test-org", "org-b"), ("x-test-user", "ada")];
     let (status, _, body) = send(&app, get_request("/api/memories", &a)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["files"].as_array().unwrap().len(), 8);
-    assert_eq!(body["commits"][0]["id"], "c_oncall01");
-    assert_eq!(body["files"][0]["path"], "README.md");
+    assert_eq!(body["files"].as_array().unwrap().len(), 0);
+    assert_eq!(body["commits"].as_array().unwrap().len(), 0);
 
-    let mut edited = body.clone();
-    edited["commits"][0]["message"] = json!("Edited by org a");
-    let (status, _, saved) = send(&app, put_json("/api/memories", &edited, &a)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(saved["commits"][0]["message"], "Edited by org a");
+    let (status, _, saved) = send(
+        &app,
+        post_json(
+            "/api/memories/commits",
+            &json!({
+                "message": "Add a note",
+                "changes": [{ "op": "write", "path": "README.md", "content": "hello" }]
+            }),
+            &a,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["files"][0]["path"], "README.md");
+    assert_eq!(saved["files"][0]["content"], "hello");
+    assert_eq!(saved["files"][0]["blame"][0]["author"]["user_id"], "ada");
+    assert_eq!(saved["commits"][0]["message"], "Add a note");
+    assert_eq!(
+        saved["files"][0]["blame"][0]["commit_id"],
+        saved["commits"][0]["id"]
+    );
 
     let (_, _, again) = send(&app, get_request("/api/memories", &a)).await;
-    assert_eq!(again["commits"][0]["message"], "Edited by org a");
+    assert_eq!(again["commits"][0]["message"], "Add a note");
     let (_, _, other) = send(&app, get_request("/api/memories", &b)).await;
-    assert_eq!(
-        other["commits"][0]["message"],
-        "Record the on-call latency finding"
-    );
+    assert_eq!(other["files"].as_array().unwrap().len(), 0);
 
     let (status, _, rejected) = send(
         &app,
-        put_json(
-            "/api/memories",
-            &json!({ "files": [{ "path": "../secret", "content": "x", "blame": [] }], "commits": [] }),
+        post_json(
+            "/api/memories/commits",
+            &json!({
+                "message": "escape",
+                "changes": [{ "op": "write", "path": "../secret", "content": "x" }]
+            }),
             &a,
         ),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(rejected["error"], "invalid memory path");
+    let (_, _, kept) = send(&app, get_request("/api/memories", &a)).await;
+    assert_eq!(kept["files"][0]["content"], "hello");
+}
+
+#[tokio::test]
+async fn personal_memories_are_a_separate_book() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let sam = [("x-test-org", "org-a"), ("x-test-user", "sam")];
+    let other = [("x-test-org", "org-b"), ("x-test-user", "ada")];
+
+    let (status, _, body) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["files"].as_array().unwrap().len(), 0);
+    assert_eq!(body["commits"].as_array().unwrap().len(), 0);
+
+    let note = json!({
+        "message": "Upload notes.md",
+        "changes": [{ "op": "write", "path": "notes.md", "content": "hello" }]
+    });
+    let (status, _, saved) = send(
+        &app,
+        post_json("/api/memories/commits?scope=user", &note, &ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["files"][0]["path"], "notes.md");
+
+    let (_, _, team) = send(&app, get_request("/api/memories", &ada)).await;
+    assert_eq!(team["files"].as_array().unwrap().len(), 0);
+    let (_, _, team_named) = send(&app, get_request("/api/memories?scope=team", &ada)).await;
+    assert_eq!(team_named["files"].as_array().unwrap().len(), 0);
+
+    let (_, _, sam_book) = send(&app, get_request("/api/memories?scope=user", &sam)).await;
+    assert_eq!(sam_book["files"].as_array().unwrap().len(), 0);
+    let (_, _, ada_again) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    assert_eq!(ada_again["files"][0]["content"], "hello");
+    let (_, _, other_book) = send(&app, get_request("/api/memories?scope=user", &other)).await;
+    assert_eq!(other_book["files"].as_array().unwrap().len(), 0);
+
+    let (status, _, emptied) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?scope=user",
+            &json!({
+                "message": "Remove the note",
+                "changes": [{ "op": "delete", "path": "notes.md" }]
+            }),
+            &sam,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(emptied["error"], "invalid memory path");
+
+    let (status, _, rejected) = send(&app, get_request("/api/memories?scope=nope", &ada)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid memory scope");
+
+    let (status, _, rejected) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?scope=user",
+            &json!({
+                "message": "escape",
+                "changes": [{ "op": "write", "path": "../secret", "content": "x" }]
+            }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid memory path");
+
+    let (status, _, defaulted) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?scope=user",
+            &json!({ "changes": [{ "op": "write", "path": "a.md", "content": "x" }] }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(defaulted["files"][0]["content"], "x");
+    assert_eq!(defaulted["commits"][0]["message"], "Update memory");
+}
+
+#[tokio::test]
+async fn memory_directories_round_trip_and_cannot_match_a_file() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let folder = json!({
+        "message": "Create folder notes",
+        "changes": [{ "op": "write", "path": "notes/.keep", "content": "" }]
+    });
+    let (status, _, saved) = send(
+        &app,
+        post_json("/api/memories/commits?scope=user", &folder, &ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(saved["directories"], json!(["notes"]));
+    assert_eq!(saved["files"].as_array().unwrap().len(), 0);
+
+    let (_, _, again) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    assert_eq!(again["directories"], json!(["notes"]));
+
+    let (status, _, rejected) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?scope=user",
+            &json!({
+                "message": "Clash",
+                "changes": [{ "op": "write", "path": "notes", "content": "x" }]
+            }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid memory path");
+
+    let (_, _, kept) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    assert_eq!(kept["directories"], json!(["notes"]));
 }
 
 #[tokio::test]
@@ -289,7 +437,253 @@ async fn memories_require_the_api_token() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body["files"].as_array().unwrap().len() > 0);
+    assert_eq!(body["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_push_keeps_client_shas_and_rejects_a_bad_tree() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, served).await.unwrap();
+    });
+    let root = std::env::temp_dir().join(format!("cadri-git-client-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let repo = root.join("client");
+    let config = root.join("gitconfig");
+    std::fs::write(
+        &config,
+        "[http]\n\textraHeader = x-test-org: org-a\n\textraHeader = x-test-user: ada\n[user]\n\tname = Ada\n\temail = ada@example.com\n",
+    )
+    .unwrap();
+    let url = format!("http://{addr}/git/team.git");
+    assert_ok(client(&repo, &config, &["init", "-b", "main"]));
+    commit_file(
+        &repo, &config, "note.md", "hello\n", "add note", "human", "ada",
+    );
+    let sha = rev_parse(&repo, &config, "HEAD");
+    assert_ok(client(
+        &repo,
+        &config,
+        &["push", &url, "HEAD:refs/heads/main"],
+    ));
+    let (_, _, body) = send(
+        &app,
+        get_request(
+            "/api/memories",
+            &[("x-test-org", "org-a"), ("x-test-user", "ada")],
+        ),
+    )
+    .await;
+    assert_eq!(body["commits"][0]["id"], sha);
+    assert_eq!(body["files"][0]["content"], "hello\n");
+
+    let other = root.join("other");
+    std::fs::write(
+        root.join("org-b"),
+        "[http]\n\textraHeader = x-test-org: org-b\n\textraHeader = x-test-user: ada\n",
+    )
+    .unwrap();
+    let listed = client(&root, root.join("org-b").as_path(), &["ls-remote", &url]);
+    assert_ok(listed.clone());
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
+        "org b saw org a: {}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+
+    let diverged = root.join("diverged");
+    assert_ok(client(&diverged, &config, &["clone", &url, "."]));
+    commit_file(
+        &repo,
+        &config,
+        "note.md",
+        "from ada\n",
+        "ada edit",
+        "human",
+        "ada",
+    );
+    commit_file(
+        &diverged,
+        &config,
+        "note.md",
+        "from other\n",
+        "other edit",
+        "human",
+        "ada",
+    );
+    assert_ok(client(
+        &repo,
+        &config,
+        &["push", &url, "HEAD:refs/heads/main"],
+    ));
+    let rejected = client(&diverged, &config, &["push", &url, "HEAD:refs/heads/main"]);
+    assert!(
+        !rejected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let remote = rev_parse(&repo, &config, "HEAD");
+    let listed = client(&repo, &config, &["ls-remote", &url]);
+    assert_ok(listed.clone());
+    assert!(String::from_utf8_lossy(&listed.stdout).contains(&remote));
+
+    std::fs::write(repo.join("bad.bin"), [0xff, 0xfe]).unwrap();
+    assert_ok(client(&repo, &config, &["add", "bad.bin"]));
+    commit_message(&repo, &config, "binary", "human", "ada");
+    let binary = client(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
+    assert!(
+        !binary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&binary.stderr)
+    );
+    assert_ok(client(&repo, &config, &["reset", "--hard", &remote]));
+
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("/etc/passwd", repo.join("link")).unwrap();
+        assert_ok(client(&repo, &config, &["add", "link"]));
+        commit_message(&repo, &config, "symlink", "human", "ada");
+        let link = client(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
+        assert!(
+            !link.status.success(),
+            "{}",
+            String::from_utf8_lossy(&link.stderr)
+        );
+        assert_ok(client(&repo, &config, &["reset", "--hard", &remote]));
+    }
+
+    commit_file(
+        &repo,
+        &config,
+        "robot.md",
+        "from an agent\n",
+        "robot note",
+        "robot",
+        "agent-ada",
+    );
+    assert_ok(client(
+        &repo,
+        &config,
+        &["push", &url, "HEAD:refs/heads/main"],
+    ));
+    let (_, _, store) = send(
+        &app,
+        get_request(
+            "/api/memories",
+            &[("x-test-org", "org-a"), ("x-test-user", "ada")],
+        ),
+    )
+    .await;
+    let robot = store["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|commit| commit["message"] == "robot note")
+        .unwrap();
+    assert_eq!(robot["author"]["kind"], "robot");
+    assert_eq!(robot["author"]["id"], "agent-ada");
+    let _ = (other, diverged);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn hosted_refuses_to_start_without_landlock() {
+    if cadri_core::memory_jail_available() {
+        return;
+    }
+    let output = Command::new(engine_binary())
+        .env("CADRI_MEMORY_JAIL", "required")
+        .env("CADRI_BIND", "127.0.0.1:9")
+        .env("CADRI_DB", "/tmp/cadri-jail-should-not-open.db")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("landlock"), "{err}");
+}
+
+#[derive(Clone)]
+struct GitOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn engine_binary() -> std::path::PathBuf {
+    let mut path = std::env::current_exe().unwrap();
+    path.pop();
+    if path.file_name().is_some_and(|name| name == "deps") {
+        path.pop();
+    }
+    path.push("cadri-engine");
+    path
+}
+
+fn client(dir: &Path, config: &Path, args: &[&str]) -> GitOutput {
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::create_dir_all(dir).ok();
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(args)
+        .output()
+        .unwrap();
+    GitOutput {
+        status: output.status,
+        stdout: output.stdout,
+        stderr: output.stderr,
+    }
+}
+
+fn assert_ok(output: GitOutput) {
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn rev_parse(dir: &Path, config: &Path, rev: &str) -> String {
+    let output = client(dir, config, &["rev-parse", rev]);
+    assert_ok(output.clone());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn commit_file(
+    dir: &Path,
+    config: &Path,
+    name: &str,
+    content: &str,
+    message: &str,
+    kind: &str,
+    id: &str,
+) {
+    std::fs::write(dir.join(name), content).unwrap();
+    assert_ok(client(dir, config, &["add", name]));
+    commit_message(dir, config, message, kind, id);
+}
+
+fn commit_message(dir: &Path, config: &Path, message: &str, kind: &str, id: &str) {
+    let path = dir.join("COMMIT_EDITMSG_CADRI");
+    std::fs::write(
+        &path,
+        format!("{message}\n\nCadri-Author-Kind: {kind}\nCadri-Author-Id: {id}\nCadri-Author-Label: {id}\n"),
+    )
+    .unwrap();
+    assert_ok(client(
+        dir,
+        config,
+        &["commit", "-F", "COMMIT_EDITMSG_CADRI"],
+    ));
 }
 
 #[tokio::test]

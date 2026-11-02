@@ -38,7 +38,7 @@ require_free() {
 require_free 8080
 require_free 5173
 
-echo "Starting the engine. The first build can take a few minutes."
+echo "Starting the engine. The first build might take a minute or two as rust compilation can be slow."
 mkdir -p "$root/engine/data"
 (
   cd "$root/engine"
