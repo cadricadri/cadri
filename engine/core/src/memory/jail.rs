@@ -69,6 +69,7 @@ pub(crate) fn confine_and_exec(job: Job) -> ! {
 #[cfg(target_os = "linux")]
 fn exec(command: &[String]) -> ! {
     use std::os::unix::process::CommandExt;
+    use std::process::Command;
     let error = Command::new(&command[0]).args(&command[1..]).exec();
     eprintln!("failed to exec {}: {error}", command[0]);
     std::process::exit(1);
@@ -116,9 +117,12 @@ mod linux {
         ));
         Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
-            .handle_access(all)?
-            .create()?
-            .add_rules(rules.into_iter().map(Ok::<_, landlock::RulesetError>))?
+            .handle_access(all)
+            .map_err(|err| err.to_string())?
+            .create()
+            .map_err(|err| err.to_string())?
+            .add_rules(rules.into_iter().map(Ok::<_, landlock::RulesetError>))
+            .map_err(|err| err.to_string())?
             .restrict_self()
             .map_err(|err| err.to_string())?;
         Ok(())
