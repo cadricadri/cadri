@@ -103,7 +103,9 @@ pub(crate) struct Transcript {
     pub thread_id: Option<String>,
     pub cwd: Option<String>,
     pub hook_event: Option<String>,
-    pub content: String,
+    /// Layer A blob. Present on POST response; omitted from list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub bytes: usize,
@@ -212,18 +214,30 @@ fn parse_conversation(raw: Option<String>) -> Option<Value> {
     raw.and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn row_to_transcript(row: &rusqlite::Row) -> rusqlite::Result<Transcript> {
+fn row_to_transcript(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Result<Transcript> {
     let session_id: String = row.get(0)?;
     let content: String = row.get(3)?;
     let conversation = parse_conversation(row.get(11)?);
+    let transcript_text: Option<String> = row.get(12)?;
+    let preview = match transcript_text
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        Some(text) => preview(text),
+        None => preview(&content),
+    };
     Ok(Transcript {
         thread_id: Some(session_id.clone()),
         session_id,
         cwd: row.get(1)?,
         hook_event: row.get(2)?,
         bytes: content.len(),
-        preview: preview(&content),
-        content,
+        preview,
+        content: if include_layer_a {
+            Some(content)
+        } else {
+            None
+        },
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         user_id: row.get(6)?,
@@ -232,7 +246,7 @@ fn row_to_transcript(row: &rusqlite::Row) -> rusqlite::Result<Transcript> {
         model: row.get(9)?,
         model_version: row.get(10)?,
         conversation,
-        transcript_text: row.get(12)?,
+        transcript_text,
         compaction_summary: row.get(13)?,
         client_timestamp: row.get(14)?,
     })
@@ -298,8 +312,9 @@ pub(crate) fn upsert(
         &format!("SELECT {SELECT_COLS} FROM transcripts WHERE org_id = ?1 AND session_id = ?2"),
         params![org_id, thread_id],
         |row| {
-            let mut transcript = row_to_transcript(row)?;
-            transcript.preview = preview_for(incoming, &transcript.content);
+            let mut transcript = row_to_transcript(row, true)?;
+            let layer_a = transcript.content.as_deref().unwrap_or("");
+            transcript.preview = preview_for(incoming, layer_a);
             Ok(transcript)
         },
     )
@@ -312,7 +327,8 @@ pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Ve
          WHERE org_id = ?1
          ORDER BY updated_at DESC"
     ))?;
-    let rows = statement.query_map(params![org_id], row_to_transcript)?;
+    // List is Layer B + metadata: omit the Layer A `content` / trajectory blob.
+    let rows = statement.query_map(params![org_id], |row| row_to_transcript(row, false))?;
     rows.collect()
 }
 
@@ -396,13 +412,19 @@ mod tests {
 
         assert_eq!(second.session_id, "session-1");
         assert_eq!(second.thread_id.as_deref(), Some("session-1"));
-        assert_eq!(second.content, "hello\nfull transcript");
+        assert_eq!(
+            second.content.as_deref(),
+            Some("hello\nfull transcript")
+        );
         assert_eq!(second.cwd.as_deref(), Some("/work"));
         assert_eq!(second.hook_event.as_deref(), Some("Stop"));
         assert_eq!(second.harness.as_deref(), Some("claude_code"));
         assert_eq!(second.user_id.as_deref(), Some("user-1"));
         assert_eq!(second.created_at, first.created_at);
-        assert_eq!(second.bytes, second.content.len());
+        assert_eq!(
+            second.bytes,
+            second.content.as_ref().map(|value| value.len()).unwrap_or(0)
+        );
     }
 
     #[test]
@@ -431,7 +453,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stored.session_id, "t1");
-        assert_eq!(stored.content, r#"{"source":"cursor"}"#);
+        assert_eq!(stored.content.as_deref(), Some(r#"{"source":"cursor"}"#));
         assert_eq!(stored.transcript_text.as_deref(), Some("user: hi"));
         assert_eq!(stored.model.as_deref(), Some("claude"));
         assert!(stored.conversation.is_some());
@@ -449,12 +471,53 @@ mod tests {
     }
 
     #[test]
+    fn list_omits_layer_a_content() {
+        let connection = open_in_memory().unwrap();
+        let stored = upsert(
+            &connection,
+            "default",
+            "u",
+            &IncomingTranscript {
+                thread_id: None,
+                session_id: Some("s1".to_string()),
+                content: "huge trajectory blob".to_string(),
+                trajectory: None,
+                cwd: None,
+                hook_event: None,
+                timestamp: None,
+                conversation: None,
+                transcript_text: Some("user: hi\nassistant: hello".to_string()),
+                harness: Some("cursor".to_string()),
+                harness_version: None,
+                model: None,
+                model_version: None,
+                compaction_summary: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(stored.content.as_deref(), Some("huge trajectory blob"));
+
+        let listed = list(&connection, "default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].content.is_none(), "list must omit Layer A");
+        assert_eq!(listed[0].bytes, "huge trajectory blob".len());
+        assert_eq!(
+            listed[0].transcript_text.as_deref(),
+            Some("user: hi\nassistant: hello")
+        );
+        assert!(listed[0].preview.starts_with("user: hi"));
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("content").is_none());
+    }
+
+    #[test]
     fn same_session_id_is_independent_per_org() {
         let connection = open_in_memory().unwrap();
         upsert(&connection, "org-a", "u", &incoming("shared", "from a")).unwrap();
         upsert(&connection, "org-b", "u", &incoming("shared", "from b")).unwrap();
-        assert_eq!(list(&connection, "org-a").unwrap()[0].content, "from a");
-        assert_eq!(list(&connection, "org-b").unwrap()[0].content, "from b");
+        assert_eq!(list(&connection, "org-a").unwrap()[0].preview, "from a");
+        assert_eq!(list(&connection, "org-b").unwrap()[0].preview, "from b");
+        assert!(list(&connection, "org-a").unwrap()[0].content.is_none());
     }
 
     #[test]
@@ -474,7 +537,7 @@ mod tests {
         assert_eq!(user_version(&connection), SCHEMA_VERSION);
         assert!(list(&connection, "default").unwrap().is_empty());
         upsert(&connection, "default", "u", &incoming("new", "ok")).unwrap();
-        assert_eq!(list(&connection, "default").unwrap()[0].content, "ok");
+        assert_eq!(list(&connection, "default").unwrap()[0].preview, "ok");
     }
 
     #[test]
@@ -483,7 +546,7 @@ mod tests {
         migrate(&mut connection).unwrap();
         upsert(&connection, "default", "u", &incoming("s", "kept")).unwrap();
         migrate(&mut connection).unwrap();
-        assert_eq!(list(&connection, "default").unwrap()[0].content, "kept");
+        assert_eq!(list(&connection, "default").unwrap()[0].preview, "kept");
     }
 
     #[test]

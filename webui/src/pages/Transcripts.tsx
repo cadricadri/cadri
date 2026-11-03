@@ -8,7 +8,8 @@ type Transcript = {
   thread_id?: string | null;
   cwd: string | null;
   hook_event: string | null;
-  content: string;
+  /** Layer A — omitted from list responses. */
+  content?: string | null;
   created_at: string;
   updated_at: string;
   bytes: number;
@@ -172,7 +173,9 @@ export default function Transcripts() {
                   <td>{transcript.bytes}</td>
                   <td>
                     <pre className="transcript">
-                      {formatTranscript(transcript.transcript_text || transcript.content)}
+                      {formatTranscript(
+                        transcript.transcript_text || transcript.preview || "",
+                      )}
                     </pre>
                   </td>
                 </tr>

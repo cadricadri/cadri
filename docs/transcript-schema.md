@@ -34,8 +34,9 @@ Two layers:
 
 ### List vs detail
 
-- **List** returns Layer B + metadata (no full `trajectory`/`content` body by default; includes `preview`, `transcript_text` or derived preview).
-- **Full body** available on the same list payload for v1 simplicity if small; large `trajectory` is stored but list may omit it via a future `?detail=` — for v1, list includes all fields (existing behavior) so the UI keeps working.
+- **`GET /api/transcripts` (list)** returns Layer B + metadata: `preview`, `transcript_text`, `conversation`, harness/model fields, `bytes`, timestamps. **Omits** Layer A `content` / trajectory.
+- **`POST /api/transcripts`** response still includes stored Layer A `content` so the uploader can confirm what was saved.
+- Full Layer A for an existing session is not exposed on a dedicated detail route yet; add when the UI needs drill-in.
 
 ### Visibility
 
