@@ -213,13 +213,16 @@ pub async fn create_trial_subscription(
     customer_id: &str,
 ) -> Result<Subscription, StripeError> {
     let days = TRIAL_DAYS.to_string();
+    // Stripe rejects pause-at-trial-end on subscriptions that include metered prices.
+    // Cadri's seat price is metered, so missing-card trials must cancel; a later card
+    // starts a new paid subscription (see create_paid_subscription).
     let body = form(&[
         ("customer", customer_id),
         ("items[0][price]", config.price_id.as_str()),
         ("trial_period_days", days.as_str()),
         (
             "trial_settings[end_behavior][missing_payment_method]",
-            "pause",
+            "cancel",
         ),
         ("metadata[organization_id]", organization_id),
     ]);
@@ -229,7 +232,32 @@ pub async fn create_trial_subscription(
         reqwest::Method::POST,
         "/v1/subscriptions",
         Some(&body),
-        Some(&format!("cadri-subscription-{organization_id}")),
+        // v2: prior pause+metered creates failed and Stripe cached that idempotency result.
+        Some(&format!("cadri-subscription-v2-{organization_id}")),
+    )
+    .await?;
+    serde_json::from_value(value).map_err(|_| StripeError::Unavailable)
+}
+
+/// Starts a paid subscription after a canceled trial once the customer has a card.
+pub async fn create_paid_subscription(
+    http: &reqwest::Client,
+    config: &StripeConfig,
+    organization_id: &str,
+    customer_id: &str,
+) -> Result<Subscription, StripeError> {
+    let body = form(&[
+        ("customer", customer_id),
+        ("items[0][price]", config.price_id.as_str()),
+        ("metadata[organization_id]", organization_id),
+    ]);
+    let value = stripe_request(
+        http,
+        config,
+        reqwest::Method::POST,
+        "/v1/subscriptions",
+        Some(&body),
+        Some(&format!("cadri-paid-{organization_id}")),
     )
     .await?;
     serde_json::from_value(value).map_err(|_| StripeError::Unavailable)

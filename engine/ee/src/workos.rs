@@ -39,6 +39,9 @@ pub struct Config {
     pub public_url: String,
     /// No trailing slash; `WORKOS_API_BASE`, default `https://api.workos.com`.
     pub api_base: String,
+    /// Org ids that skip the billing gate (comma-separated `CADRI_BILLING_ALLOWLIST_ORG_IDS`).
+    /// Intended for staging smoke / load-test orgs only.
+    pub billing_allowlist_org_ids: Vec<String>,
 }
 
 impl Config {
@@ -74,12 +77,23 @@ impl Config {
             reqwest::Url::parse(value)
                 .map_err(|err| format!("{name} is not a valid URL: {err}"))?;
         }
+        let billing_allowlist_org_ids = get("CADRI_BILLING_ALLOWLIST_ORG_IDS")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Config {
             api_key,
             client_id,
             cookie_key: cookie_key_from_base64(&cookie_key)?,
             public_url: public_url.trim_end_matches('/').to_string(),
             api_base: api_base.trim_end_matches('/').to_string(),
+            billing_allowlist_org_ids,
         })
     }
 }

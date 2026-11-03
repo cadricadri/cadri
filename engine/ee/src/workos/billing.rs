@@ -141,6 +141,14 @@ impl WorkOs {
         if !self.billing_enabled() {
             return Ok(true);
         }
+        if self
+            .config
+            .billing_allowlist_org_ids
+            .iter()
+            .any(|id| id == &identity.org_id)
+        {
+            return Ok(true);
+        }
         if let Some(account) = self.account(&identity.org_id)? {
             if blocks_access(&account.status) {
                 return Ok(false);
@@ -178,25 +186,48 @@ impl WorkOs {
                 .await
                 .map_err(stripe_error)?;
         let mut refreshed = HeaderMap::new();
-        if portal_return
-            && subscription.status == "paused"
-            && self.has_card(config, &account, &subscription).await?
-        {
-            subscription =
-                stripe::resume_subscription(&self.http, config, &account.stripe_subscription_id)
-                    .await
-                    .map_err(stripe_error)?;
-            match self.refresh_cookie(headers).await {
-                Ok(Some(cookie)) => refreshed = cookie,
-                Ok(None) => {}
-                Err(err) => {
-                    eprintln!("could not refresh the session after resuming billing: {err:?}");
+        if portal_return && self.has_card(config, &account, &subscription).await? {
+            if subscription.status == "paused" {
+                // Legacy pause-at-trial-end rows (pre metered+cancel fix) still resume.
+                subscription = stripe::resume_subscription(
+                    &self.http,
+                    config,
+                    &account.stripe_subscription_id,
+                )
+                .await
+                .map_err(stripe_error)?;
+                match self.refresh_cookie(headers).await {
+                    Ok(Some(cookie)) => refreshed = cookie,
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!("could not refresh the session after resuming billing: {err:?}");
+                    }
+                }
+            } else if subscription.status == "canceled" {
+                // Metered trials cancel when no card is present; start a new paid sub.
+                subscription = stripe::create_paid_subscription(
+                    &self.http,
+                    config,
+                    &identity.org_id,
+                    &account.stripe_customer_id,
+                )
+                .await
+                .map_err(stripe_error)?;
+                account.stripe_subscription_id = subscription.id.clone();
+                match self.refresh_cookie(headers).await {
+                    Ok(Some(cookie)) => refreshed = cookie,
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!(
+                            "could not refresh the session after starting paid billing: {err:?}"
+                        );
+                    }
                 }
             }
         }
         account.status = subscription.status;
         account.trial_end = subscription.trial_end;
-        self.save_status(&account)?;
+        self.save_account(&identity.org_id, &account)?;
         let seat_count = match self.active_member_count(&identity.org_id).await {
             Ok(count) => Some(count),
             Err(err) => {
@@ -406,14 +437,17 @@ impl WorkOs {
         }
     }
 
-    fn save_status(&self, account: &Account) -> Result<(), ApiError> {
+    fn save_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
         self.with_db(|connection| {
             connection.execute(
-                "UPDATE billing SET status = ?1, trial_end = ?2 WHERE stripe_customer_id = ?3",
+                "UPDATE billing
+                 SET stripe_subscription_id = ?1, status = ?2, trial_end = ?3
+                 WHERE org_id = ?4",
                 params![
+                    account.stripe_subscription_id,
                     account.status,
                     account.trial_end,
-                    account.stripe_customer_id
+                    org_id,
                 ],
             )?;
             Ok(())

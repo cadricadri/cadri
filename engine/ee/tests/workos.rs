@@ -57,6 +57,7 @@ struct Directory {
     payment_method: Option<String>,
     meter_events: Vec<String>,
     resumes: usize,
+    paid_creates: usize,
     portal_sessions: usize,
     cancels: usize,
     portal_configuration: Option<String>,
@@ -401,14 +402,21 @@ async fn mock_stripe_subscription(
     if !stripe_authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    assert!(body.contains("trial_period_days=30"), "{body}");
-    assert!(
-        body.contains("missing_payment_method=pause") || body.contains("pause"),
-        "{body}"
-    );
     let mut directory = mock.directory.lock().unwrap();
-    if directory.trial_end.is_none() {
-        directory.trial_end = Some(now() + 30 * 24 * 60 * 60);
+    if body.contains("trial_period_days=") {
+        assert!(body.contains("trial_period_days=30"), "{body}");
+        assert!(
+            body.contains("missing_payment_method=cancel") || body.contains("cancel"),
+            "{body}"
+        );
+        if directory.trial_end.is_none() {
+            directory.trial_end = Some(now() + 30 * 24 * 60 * 60);
+        }
+    } else {
+        // Paid re-subscribe after a canceled trial.
+        directory.subscription_status = "active".to_string();
+        directory.trial_end = None;
+        directory.paid_creates += 1;
     }
     Json(subscription_json(&directory)).into_response()
 }
@@ -502,14 +510,18 @@ async fn mock_stripe_meter(headers: HeaderMap, State(mock): State<Mock>, body: S
 }
 
 async fn setup() -> (Router, Mock) {
-    setup_inner(false).await
+    setup_inner(false, Vec::new()).await
 }
 
 async fn setup_billing() -> (Router, Mock) {
-    setup_inner(true).await
+    setup_inner(true, Vec::new()).await
 }
 
-async fn setup_inner(billing: bool) -> (Router, Mock) {
+async fn setup_billing_allowlist(org_ids: Vec<String>) -> (Router, Mock) {
+    setup_inner(true, org_ids).await
+}
+
+async fn setup_inner(billing: bool, allowlist: Vec<String>) -> (Router, Mock) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let mock = Mock {
@@ -561,6 +573,7 @@ async fn setup_inner(billing: bool) -> (Router, Mock) {
                 cookie_key: cookie_key(),
                 public_url: PUBLIC_URL.to_string(),
                 api_base: base.clone(),
+                billing_allowlist_org_ids: allowlist,
             },
             billing.then(|| cadri_ee::StripeConfig {
                 secret_key: STRIPE_KEY.to_string(),
@@ -1522,6 +1535,7 @@ async fn staging_signup_attempt(
         cookie_key: cookie_key(),
         public_url: PUBLIC_URL.to_string(),
         api_base: "https://api.workos.com".to_string(),
+        billing_allowlist_org_ids: Vec::new(),
     })?);
     let app = cadri_core::router(
         cadri_core::db::open_in_memory().map_err(|err| err.to_string())?,
@@ -1880,6 +1894,47 @@ async fn the_billing_portal_resumes_a_paused_trial_that_has_a_card() {
     assert_eq!(status, StatusCode::OK, "{billing}");
     assert_eq!(billing["status"], "active");
     assert_eq!(mock.directory.lock().unwrap().resumes, 1);
+}
+
+#[tokio::test]
+async fn the_billing_portal_starts_paid_after_a_canceled_trial_that_has_a_card() {
+    let (app, mock) = setup_billing().await;
+    let (session, _) = open_team(&app, &mock).await;
+    {
+        let mut directory = mock.directory.lock().unwrap();
+        directory.subscription_status = "canceled".to_string();
+        directory.payment_method = Some("pm_1".to_string());
+    }
+    let (status, _, billing) = send(
+        &app,
+        get_with("/api/billing?portal_return=1", &[("cookie", &session)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{billing}");
+    assert_eq!(billing["status"], "active");
+    assert_eq!(mock.directory.lock().unwrap().paid_creates, 1);
+    assert_eq!(mock.directory.lock().unwrap().resumes, 0);
+}
+
+#[tokio::test]
+async fn allowlisted_orgs_skip_the_billing_gate() {
+    let (app, mock) = setup_billing_allowlist(vec!["org_new_1".to_string()]).await;
+    let (session, _) = open_team(&app, &mock).await;
+    let payload = json!({
+        "id": "evt_cancel_allowlist",
+        "type": "customer.subscription.deleted",
+        "data": {
+            "object": {
+                "id": "sub_1",
+                "customer": "cus_1",
+                "status": "canceled",
+                "trial_end": now() - 60,
+            }
+        }
+    });
+    assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
+    let (status, _, _) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 async fn post_webhook(app: &Router, payload: Value) -> StatusCode {
