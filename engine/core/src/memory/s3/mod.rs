@@ -341,7 +341,7 @@ async fn assume_repo_client(
     let assumed = StsClient::new(&conf)
         .assume_role()
         .role_arn(role_arn)
-        .role_session_name(format!("cadri-{repo_id}"))
+        .role_session_name(role_session_name(&repo_id))
         .policy(session_policy(&bucket, &repo_id))
         .duration_seconds(900)
         .send()
@@ -373,6 +373,21 @@ fn session_policy(bucket: &str, repo_id: &str) -> String {
     format!(
         r#"{{"Version":"2012-10-17","Statement":[{{"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion","s3:PutObject","s3:AbortMultipartUpload","s3:DeleteObject"],"Resource":"arn:aws:s3:::{bucket}/repos/{repo_id}/*"}},{{"Effect":"Allow","Action":["s3:ListBucket","s3:ListBucketVersions"],"Resource":"arn:aws:s3:::{bucket}","Condition":{{"StringLike":{{"s3:prefix":["repos/{repo_id}/*"]}}}}}}]}}"#
     )
+}
+
+/// STS `RoleSessionName` is at most 64 characters (`[\w+=,.@-]+`).
+/// Personal book repo ids overflow that when prefixed with `cadri-`.
+fn role_session_name(repo_id: &str) -> String {
+    let candidate = format!("cadri-{repo_id}");
+    if candidate.len() <= 64 {
+        return candidate;
+    }
+    let digest = Md5::digest(repo_id.as_bytes());
+    let mut hex = String::with_capacity(32);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("cadri-{hex}")
 }
 
 fn ref_key(repo_id: &str) -> String {
@@ -474,6 +489,24 @@ mod tests {
         assert!(policy.contains("arn:aws:s3:::bucket/repos/abcd1234abcd1234abcd1234abcd1234/*"));
         assert!(policy.contains(r#""repos/abcd1234abcd1234abcd1234abcd1234/*""#));
         assert!(!policy.contains("repos/*\""));
+    }
+
+    #[test]
+    fn role_session_name_fits_sts_limit() {
+        let team = "org_01M4YRRVVMNRNZHJK5MKZJTYF6_repo_0";
+        let personal = "org_01M4YRRVVMNRNZHJK5MKZJTYF6_user_01M4YRRZ0ECV9BC7YZYMPMMFZC_repo_0";
+        let team_name = super::role_session_name(team);
+        let personal_name = super::role_session_name(personal);
+        assert_eq!(team_name, format!("cadri-{team}"));
+        assert!(team_name.len() <= 64, "{team_name}");
+        assert!(personal_name.len() <= 64, "{personal_name}");
+        assert!(personal_name.starts_with("cadri-"));
+        assert_ne!(personal_name, format!("cadri-{personal}"));
+        assert_eq!(
+            super::role_session_name(personal),
+            personal_name,
+            "hashed name is stable"
+        );
     }
 
     use std::io::{Read, Write};
