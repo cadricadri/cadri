@@ -182,7 +182,13 @@ async fn orgs_cannot_see_each_others_transcripts() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|t| format!("{}={}", t["session_id"], t["content"]))
+            .map(|t| {
+                assert!(
+                    t.get("content").is_none() || t["content"].is_null(),
+                    "list must omit Layer A content: {t}"
+                );
+                format!("{}={}", t["session_id"], t["preview"])
+            })
             .collect();
         // Rows written in the same second share updated_at, so list order is not stable.
         ids.sort();
