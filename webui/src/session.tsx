@@ -21,13 +21,39 @@ import type { InviteResult, Me, OrgResult } from "./ee/workos";
 
 type WorkosModule = typeof import("./ee/workos");
 
+const INSTALL_SKIP_KEY = "cadri.onboarding.install.skipped";
+const INSTALL_PROMPT =
+  "Follow the installation instructions at https://cadri.io/docs/installation";
+
 type Gate =
   | { kind: "loading" }
   | { kind: "token"; message: string }
   | { kind: "redirecting" }
   | { kind: "organization" }
+  | { kind: "install"; mode: AuthMode; me: Me | null }
   | { kind: "error"; message: string }
   | { kind: "app"; mode: AuthMode; me: Me | null };
+
+function installSkipped(): boolean {
+  try {
+    return localStorage.getItem(INSTALL_SKIP_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function markInstallSkipped(): void {
+  try {
+    localStorage.setItem(INSTALL_SKIP_KEY, "1");
+  } catch {
+    /* ignore */
+  }
+}
+
+function warmMemoryBooks(headers: Record<string, string>): void {
+  void fetch("/api/memories?scope=team", { headers });
+  void fetch("/api/memories?scope=user", { headers });
+}
 
 export type Session = {
   mode: AuthMode;
@@ -97,11 +123,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setGate({ kind: "error", message: result.message });
         return;
       }
-      setGate({
-        kind: "app",
-        mode: "workos",
-        me: result.kind === "ok" ? result.me : null,
-      });
+      const me = result.kind === "ok" ? result.me : null;
+      warmMemoryBooks(authHeaders("workos"));
+      if (!installSkipped()) {
+        setGate({ kind: "install", mode: "workos", me });
+        return;
+      }
+      setGate({ kind: "app", mode: "workos", me });
     })();
     return () => {
       cancelled = true;
@@ -201,10 +229,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             setGate({ kind: "redirecting" });
             api.signIn();
           } else if (result.kind === "ok") {
-            setGate({ kind: "app", mode: "workos", me: result.me });
+            warmMemoryBooks(authHeaders("workos"));
+            setGate({ kind: "install", mode: "workos", me: result.me });
           }
           return result;
         }}
+      />
+    );
+  }
+  if (gate.kind === "install") {
+    return (
+      <InstallGate
+        onReady={() => {
+          markInstallSkipped();
+          window.location.assign("/transcripts");
+        }}
+        onSkip={() => {
+          markInstallSkipped();
+          window.location.assign("/transcripts");
+        }}
+        headers={() => authHeaders(gate.mode)}
       />
     );
   }
@@ -257,6 +301,87 @@ function TokenGate({ message, onSubmit }: { message: string; onSubmit: (value: s
           Save
         </button>
       </form>
+    </main>
+  );
+}
+
+function InstallGate({
+  onReady,
+  onSkip,
+  headers,
+}: {
+  onReady: () => void;
+  onSkip: () => void;
+  headers: () => Record<string, string>;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [status, setStatus] = useState("Waiting for your agent to connect…");
+
+  useEffect(() => {
+    document.title = "Cadri · Install";
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const response = await fetch("/api/transcripts", { headers: headers() });
+        if (cancelled) {
+          return;
+        }
+        if (!response.ok) {
+          return;
+        }
+        const rows = (await response.json()) as unknown[];
+        if (Array.isArray(rows) && rows.length > 0) {
+          setStatus("Sessions found — opening Cadri…");
+          onReady();
+        }
+      } catch {
+        /* keep polling */
+      }
+    };
+    void tick();
+    const id = window.setInterval(() => void tick(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [headers, onReady]);
+
+  return (
+    <main className="gate">
+      <div className="panel install-panel">
+        <h1>Connect your coding agents</h1>
+        <p className="hint">
+          Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent will follow the
+          install docs, sign this machine in once, and backfill recent sessions.
+        </p>
+        <pre className="install-prompt">{INSTALL_PROMPT}</pre>
+        <div className="form-actions">
+          <button
+            className="btn"
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(INSTALL_PROMPT).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? "Copied" : "Copy prompt"}
+          </button>
+          <a className="btn ghost" href="https://cadri.io/docs/installation" target="_blank" rel="noreferrer">
+            Open docs
+          </a>
+          <button className="btn ghost" type="button" onClick={onSkip}>
+            Skip for now
+          </button>
+        </div>
+        <p className="form-status" role="status">
+          {status}
+        </p>
+      </div>
     </main>
   );
 }

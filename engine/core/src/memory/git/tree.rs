@@ -43,4 +43,3 @@ pub(super) fn parse_blame(text: &str) -> Vec<String> {
     }
     shas
 }
-

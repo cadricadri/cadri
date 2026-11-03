@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# uv-backed Cadri CLI shim.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if ! command -v uv >/dev/null 2>&1; then
+  echo "cadri: installing uv…" >&2
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="${HOME}/.local/bin:${PATH}"
+fi
+cd "$ROOT"
+exec uv run --quiet python bin/cadri_cli.py "$@"

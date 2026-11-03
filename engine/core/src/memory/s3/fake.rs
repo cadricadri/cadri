@@ -223,4 +223,3 @@ fn xml(status: axum::http::StatusCode, code: &str) -> axum::response::Response {
         .body(Body::from(body))
         .unwrap()
 }
-

@@ -8,9 +8,14 @@ use crate::ApiError;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Author {
-    Human { user_id: String, label: String },
+    Human {
+        user_id: String,
+        label: String,
+    },
     /// Agent that wrote via a memory skill (not a transcript lookup).
-    Robot { id: String },
+    Robot {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

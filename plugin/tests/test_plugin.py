@@ -16,8 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
-CAPTURE = PLUGIN / "hooks" / "capture.py"
-LOGIN = PLUGIN / "bin" / "cadri-login"
+CAPTURE = PLUGIN / "harnesses" / "claude" / "hooks" / "capture.py"
+LOGIN = PLUGIN / "bin" / "cadri_cli.py"
 
 
 class FakeCadri:
@@ -112,6 +112,8 @@ class CaptureTests(PluginTestCase):
         [upload] = self.uploads()
         self.assertEqual(upload["headers"]["Authorization"], "Bearer secret")
         self.assertEqual(upload["body"]["session_id"], "s1")
+        self.assertEqual(upload["body"]["thread_id"], "s1")
+        self.assertEqual(upload["body"]["harness"], "claude_code")
         self.assertEqual(upload["body"]["content"], '{"type":"user"}\n')
         self.assertEqual(upload["body"]["hook_event"], "Stop")
 
@@ -199,7 +201,7 @@ class CaptureTests(PluginTestCase):
 class LoginTests(PluginTestCase):
     def login(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
-            [sys.executable, str(LOGIN), "--no-browser", *args],
+            [sys.executable, str(LOGIN), "login", "--no-browser", *args],
             env=self.env(),
             capture_output=True,
             text=True,

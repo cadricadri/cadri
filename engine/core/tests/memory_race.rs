@@ -19,7 +19,9 @@ use serde_json::{json, Value};
 
 use cadri_core::auth::NoAuth;
 use cadri_core::db;
-use cadri_core::memory::testing::{assemble, FakeS3, MemoryService, PublishGate, RefFault, S3Books};
+use cadri_core::memory::testing::{
+    assemble, FakeS3, MemoryService, PublishGate, RefFault, S3Books,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_directory_servers_race_a_git_push_and_the_loser_retries() {

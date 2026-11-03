@@ -21,13 +21,7 @@ async fn empty_team_book_clones_with_unborn_head() {
     let config = git_config(&root, "org-a", "ada");
     let clone = root.join("empty-clone");
     let url = format!("http://{addr}/git/team.git");
-    assert_ok(git(
-        &clone,
-        &config,
-        &["clone", &url, "."],
-        "org-a",
-        "ada",
-    ));
+    assert_ok(git(&clone, &config, &["clone", &url, "."], "org-a", "ada"));
     let listed = git(
         &clone,
         &config,
@@ -51,9 +45,25 @@ async fn shallow_clone_gets_the_tip_tree() {
     let config = git_config(&root, "org-a", "ada");
     let origin = root.join("origin");
     let url = format!("http://{addr}/git/team.git");
-    assert_ok(git(&origin, &config, &["init", "-b", "main"], "org-a", "ada"));
-    commit_file(&origin, &config, "first.md", "one\n", "first", "org-a", "ada");
-    commit_file(&origin, &config, "second.md", "two\n", "second", "org-a", "ada");
+    assert_ok(git(
+        &origin,
+        &config,
+        &["init", "-b", "main"],
+        "org-a",
+        "ada",
+    ));
+    commit_file(
+        &origin, &config, "first.md", "one\n", "first", "org-a", "ada",
+    );
+    commit_file(
+        &origin,
+        &config,
+        "second.md",
+        "two\n",
+        "second",
+        "org-a",
+        "ada",
+    );
     assert_ok(git(
         &origin,
         &config,
@@ -149,13 +159,7 @@ async fn another_org_cannot_fetch_this_team_book() {
     );
 
     let spy = root.join("spy");
-    assert_ok(git(
-        &spy,
-        &b_config,
-        &["clone", &url, "."],
-        "org-b",
-        "bob",
-    ));
+    assert_ok(git(&spy, &b_config, &["clone", &url, "."], "org-b", "bob"));
     assert!(!spy.join("secret.md").exists());
     let _ = fs::remove_dir_all(root);
 }

@@ -387,8 +387,41 @@ h1 {
   background: var(--paper);
 }
 
+.panel.install-panel {
+  width: min(560px, 100%);
+}
+
 .panel h1 {
   margin-bottom: 12px;
+}
+
+.install-prompt {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--paper) 88%, var(--ink));
+  font-family: var(--mono, ui-monospace, Menlo, monospace);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcripts-empty {
+  display: grid;
+  gap: 16px;
+  justify-items: center;
+  padding: 24px 12px 48px;
+  text-align: center;
+}
+
+.transcripts-empty-art {
+  width: min(640px, 100%);
+  height: auto;
+  border: 2px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 6px 6px 0 var(--line);
+  image-rendering: pixelated;
 }
 
 .upload-alert {

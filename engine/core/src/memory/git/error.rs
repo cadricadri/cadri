@@ -24,7 +24,6 @@ impl Fail {
     }
 }
 
-
 pub(super) fn s3_fail(err: S3Fail) -> Fail {
     match err {
         S3Fail::Conflict => Fail::Conflict,

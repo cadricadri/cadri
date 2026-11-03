@@ -188,4 +188,3 @@ pub(super) fn is_ancestor(repo: &Repo, old: &str, new_sha: &str) -> Result<bool,
     )?
     .ok)
 }
-

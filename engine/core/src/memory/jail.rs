@@ -2,7 +2,7 @@
 //!
 //! The engine starts git processes with `--memory-confine REPO --memory-scratch SCRATCH -- command...`
 //! to confine them to the repo and scratch directories.
-//! 
+//!
 //! The reason to run the engine's git processes in a sandboxed
 //! environment is to prevent the git processes from accessing the host's
 //! filesystem, in case of an exploit.

@@ -26,7 +26,10 @@ pub(super) fn current_files(repo: &Repo) -> Result<BTreeMap<String, String>, Fai
     Ok(files)
 }
 
-pub(super) fn apply_changes(files: &mut BTreeMap<String, String>, changes: &[Change]) -> Result<(), Fail> {
+pub(super) fn apply_changes(
+    files: &mut BTreeMap<String, String>,
+    changes: &[Change],
+) -> Result<(), Fail> {
     for change in changes {
         match change {
             Change::Write { path, content } => {
@@ -200,4 +203,3 @@ pub(super) fn sanitize_email(user_id: &str) -> String {
         email
     }
 }
-

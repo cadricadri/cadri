@@ -30,7 +30,12 @@ pub(super) fn ready(body: Vec<u8>) -> GitHttp {
     }
 }
 
-pub(super) fn inspect(repo: &Repo, old: Option<&str>, new_sha: &str, user_id: &str) -> Result<(), Fail> {
+pub(super) fn inspect(
+    repo: &Repo,
+    old: Option<&str>,
+    new_sha: &str,
+    user_id: &str,
+) -> Result<(), Fail> {
     let range = if let Some(old) = old {
         git_text(repo, &["rev-list", &format!("{old}..{new_sha}")], None, &[])?
     } else {
@@ -215,4 +220,3 @@ pub(super) fn unpack_fail(message: &str) -> Vec<u8> {
     body.extend_from_slice(b"0000");
     body
 }
-

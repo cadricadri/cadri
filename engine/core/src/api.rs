@@ -18,9 +18,7 @@ use serde_json::{json, Value};
 
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
-use crate::memory::{
-    self, Change, GitHttp, MemoryService, MemoryStore,
-};
+use crate::memory::{self, Change, GitHttp, MemoryService, MemoryStore};
 use crate::ApiError;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
@@ -39,7 +37,12 @@ struct AppState {
 pub fn router(db: Connection, auth: Arc<dyn Authenticator>, extra: Option<Router>) -> Router {
     let n = MEMORY_ROOTS.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("cadri-memories-{}-{n}", std::process::id()));
-    assemble(db, auth, extra, MemoryService::open_local(root, None, false))
+    assemble(
+        db,
+        auth,
+        extra,
+        MemoryService::open_local(root, None, false),
+    )
 }
 
 pub fn assemble(
@@ -252,19 +255,26 @@ async fn post_transcript(
     body: Result<Json<IncomingTranscript>, JsonRejection>,
 ) -> Result<Json<Transcript>, ApiError> {
     let Json(incoming) = body?;
-    if incoming.session_id.is_empty() {
+    if incoming.thread_id().is_none() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "session_id is required",
         ));
     }
+    if !incoming.has_body() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "transcript body is required",
+        ));
+    }
     let connection = lock_db(&state)?;
-    let stored = db::upsert(&connection, &identity.org_id, &incoming).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to store transcript: {err}"),
-        )
-    })?;
+    let stored =
+        db::upsert(&connection, &identity.org_id, &identity.user_id, &incoming).map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to store transcript: {err}"),
+            )
+        })?;
     Ok(Json(stored))
 }
 
@@ -304,9 +314,8 @@ fn git_book(book: &str, identity: &Identity) -> Result<(&'static str, String), A
 }
 
 fn memory_repo(org_id: &str, scope: &str, user_id: &str) -> Result<String, ApiError> {
-    memory::memory_repo_id(org_id, scope, user_id).ok_or_else(|| {
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid memory repo")
-    })
+    memory::memory_repo_id(org_id, scope, user_id)
+        .ok_or_else(|| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "invalid memory repo"))
 }
 
 async fn blocking<T: Send + 'static>(

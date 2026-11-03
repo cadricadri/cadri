@@ -3,14 +3,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::memory::types::{Author, Change};
 use crate::memory::s3::S3Books;
+use crate::memory::types::{Author, Change};
 
 use super::error::Fail;
 use super::protocol::pkt;
 use super::service::{Backend, MemoryService};
-
-
 
 fn temp() -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -169,9 +167,7 @@ fn two_caches_share_one_ref_and_both_changes_land() {
     let (user, label) = author();
     let left_commit = {
         let left = left.clone();
-        std::thread::spawn(move || {
-            left.commit(repo, user, label, "left", &[write("left.md", "L")])
-        })
+        std::thread::spawn(move || left.commit(repo, user, label, "left", &[write("left.md", "L")]))
     };
     let right_commit = std::thread::spawn(move || {
         right.commit(repo, user, label, "right", &[write("right.md", "R")])

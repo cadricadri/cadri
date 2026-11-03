@@ -70,4 +70,3 @@ pub(super) fn display_message(message: &str) -> String {
     }
     lines.join("\n").trim().to_string()
 }
-

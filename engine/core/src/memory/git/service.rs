@@ -20,9 +20,7 @@ use super::protocol::{
     advertise_receive, advertise_upload, index_pack, inspect, ready, report, split_pack,
     unpack_fail, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
 };
-use super::store::{
-    cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path,
-};
+use super::store::{cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path};
 use super::view::view;
 
 pub(super) enum Backend {
@@ -457,7 +455,12 @@ impl MemoryService {
         }
     }
 
-    pub(super) fn cas_ref(&self, repo_id: &str, expected: Option<&str>, new_sha: &str) -> Result<(), Fail> {
+    pub(super) fn cas_ref(
+        &self,
+        repo_id: &str,
+        expected: Option<&str>,
+        new_sha: &str,
+    ) -> Result<(), Fail> {
         {
             let mut left = self.inner.cas_failures.lock().expect("cas failures");
             if *left > 0 {
@@ -564,4 +567,3 @@ impl PublishGate {
         }
     }
 }
-

@@ -5,6 +5,7 @@ import { useSession } from "../session";
 
 type Transcript = {
   session_id: string;
+  thread_id?: string | null;
   cwd: string | null;
   hook_event: string | null;
   content: string;
@@ -12,6 +13,9 @@ type Transcript = {
   updated_at: string;
   bytes: number;
   preview: string;
+  harness?: string | null;
+  model?: string | null;
+  transcript_text?: string | null;
 };
 
 function scrollToSession(row: HTMLTableRowElement | null): void {
@@ -27,7 +31,7 @@ function statusWithSession(
   if (phase !== "done" || !sessionQuery) {
     return status;
   }
-  const found = rows.some((row) => row.session_id === sessionQuery);
+  const found = rows.some((row) => row.session_id === sessionQuery || row.thread_id === sessionQuery);
   return found
     ? `${status} Showing session ${sessionQuery}.`
     : `${status} Session ${sessionQuery} is not in this list yet.`;
@@ -55,6 +59,7 @@ export default function Transcripts() {
   const [phase, setPhase] = useState<"loading" | "done">("loading");
   const [rows, setRows] = useState<Transcript[]>([]);
   const request = useRef(0);
+  const seeding = rows.length === 0 && phase === "done";
 
   const load = useCallback(async () => {
     const id = ++request.current;
@@ -82,7 +87,7 @@ export default function Transcripts() {
       setRows(transcripts);
       setStatus(
         transcripts.length === 0
-          ? "No transcripts yet."
+          ? "Seeding sessions from your agents…"
           : `${transcripts.length} transcript${transcripts.length === 1 ? "" : "s"}.`,
       );
       setPhase("done");
@@ -102,6 +107,14 @@ export default function Transcripts() {
     void load();
   }, [load]);
 
+  useEffect(() => {
+    if (!seeding) {
+      return;
+    }
+    const id = window.setInterval(() => void load(), 3000);
+    return () => window.clearInterval(id);
+  }, [seeding, load]);
+
   const shown = statusWithSession(status, phase, sessionQuery, rows);
 
   return (
@@ -116,38 +129,58 @@ export default function Transcripts() {
       <p className="status" role="status">
         {shown}
       </p>
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>Session</th>
-              <th>Updated</th>
-              <th>Directory</th>
-              <th>Hook</th>
-              <th>Bytes</th>
-              <th>Transcript</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((transcript) => (
-              <tr
-                key={transcript.session_id}
-                className={transcript.session_id === sessionQuery ? "transcript-hit" : undefined}
-                ref={transcript.session_id === sessionQuery ? scrollToSession : undefined}
-              >
-                <td>{transcript.session_id}</td>
-                <td>{transcript.updated_at}</td>
-                <td>{transcript.cwd ?? ""}</td>
-                <td>{transcript.hook_event ?? ""}</td>
-                <td>{transcript.bytes}</td>
-                <td>
-                  <pre className="transcript">{formatTranscript(transcript.content)}</pre>
-                </td>
+      {seeding ? (
+        <div className="transcripts-empty">
+          <img
+            className="transcripts-empty-art"
+            src="/images/pantheon-collab.png"
+            width={768}
+            height={512}
+            alt="Pixel art of humans and robots building a temple together"
+          />
+          <p className="hint">
+            Waiting for <code>cadri init</code> to upload sessions. Paste the install prompt into your
+            agent if you have not already.
+          </p>
+        </div>
+      ) : (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>Harness</th>
+                <th>Updated</th>
+                <th>Directory</th>
+                <th>Hook</th>
+                <th>Bytes</th>
+                <th>Transcript</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {rows.map((transcript) => (
+                <tr
+                  key={transcript.session_id}
+                  className={transcript.session_id === sessionQuery ? "transcript-hit" : undefined}
+                  ref={transcript.session_id === sessionQuery ? scrollToSession : undefined}
+                >
+                  <td>{transcript.session_id}</td>
+                  <td>{transcript.harness ?? ""}</td>
+                  <td>{transcript.updated_at}</td>
+                  <td>{transcript.cwd ?? ""}</td>
+                  <td>{transcript.hook_event ?? ""}</td>
+                  <td>{transcript.bytes}</td>
+                  <td>
+                    <pre className="transcript">
+                      {formatTranscript(transcript.transcript_text || transcript.content)}
+                    </pre>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Page>
   );
 }

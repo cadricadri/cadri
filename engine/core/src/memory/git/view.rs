@@ -131,4 +131,3 @@ pub(super) fn read_commits(repo: &Repo) -> Result<Vec<MemoryCommit>, Fail> {
     }
     Ok(commits)
 }
-

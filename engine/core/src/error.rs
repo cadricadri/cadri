@@ -43,4 +43,3 @@ impl From<QueryRejection> for ApiError {
         ApiError::new(rejection.status(), rejection.body_text())
     }
 }
-

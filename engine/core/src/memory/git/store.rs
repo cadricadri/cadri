@@ -100,4 +100,3 @@ fn stale_lock(path: &Path) -> bool {
         .and_then(|modified| modified.elapsed().ok())
         .is_some_and(|age| age > Duration::from_secs(15))
 }
-
