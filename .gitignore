@@ -4,3 +4,4 @@ webui/node_modules/
 webui/dist/
 docker/.env
 .cursor/
+memories/
