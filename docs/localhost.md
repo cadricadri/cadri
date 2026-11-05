@@ -45,6 +45,13 @@ Claude Code (from a checkout):
 claude --plugin-dir "$(pwd)/plugin"
 ```
 
+## Metrics
+
+A direct engine process serves Prometheus text at `http://127.0.0.1:8080/metrics`.
+The Docker web UI's nginx does not forward that path. Page loads from the Vite app
+are posted to `POST /api/telemetry/page`. Hosted Grafana login is documented with the
+cluster chart in `cadri-cloud/docs/telemetry.md`.
+
 ## Auth
 
 - Default `./scripts/run`: no token.

@@ -42,11 +42,19 @@ fn sign(key: &[u8], claims: Value) -> String {
     jsonwebtoken::encode(&header, &claims, &EncodingKey::from_rsa_pem(key).unwrap()).unwrap()
 }
 
+struct SeedUser {
+    id: String,
+    email: String,
+    first_name: String,
+    last_name: String,
+}
+
 #[derive(Default)]
 struct Directory {
     memberships: Vec<(String, String, String)>,
     organizations: Vec<(String, String)>,
     invitations: Vec<Value>,
+    users: Vec<SeedUser>,
     admin_roles: Vec<(String, String)>,
     /// WorkOS `list_metadata.after`. A non-empty cursor means more memberships exist.
     membership_after: Option<String>,
@@ -61,6 +69,9 @@ struct Directory {
     portal_sessions: usize,
     cancels: usize,
     portal_configuration: Option<String>,
+    /// Raw query strings from `GET /v1/invoices`.
+    invoice_queries: Vec<String>,
+    invoices: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -176,11 +187,68 @@ fn has_api_key(headers: &HeaderMap) -> bool {
         == Some(&format!("Bearer {API_KEY}"))
 }
 
-async fn mock_user(Path(id): Path<String>, headers: HeaderMap) -> Response {
+fn mock_membership_id(user: &str, org: &str) -> String {
+    format!("om_{user}_{org}")
+}
+
+fn user_json(directory: &Directory, id: &str) -> Value {
+    let profile = directory.users.iter().find(|user| user.id == id);
+    let email = profile.map(|user| user.email.clone()).unwrap_or_else(|| {
+        if id == "user_1" {
+            "user1@example.com".to_string()
+        } else {
+            format!("{id}@example.com")
+        }
+    });
+    let first_name = profile
+        .map(|user| user.first_name.clone())
+        .unwrap_or_default();
+    let last_name = profile
+        .map(|user| user.last_name.clone())
+        .unwrap_or_default();
+    json!({
+        "object": "user",
+        "id": id,
+        "email": email,
+        "first_name": first_name,
+        "last_name": last_name,
+    })
+}
+
+async fn mock_user(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     if !has_api_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({ "object": "user", "id": id, "email": "user1@example.com" })).into_response()
+    let directory = mock.directory.lock().unwrap();
+    Json(user_json(&directory, &id)).into_response()
+}
+
+async fn mock_list_users(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let organization_id = query.get("organization_id").cloned().unwrap_or_default();
+    let directory = mock.directory.lock().unwrap();
+    let mut seen = Vec::new();
+    let mut data = Vec::new();
+    if !organization_id.is_empty() {
+        for (user, org, _) in &directory.memberships {
+            if org == &organization_id && !seen.iter().any(|id: &String| id == user) {
+                seen.push(user.clone());
+                data.push(user_json(&directory, user));
+            }
+        }
+    }
+    Json(json!({ "data": data, "list_metadata": { "before": null, "after": null } }))
+        .into_response()
 }
 
 async fn mock_organization(
@@ -236,6 +304,7 @@ async fn mock_list_memberships(
         .map(|(user, org_id, status)| {
             json!({
                 "object": "organization_membership",
+                "id": mock_membership_id(user, org_id),
                 "user_id": user,
                 "organization_id": org_id,
                 "status": status,
@@ -279,6 +348,7 @@ async fn mock_create_membership(
     let user_id = body["user_id"].as_str().unwrap_or("").to_string();
     let organization_id = body["organization_id"].as_str().unwrap_or("").to_string();
     let role = body["role_slug"].as_str().unwrap_or("").to_string();
+    let id = mock_membership_id(&user_id, &organization_id);
     let mut directory = mock.directory.lock().unwrap();
     directory.admin_roles.push((user_id.clone(), role));
     directory
@@ -286,9 +356,67 @@ async fn mock_create_membership(
         .push((user_id, organization_id.clone(), "active".to_string()));
     Json(json!({
         "object": "organization_membership",
+        "id": id,
         "user_id": body["user_id"],
         "organization_id": organization_id,
         "status": "active",
+    }))
+    .into_response()
+}
+
+fn membership_by_id(directory: &Directory, id: &str) -> Option<(String, String, String)> {
+    directory
+        .memberships
+        .iter()
+        .find(|(user, org, _)| mock_membership_id(user, org) == id)
+        .cloned()
+}
+
+async fn mock_get_membership(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let directory = mock.directory.lock().unwrap();
+    match membership_by_id(&directory, &id) {
+        Some((user, org_id, status)) => Json(json!({
+            "object": "organization_membership",
+            "id": id,
+            "user_id": user,
+            "organization_id": org_id,
+            "status": status,
+        }))
+        .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn mock_delete_membership(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut directory = mock.directory.lock().unwrap();
+    let Some(index) = directory
+        .memberships
+        .iter()
+        .position(|(user, org, _)| mock_membership_id(user, org) == id)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (user, org_id, status) = directory.memberships.remove(index);
+    Json(json!({
+        "object": "organization_membership",
+        "id": id,
+        "user_id": user,
+        "organization_id": org_id,
+        "status": status,
     }))
     .into_response()
 }
@@ -308,19 +436,105 @@ async fn mock_create_invitation(
     if email == "pending@example.com" {
         return api_error("invitation_already_exists");
     }
-    mock.directory
-        .lock()
-        .unwrap()
-        .invitations
-        .push(body.clone());
-    Json(json!({
+    let mut directory = mock.directory.lock().unwrap();
+    let id = format!("invitation_{}", directory.invitations.len() + 1);
+    let invitation = json!({
         "object": "invitation",
-        "id": "invitation_1",
+        "id": id,
         "email": email,
         "state": "pending",
         "organization_id": body["organization_id"],
-    }))
-    .into_response()
+        "inviter_user_id": body["inviter_user_id"],
+    });
+    directory.invitations.push(invitation.clone());
+    Json(invitation).into_response()
+}
+
+async fn mock_list_invitations(
+    State(mock): State<Mock>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let organization_id = query.get("organization_id").cloned().unwrap_or_default();
+    let directory = mock.directory.lock().unwrap();
+    let data: Vec<Value> = directory
+        .invitations
+        .iter()
+        .filter(|invitation| {
+            !organization_id.is_empty()
+                && invitation["organization_id"].as_str() == Some(organization_id.as_str())
+        })
+        .cloned()
+        .collect();
+    Json(json!({ "data": data, "list_metadata": { "before": null, "after": null } }))
+        .into_response()
+}
+
+fn invitation_mut<'a>(directory: &'a mut Directory, id: &str) -> Option<&'a mut Value> {
+    directory
+        .invitations
+        .iter_mut()
+        .find(|invitation| invitation["id"].as_str() == Some(id))
+}
+
+async fn mock_get_invitation(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let directory = mock.directory.lock().unwrap();
+    directory
+        .invitations
+        .iter()
+        .find(|invitation| invitation["id"].as_str() == Some(id.as_str()))
+        .cloned()
+        .map(|invitation| Json(invitation).into_response())
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+async fn mock_revoke_invitation(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut directory = mock.directory.lock().unwrap();
+    let Some(invitation) = invitation_mut(&mut directory, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if invitation["state"].as_str() != Some("pending") {
+        return api_error("invitation_not_pending");
+    }
+    invitation["state"] = json!("revoked");
+    Json(invitation.clone()).into_response()
+}
+
+async fn mock_resend_invitation(
+    State(mock): State<Mock>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !has_api_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut directory = mock.directory.lock().unwrap();
+    let Some(invitation) = invitation_mut(&mut directory, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let state = invitation["state"].as_str().unwrap_or("");
+    if state != "pending" && state != "expired" {
+        return api_error("invitation_not_pending");
+    }
+    invitation["state"] = json!("pending");
+    Json(invitation.clone()).into_response()
 }
 
 fn stripe_authorized(headers: &HeaderMap) -> bool {
@@ -509,6 +723,20 @@ async fn mock_stripe_meter(headers: HeaderMap, State(mock): State<Mock>, body: S
     Json(json!({ "object": "billing.meter_event" })).into_response()
 }
 
+async fn mock_stripe_invoices(State(mock): State<Mock>, request: Request<Body>) -> Response {
+    if !stripe_authorized(request.headers()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let query = request.uri().query().unwrap_or("").to_string();
+    let mut directory = mock.directory.lock().unwrap();
+    directory.invoice_queries.push(query);
+    Json(json!({
+        "object": "list",
+        "data": directory.invoices.clone(),
+    }))
+    .into_response()
+}
+
 async fn setup() -> (Router, Mock) {
     setup_inner(false, Vec::new()).await
 }
@@ -536,8 +764,28 @@ async fn setup_inner(billing: bool, allowlist: Vec<String>) -> (Router, Mock) {
             "/user_management/organization_memberships",
             get(mock_list_memberships).post(mock_create_membership),
         )
-        .route("/user_management/invitations", post(mock_create_invitation))
+        .route(
+            "/user_management/organization_memberships/{id}",
+            get(mock_get_membership).delete(mock_delete_membership),
+        )
+        .route(
+            "/user_management/invitations",
+            get(mock_list_invitations).post(mock_create_invitation),
+        )
+        .route(
+            "/user_management/invitations/{id}",
+            get(mock_get_invitation),
+        )
+        .route(
+            "/user_management/invitations/{id}/revoke",
+            post(mock_revoke_invitation),
+        )
+        .route(
+            "/user_management/invitations/{id}/resend",
+            post(mock_resend_invitation),
+        )
         .route("/sso/jwks/{client_id}", get(mock_jwks))
+        .route("/user_management/users", get(mock_list_users))
         .route("/user_management/users/{id}", get(mock_user))
         .route("/organizations", post(mock_create_organization))
         .route(
@@ -562,6 +810,7 @@ async fn setup_inner(billing: bool, allowlist: Vec<String>) -> (Router, Mock) {
         )
         .route("/v1/billing_portal/sessions", post(mock_stripe_portal))
         .route("/v1/billing/meter_events", post(mock_stripe_meter))
+        .route("/v1/invoices", get(mock_stripe_invoices))
         .with_state(mock.clone());
     tokio::spawn(async move { axum::serve(listener, mock_app).await.unwrap() });
 
@@ -1387,6 +1636,351 @@ async fn an_invitation_requires_an_organization() {
     assert!(mock.directory.lock().unwrap().invitations.is_empty());
 }
 
+fn seed_user(mock: &Mock, id: &str, email: &str, first_name: &str, last_name: &str) {
+    mock.directory.lock().unwrap().users.push(SeedUser {
+        id: id.to_string(),
+        email: email.to_string(),
+        first_name: first_name.to_string(),
+        last_name: last_name.to_string(),
+    });
+}
+
+fn seed_invitation(mock: &Mock, id: &str, email: &str, state: &str, organization_id: &str) {
+    mock.directory.lock().unwrap().invitations.push(json!({
+        "object": "invitation",
+        "id": id,
+        "email": email,
+        "state": state,
+        "organization_id": organization_id,
+    }));
+}
+
+#[tokio::test]
+async fn team_page_lists_only_the_signed_in_organization() {
+    let (app, mock) = setup().await;
+    {
+        let mut directory = mock.directory.lock().unwrap();
+        directory
+            .memberships
+            .push(("user_1".into(), "org_1".into(), "active".into()));
+        directory
+            .memberships
+            .push(("user_2".into(), "org_1".into(), "active".into()));
+        directory
+            .memberships
+            .push(("user_3".into(), "org_1".into(), "inactive".into()));
+        directory
+            .memberships
+            .push(("user_4".into(), "org_1".into(), "pending".into()));
+        directory
+            .memberships
+            .push(("user_9".into(), "org_evil".into(), "active".into()));
+    }
+    seed_user(&mock, "user_2", "ada@cadri.test", "Ada", "Lovelace");
+    seed_user(&mock, "user_3", "quiet@cadri.test", "", "");
+    seed_user(&mock, "user_4", "pending@cadri.test", "Pat", "Pending");
+    seed_user(&mock, "user_9", "stranger@cadri.test", "Other", "Org");
+    seed_invitation(
+        &mock,
+        "invitation_pending",
+        "pending@cadri.test",
+        "pending",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_expired",
+        "old@cadri.test",
+        "expired",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_revoked",
+        "gone@cadri.test",
+        "revoked",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_accepted",
+        "ada@cadri.test",
+        "accepted",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_evil",
+        "stranger@cadri.test",
+        "pending",
+        "org_evil",
+    );
+
+    let (status, _, _) = send(&app, get_with("/auth/team", &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+    let (status, _, body) = send(
+        &app,
+        get_with(
+            "/auth/team?organization_id=org_evil",
+            &[("cookie", &cookie)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rendered = body.to_string();
+    assert!(!rendered.contains("stranger@cadri.test"), "{rendered}");
+    assert!(!rendered.contains("company.com"), "{rendered}");
+    assert!(!rendered.contains("org_evil"), "{rendered}");
+
+    let mut people = body["people"].as_array().cloned().unwrap();
+    people.sort_by(|left, right| {
+        left["email"]
+            .as_str()
+            .unwrap()
+            .cmp(right["email"].as_str().unwrap())
+            .then(
+                left["status"]
+                    .as_str()
+                    .unwrap()
+                    .cmp(right["status"].as_str().unwrap()),
+            )
+    });
+    assert_eq!(
+        people,
+        vec![
+            json!({
+                "email": "ada@cadri.test",
+                "name": "Ada Lovelace",
+                "status": "joined",
+                "membership_id": "om_user_2_org_1",
+                "invitation_id": null,
+            }),
+            json!({
+                "email": "gone@cadri.test",
+                "name": null,
+                "status": "revoked",
+                "membership_id": null,
+                "invitation_id": "invitation_revoked",
+            }),
+            json!({
+                "email": "old@cadri.test",
+                "name": null,
+                "status": "expired",
+                "membership_id": null,
+                "invitation_id": "invitation_expired",
+            }),
+            json!({
+                "email": "pending@cadri.test",
+                "name": null,
+                "status": "invited",
+                "membership_id": null,
+                "invitation_id": "invitation_pending",
+            }),
+            json!({
+                "email": "quiet@cadri.test",
+                "name": null,
+                "status": "inactive",
+                "membership_id": "om_user_3_org_1",
+                "invitation_id": null,
+            }),
+            json!({
+                "email": "user1@example.com",
+                "name": null,
+                "status": "joined",
+                "membership_id": "om_user_1_org_1",
+                "invitation_id": null,
+            }),
+        ]
+    );
+
+    let empty_cookie =
+        encrypted_session(&mock.token(Some("org_empty"), now() + 300), "good-refresh");
+    let (status, _, body) = send(&app, get_with("/auth/team", &[("cookie", &empty_cookie)])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "people": [] }));
+}
+
+#[tokio::test]
+async fn team_actions_cannot_cross_organizations() {
+    let (app, mock) = setup().await;
+    {
+        let mut directory = mock.directory.lock().unwrap();
+        directory
+            .memberships
+            .push(("user_1".into(), "org_1".into(), "active".into()));
+        directory
+            .memberships
+            .push(("user_2".into(), "org_1".into(), "active".into()));
+        directory
+            .memberships
+            .push(("user_9".into(), "org_evil".into(), "active".into()));
+    }
+    seed_invitation(
+        &mock,
+        "invitation_pending",
+        "new@cadri.test",
+        "pending",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_expired",
+        "old@cadri.test",
+        "expired",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_revoked",
+        "gone@cadri.test",
+        "revoked",
+        "org_1",
+    );
+    seed_invitation(
+        &mock,
+        "invitation_evil",
+        "stranger@cadri.test",
+        "pending",
+        "org_evil",
+    );
+    let cookie = encrypted_session(&mock.valid_token("org_1"), "good-refresh");
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::DELETE,
+            "/auth/memberships/om_user_9_org_evil",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "not_found");
+    assert!(mock
+        .directory
+        .lock()
+        .unwrap()
+        .memberships
+        .iter()
+        .any(|(user, org, _)| user == "user_9" && org == "org_evil"));
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::DELETE,
+            "/auth/memberships/om_user_1_org_1",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "cannot_remove_self");
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::DELETE,
+            "/auth/memberships/not-an-id",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_id");
+
+    let (status, _, _) = send(
+        &app,
+        request(
+            Method::DELETE,
+            "/auth/memberships/om_user_2_org_1",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!mock
+        .directory
+        .lock()
+        .unwrap()
+        .memberships
+        .iter()
+        .any(|(user, _, _)| user == "user_2"));
+
+    let (status, _, _) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations/invitation_evil/revoke",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        mock.directory
+            .lock()
+            .unwrap()
+            .invitations
+            .iter()
+            .find(|invitation| { invitation["id"] == "invitation_evil" })
+            .unwrap()["state"],
+        "pending"
+    );
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations/invitation_pending/revoke",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "revoked");
+
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations/invitation_expired/resend",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], "old@cadri.test");
+    assert_eq!(body["state"], "pending");
+
+    let before = mock.directory.lock().unwrap().invitations.len();
+    let (status, _, body) = send(
+        &app,
+        request(
+            Method::POST,
+            "/auth/invitations/invitation_revoked/resend",
+            &[("cookie", &cookie)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], "gone@cadri.test");
+    assert_eq!(body["state"], "pending");
+    let invitations = mock.directory.lock().unwrap().invitations.clone();
+    assert_eq!(invitations.len(), before + 1);
+    assert_eq!(invitations.last().unwrap()["organization_id"], "org_1");
+    assert_eq!(invitations.last().unwrap()["email"], "gone@cadri.test");
+}
+
 #[test]
 fn cookie_key_must_be_long_base64() {
     assert!(cadri_ee::cookie_key_from_base64("not base64!").is_err());
@@ -1732,6 +2326,131 @@ async fn billing_stays_off_until_stripe_is_configured() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn billing_history_lists_finalized_invoices_for_this_customer() {
+    let (app, mock) = setup_billing().await;
+    let (session, _) = open_team(&app, &mock).await;
+    mock.directory.lock().unwrap().invoices = vec![
+        json!({
+            "id": "in_paid",
+            "object": "invoice",
+            "customer": "cus_1",
+            "status": "paid",
+            "created": 1_700_000_000,
+            "description": null,
+            "number": "INV-0001",
+            "amount_paid": 2000,
+            "amount_due": 2000,
+            "currency": "usd",
+            "hosted_invoice_url": "https://invoice.stripe.com/i/acct_test/paid",
+            "status_transitions": { "paid_at": 1_700_000_100 },
+            "lines": { "data": [{ "description": "Cadri" }] }
+        }),
+        json!({
+            "id": "in_draft",
+            "object": "invoice",
+            "customer": "cus_1",
+            "status": "draft",
+            "created": 1_700_000_300,
+            "amount_due": 100,
+            "currency": "usd",
+            "lines": { "data": [{ "description": "Hidden draft" }] }
+        }),
+        json!({
+            "id": "in_other",
+            "object": "invoice",
+            "customer": "cus_other",
+            "status": "paid",
+            "created": 1_700_000_400,
+            "amount_paid": 900,
+            "currency": "usd",
+            "hosted_invoice_url": "https://invoice.stripe.com/i/acct_test/other",
+            "status_transitions": { "paid_at": 1_700_000_400 },
+            "lines": { "data": [{ "description": "Someone else" }] }
+        }),
+        json!({
+            "id": "in_open",
+            "object": "invoice",
+            "customer": "cus_1",
+            "status": "open",
+            "created": 1_700_000_200,
+            "description": null,
+            "number": "INV-0002",
+            "amount_paid": 0,
+            "amount_due": 4000,
+            "currency": "usd",
+            "hosted_invoice_url": null,
+            "charge": { "id": "ch_1", "receipt_url": "https://pay.stripe.com/receipts/invoices/test" },
+            "status_transitions": { "paid_at": null },
+            "lines": { "data": [{ "description": "Cadri seats" }] }
+        }),
+    ];
+    let (status, _, body) = send(
+        &app,
+        get_with(
+            "/api/billing/invoices?customer=cus_other",
+            &[("cookie", &session)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["invoices"],
+        json!([
+            {
+                "id": "in_open",
+                "date": 1_700_000_200,
+                "description": "Cadri seats",
+                "amount": "$40.00",
+                "currency": "usd",
+                "receipt_url": "https://pay.stripe.com/receipts/invoices/test"
+            },
+            {
+                "id": "in_paid",
+                "date": 1_700_000_100,
+                "description": "Cadri",
+                "amount": "$20.00",
+                "currency": "usd",
+                "receipt_url": "https://invoice.stripe.com/i/acct_test/paid"
+            }
+        ])
+    );
+    let queries = mock.directory.lock().unwrap().invoice_queries.clone();
+    assert_eq!(queries, vec!["customer=cus_1&limit=40".to_string()]);
+}
+
+#[tokio::test]
+async fn billing_history_is_empty_when_the_org_has_no_stripe_customer() {
+    let (app, mock) = setup_billing().await;
+    let auth = bearer(&mock.valid_token("org_unbilled"));
+    let (status, _, body) = send(
+        &app,
+        get_with("/api/billing/invoices", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "invoices": [] }));
+    assert!(mock.directory.lock().unwrap().invoice_queries.is_empty());
+}
+
+#[tokio::test]
+async fn billing_history_requires_stripe_and_a_session() {
+    let (app, mock) = setup().await;
+    let auth = bearer(&mock.valid_token("org_1"));
+    let (status, _, body) = send(
+        &app,
+        get_with("/api/billing/invoices", &[("authorization", &auth)]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body, json!({ "error": "billing_disabled" }));
+
+    let (app, _) = setup_billing().await;
+    let (status, _, body) = send(&app, get_with("/api/billing/invoices", &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, json!({ "error": "unauthorized" }));
 }
 
 #[tokio::test]

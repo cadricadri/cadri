@@ -335,6 +335,300 @@ pub async fn cancel_subscription(
     serde_json::from_value(value).map_err(|_| StripeError::Unavailable)
 }
 
+/// How many finalized invoices the billing page asks Stripe for. One page, not the full history.
+pub const INVOICE_LIST_LIMIT: usize = 40;
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BillingInvoice {
+    pub id: String,
+    /// `status_transitions.paid_at` when the invoice is paid, otherwise `created`.
+    pub date: i64,
+    pub description: String,
+    /// `amount_paid` when paid, otherwise `amount_due`, in the invoice currency.
+    pub amount: String,
+    pub currency: String,
+    /// Hosted invoice page, or a charge receipt when Stripe did not send one.
+    pub receipt_url: Option<String>,
+}
+
+/// Latest finalized invoices for this Stripe customer. Drafts are left out.
+/// A missing customer is an empty page, not a Stripe call.
+pub async fn list_invoices(
+    http: &reqwest::Client,
+    config: &StripeConfig,
+    customer_id: &str,
+) -> Result<Vec<BillingInvoice>, StripeError> {
+    if customer_id.is_empty() {
+        return Ok(Vec::new());
+    }
+    let path = format!(
+        "/v1/invoices?customer={}&limit={INVOICE_LIST_LIMIT}",
+        encode(customer_id),
+    );
+    let page = stripe_request(http, config, reqwest::Method::GET, &path, None, None).await?;
+    Ok(invoices_from_list(&page, customer_id))
+}
+
+fn invoices_from_list(page: &Value, customer_id: &str) -> Vec<BillingInvoice> {
+    let Some(data) = page.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for invoice in data {
+        if let Some(row) = invoice_row(invoice, customer_id) {
+            rows.push(row);
+        }
+    }
+    rows.sort_by(|left, right| right.date.cmp(&left.date).then(right.id.cmp(&left.id)));
+    rows.truncate(INVOICE_LIST_LIMIT);
+    rows
+}
+
+fn invoice_row(invoice: &Value, customer_id: &str) -> Option<BillingInvoice> {
+    let id = invoice_id(invoice)?;
+    if !is_finalized(invoice) || !belongs_to_customer(invoice, customer_id) {
+        return None;
+    }
+    let date = invoice_date(invoice)?;
+    let currency = invoice_currency(invoice);
+    Some(BillingInvoice {
+        id: id.to_string(),
+        date,
+        description: invoice_description(invoice),
+        amount: format_amount(invoice_amount(invoice), &currency),
+        currency,
+        receipt_url: receipt_link(invoice),
+    })
+}
+
+fn invoice_id(invoice: &Value) -> Option<&str> {
+    if invoice.get("object").and_then(Value::as_str) != Some("invoice") {
+        return None;
+    }
+    let id = text(invoice.get("id"))?;
+    // List results are real invoices. Preview rows use a different id prefix.
+    if id.starts_with("in_") {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+fn is_finalized(invoice: &Value) -> bool {
+    matches!(
+        invoice.get("status").and_then(Value::as_str),
+        Some("open" | "paid" | "uncollectible" | "void")
+    )
+}
+
+fn belongs_to_customer(invoice: &Value, customer_id: &str) -> bool {
+    match invoice.get("customer") {
+        Some(Value::String(id)) => id == customer_id,
+        Some(customer) => customer.get("id").and_then(Value::as_str) == Some(customer_id),
+        None => false,
+    }
+}
+
+/// Paid rows use `paid_at`. Anything still unpaid uses `created`.
+fn invoice_date(invoice: &Value) -> Option<i64> {
+    let created = unix_stamp(invoice.get("created"));
+    if invoice.get("status").and_then(Value::as_str) == Some("paid") {
+        unix_stamp(
+            invoice
+                .get("status_transitions")
+                .and_then(|transitions| transitions.get("paid_at")),
+        )
+        .or(created)
+    } else {
+        created
+    }
+}
+
+fn unix_stamp(value: Option<&Value>) -> Option<i64> {
+    value.and_then(Value::as_i64).filter(|stamp| *stamp > 0)
+}
+
+fn invoice_amount(invoice: &Value) -> i64 {
+    let field = if invoice.get("status").and_then(Value::as_str) == Some("paid") {
+        "amount_paid"
+    } else {
+        "amount_due"
+    };
+    invoice.get(field).and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn invoice_currency(invoice: &Value) -> String {
+    text(invoice.get("currency"))
+        .unwrap_or("usd")
+        .to_ascii_lowercase()
+}
+
+fn invoice_description(invoice: &Value) -> String {
+    if let Some(description) = text(invoice.get("description")) {
+        return clip(description);
+    }
+    if let Some(summary) = line_summary(invoice) {
+        return clip(&summary);
+    }
+    if let Some(number) = text(invoice.get("number")) {
+        return clip(&format!("Invoice {number}"));
+    }
+    "Invoice".to_string()
+}
+
+fn line_summary(invoice: &Value) -> Option<String> {
+    let lines = invoice
+        .get("lines")
+        .and_then(|lines| lines.get("data"))
+        .and_then(Value::as_array)?;
+    let mut parts = Vec::new();
+    for line in lines {
+        let Some(description) = text(line.get("description")) else {
+            continue;
+        };
+        if parts
+            .iter()
+            .any(|existing: &String| existing == description)
+        {
+            continue;
+        }
+        parts.push(description.to_string());
+        if parts.len() == 3 {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(", "))
+    }
+}
+
+const DESCRIPTION_MAX: usize = 160;
+
+fn clip(text: &str) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(DESCRIPTION_MAX).collect();
+    if chars.next().is_some() {
+        let mut shorter: String = head.chars().take(DESCRIPTION_MAX - 1).collect();
+        shorter.push('…');
+        shorter
+    } else {
+        head
+    }
+}
+
+fn text(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+/// Prefer the hosted invoice. A charge `receipt_url` is only used when that is missing.
+fn receipt_link(invoice: &Value) -> Option<String> {
+    stripe_page_url(invoice.get("hosted_invoice_url")).or_else(|| charge_receipt_url(invoice))
+}
+
+fn charge_receipt_url(invoice: &Value) -> Option<String> {
+    if let Some(url) = stripe_page_url(
+        invoice
+            .get("charge")
+            .and_then(|charge| charge.get("receipt_url")),
+    ) {
+        return Some(url);
+    }
+    let payments = invoice
+        .get("payments")
+        .and_then(|payments| payments.get("data"))
+        .and_then(Value::as_array)?;
+    for payment in payments {
+        if let Some(url) = stripe_page_url(
+            payment
+                .pointer("/payment/charge")
+                .and_then(|charge| charge.get("receipt_url")),
+        ) {
+            return Some(url);
+        }
+        if let Some(url) = stripe_page_url(
+            payment
+                .pointer("/payment/payment_intent/latest_charge")
+                .and_then(|charge| charge.get("receipt_url")),
+        ) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn stripe_page_url(value: Option<&Value>) -> Option<String> {
+    let url = text(value)?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host == "stripe.com" || host.ends_with(".stripe.com") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+/// Stripe amounts are minor units. Zero-decimal currencies are already major units.
+/// ISK and UGX stay two-decimal for Stripe's compatibility amounts. HUF and TWD do too.
+fn format_amount(amount: i64, currency: &str) -> String {
+    let code = currency.trim().to_ascii_lowercase();
+    let scale = minor_unit_scale(&code);
+    let negative = amount < 0;
+    let amount = amount.unsigned_abs();
+    let factor = 10u64.pow(scale);
+    let (major, minor) = if scale == 0 {
+        (amount, 0)
+    } else {
+        (amount / factor, amount % factor)
+    };
+    let major_text = group_thousands(major);
+    let number = if scale == 0 {
+        major_text
+    } else {
+        format!("{major_text}.{minor:0width$}", width = scale as usize)
+    };
+    let body = match code.as_str() {
+        "usd" => format!("${number}"),
+        "eur" => format!("€{number}"),
+        "gbp" => format!("£{number}"),
+        "jpy" => format!("¥{number}"),
+        _ => format!("{number} {}", code.to_ascii_uppercase()),
+    };
+    if negative {
+        format!("-{body}")
+    } else {
+        body
+    }
+}
+
+fn minor_unit_scale(currency: &str) -> u32 {
+    match currency {
+        "bif" | "clp" | "djf" | "gnf" | "jpy" | "kmf" | "krw" | "mga" | "pyg" | "rwf" | "vnd"
+        | "vuv" | "xaf" | "xof" | "xpf" => 0,
+        "bhd" | "jod" | "kwd" | "omr" | "tnd" => 3,
+        _ => 2,
+    }
+}
+
+fn group_thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Portal sessions use Cadri's configuration, not the Stripe account default.
 /// Payment method updates are on. Cancellation and invoice history are off until chosen deliberately.
 pub async fn portal_url(
@@ -456,4 +750,161 @@ fn find_portal_configuration(page: &Value) -> Option<String> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn page(data: Vec<Value>) -> Value {
+        json!({ "object": "list", "data": data })
+    }
+
+    #[test]
+    fn finalized_invoices_use_paid_at_amount_paid_and_the_hosted_invoice() {
+        let rows = invoices_from_list(
+            &page(vec![json!({
+                "id": "in_paid",
+                "object": "invoice",
+                "customer": "cus_1",
+                "status": "paid",
+                "created": 1_700_000_000,
+                "number": "INV-0001",
+                "description": null,
+                "amount_paid": 2000,
+                "amount_due": 2000,
+                "currency": "usd",
+                "hosted_invoice_url": "https://invoice.stripe.com/i/acct_test/paid",
+                "status_transitions": { "paid_at": 1_700_000_100 },
+                "lines": { "data": [{ "description": "Cadri" }] }
+            })]),
+            "cus_1",
+        );
+        assert_eq!(
+            rows,
+            vec![BillingInvoice {
+                id: "in_paid".to_string(),
+                date: 1_700_000_100,
+                description: "Cadri".to_string(),
+                amount: "$20.00".to_string(),
+                currency: "usd".to_string(),
+                receipt_url: Some("https://invoice.stripe.com/i/acct_test/paid".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn unpaid_invoices_use_created_amount_due_and_a_charge_receipt() {
+        let rows = invoices_from_list(
+            &page(vec![json!({
+                "id": "in_open",
+                "object": "invoice",
+                "customer": { "id": "cus_1", "object": "customer" },
+                "status": "open",
+                "created": 1_700_000_200,
+                "description": "  ",
+                "number": "INV-0002",
+                "amount_paid": 0,
+                "amount_due": 4000,
+                "currency": "USD",
+                "hosted_invoice_url": null,
+                "status_transitions": { "paid_at": null },
+                "lines": { "data": [{ "description": null }] },
+                "payments": {
+                    "data": [{
+                        "payment": {
+                            "charge": {
+                                "receipt_url": "https://pay.stripe.com/receipts/invoices/test"
+                            }
+                        }
+                    }]
+                }
+            })]),
+            "cus_1",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].date, 1_700_000_200);
+        assert_eq!(rows[0].amount, "$40.00");
+        assert_eq!(rows[0].description, "Invoice INV-0002");
+        assert_eq!(
+            rows[0].receipt_url.as_deref(),
+            Some("https://pay.stripe.com/receipts/invoices/test")
+        );
+    }
+
+    #[test]
+    fn drafts_other_customers_and_non_stripe_receipts_are_dropped() {
+        let rows = invoices_from_list(
+            &page(vec![
+                json!({
+                    "id": "in_draft",
+                    "object": "invoice",
+                    "customer": "cus_1",
+                    "status": "draft",
+                    "created": 1_700_000_300,
+                    "amount_due": 100,
+                    "currency": "usd"
+                }),
+                json!({
+                    "id": "in_other",
+                    "object": "invoice",
+                    "customer": "cus_other",
+                    "status": "paid",
+                    "created": 1_700_000_400,
+                    "amount_paid": 900,
+                    "currency": "usd",
+                    "hosted_invoice_url": "https://invoice.stripe.com/i/acct_test/other",
+                    "status_transitions": { "paid_at": 1_700_000_400 }
+                }),
+                json!({
+                    "id": "upcoming_in_1",
+                    "object": "invoice",
+                    "customer": "cus_1",
+                    "status": "open",
+                    "created": 1_700_000_500,
+                    "amount_due": 100,
+                    "currency": "usd"
+                }),
+                json!({
+                    "id": "in_void",
+                    "object": "invoice",
+                    "customer": "cus_1",
+                    "status": "void",
+                    "created": 1_700_000_050,
+                    "description": "Seat adjustment",
+                    "amount_paid": 2000,
+                    "amount_due": 0,
+                    "currency": "usd",
+                    "hosted_invoice_url": "http://invoice.stripe.com/not-https",
+                    "charge": { "receipt_url": "https://evil.example/receipt" }
+                }),
+            ]),
+            "cus_1",
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "in_void");
+        assert_eq!(rows[0].date, 1_700_000_050);
+        assert_eq!(rows[0].amount, "$0.00");
+        assert_eq!(rows[0].description, "Seat adjustment");
+        assert_eq!(rows[0].receipt_url, None);
+    }
+
+    #[test]
+    fn amounts_follow_stripe_minor_units() {
+        assert_eq!(format_amount(2000, "usd"), "$20.00");
+        assert_eq!(format_amount(0, "usd"), "$0.00");
+        assert_eq!(format_amount(100_000, "usd"), "$1,000.00");
+        assert_eq!(format_amount(-250, "usd"), "-$2.50");
+        assert_eq!(format_amount(500, "jpy"), "¥500");
+        assert_eq!(format_amount(5_120, "kwd"), "5.120 KWD");
+        assert_eq!(format_amount(500, "ugx"), "5.00 UGX");
+        assert_eq!(format_amount(500, "isk"), "5.00 ISK");
+    }
+
+    #[test]
+    fn an_empty_invoice_page_stays_empty() {
+        assert!(invoices_from_list(&json!({ "data": [] }), "cus_1").is_empty());
+        assert!(invoices_from_list(&json!({}), "cus_1").is_empty());
+    }
 }

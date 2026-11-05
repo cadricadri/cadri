@@ -219,10 +219,7 @@ fn row_to_transcript(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Re
     let content: String = row.get(3)?;
     let conversation = parse_conversation(row.get(11)?);
     let transcript_text: Option<String> = row.get(12)?;
-    let preview = match transcript_text
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
+    let preview = match transcript_text.as_ref().filter(|value| !value.is_empty()) {
         Some(text) => preview(text),
         None => preview(&content),
     };
@@ -233,11 +230,7 @@ fn row_to_transcript(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Re
         hook_event: row.get(2)?,
         bytes: content.len(),
         preview,
-        content: if include_layer_a {
-            Some(content)
-        } else {
-            None
-        },
+        content: if include_layer_a { Some(content) } else { None },
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
         user_id: row.get(6)?,
@@ -412,10 +405,7 @@ mod tests {
 
         assert_eq!(second.session_id, "session-1");
         assert_eq!(second.thread_id.as_deref(), Some("session-1"));
-        assert_eq!(
-            second.content.as_deref(),
-            Some("hello\nfull transcript")
-        );
+        assert_eq!(second.content.as_deref(), Some("hello\nfull transcript"));
         assert_eq!(second.cwd.as_deref(), Some("/work"));
         assert_eq!(second.hook_event.as_deref(), Some("Stop"));
         assert_eq!(second.harness.as_deref(), Some("claude_code"));
@@ -423,7 +413,11 @@ mod tests {
         assert_eq!(second.created_at, first.created_at);
         assert_eq!(
             second.bytes,
-            second.content.as_ref().map(|value| value.len()).unwrap_or(0)
+            second
+                .content
+                .as_ref()
+                .map(|value| value.len())
+                .unwrap_or(0)
         );
     }
 

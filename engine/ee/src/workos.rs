@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -18,6 +18,7 @@ pub use billing::sign_webhook;
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -123,6 +124,28 @@ pub(crate) struct Invitation {
     pub state: String,
 }
 
+/// One row on the Team page. Organization comes from the session, never from the client.
+#[derive(Debug, Serialize)]
+pub(crate) struct TeamPerson {
+    pub email: String,
+    pub name: Option<String>,
+    pub status: &'static str,
+    pub membership_id: Option<String>,
+    pub invitation_id: Option<String>,
+}
+
+/// WorkOS object ids are a single path segment. Reject anything that could change the URL.
+pub(crate) fn workos_object_id(id: &str) -> Option<&str> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        None
+    } else {
+        Some(id)
+    }
+}
+
 enum Membership {
     None,
     One(String),
@@ -152,6 +175,54 @@ struct MembershipPage {
 #[derive(Default, Deserialize)]
 struct ListMetadata {
     after: Option<String>,
+}
+
+fn empty_vec<T>() -> Vec<T> {
+    Vec::new()
+}
+
+#[derive(Deserialize)]
+struct Page<T> {
+    #[serde(default = "empty_vec")]
+    data: Vec<T>,
+    #[serde(default)]
+    list_metadata: ListMetadata,
+}
+
+#[derive(Deserialize)]
+struct ListedMembership {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    user_id: String,
+    #[serde(default)]
+    organization_id: String,
+    #[serde(default)]
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct ListedUser {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    first_name: Option<String>,
+    #[serde(default)]
+    last_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StoredInvitation {
+    #[serde(default)]
+    email: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    organization_id: String,
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -707,6 +778,242 @@ impl WorkOs {
         parse_response(response, "invitation").await
     }
 
+    /// Members and invitations for the organization on the session token.
+    /// A caller-supplied organization id is not read.
+    pub(crate) async fn list_team(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(HeaderMap, Vec<TeamPerson>), ApiError> {
+        let (authenticated, _) = self.authenticate_session(headers).await?;
+        let org_id = authenticated.identity.org_id.clone();
+        let memberships = self
+            .list_for_org::<ListedMembership>(
+                "/user_management/organization_memberships",
+                &org_id,
+                "organization memberships",
+            )
+            .await
+            .map_err(workos_call)?;
+        let users = self
+            .list_for_org::<ListedUser>("/user_management/users", &org_id, "users")
+            .await
+            .map_err(workos_call)?;
+        let invitations = self
+            .list_for_org::<StoredInvitation>(
+                "/user_management/invitations",
+                &org_id,
+                "invitations",
+            )
+            .await
+            .map_err(workos_call)?;
+        let mut profiles = HashMap::new();
+        for user in users {
+            if let Some(profile) = known_user(&user) {
+                profiles.insert(user.id, profile);
+            }
+        }
+        for membership in &memberships {
+            if membership.organization_id != org_id || profiles.contains_key(&membership.user_id) {
+                continue;
+            }
+            let Some(user_id) = workos_object_id(&membership.user_id) else {
+                continue;
+            };
+            if let Ok(user) = self.fetch_user(user_id).await {
+                if let Some(profile) = known_user(&user) {
+                    profiles.insert(user.id, profile);
+                }
+            }
+        }
+        Ok((
+            authenticated.headers,
+            assemble_team(&org_id, memberships, &profiles, invitations),
+        ))
+    }
+
+    pub(crate) async fn remove_member(
+        &self,
+        headers: &HeaderMap,
+        membership_id: &str,
+    ) -> Result<HeaderMap, ApiError> {
+        let (authenticated, _) = self.authenticate_session(headers).await?;
+        let membership = self
+            .get_membership(membership_id)
+            .await
+            .map_err(team_call)?;
+        if membership.organization_id != authenticated.identity.org_id {
+            return Err(not_found());
+        }
+        if !membership.user_id.is_empty() && membership.user_id == authenticated.identity.user_id {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "cannot_remove_self"));
+        }
+        self.delete_membership(membership_id)
+            .await
+            .map_err(team_call)?;
+        Ok(authenticated.headers)
+    }
+
+    pub(crate) async fn revoke_invitation(
+        &self,
+        headers: &HeaderMap,
+        invitation_id: &str,
+    ) -> Result<(HeaderMap, Invitation), ApiError> {
+        let (authenticated, _) = self.authenticate_session(headers).await?;
+        let invitation = self
+            .get_invitation(invitation_id)
+            .await
+            .map_err(team_call)?;
+        if invitation.organization_id != authenticated.identity.org_id {
+            return Err(not_found());
+        }
+        let revoked = self
+            .invitation_action(invitation_id, "revoke")
+            .await
+            .map_err(team_call)?;
+        Ok((authenticated.headers, revoked))
+    }
+
+    /// Pending and expired invitations use WorkOS resend. A revoked invitation cannot be
+    /// resent, so this sends a new invitation to the same address in the session organization.
+    pub(crate) async fn resend_invitation(
+        &self,
+        headers: &HeaderMap,
+        invitation_id: &str,
+    ) -> Result<(HeaderMap, Invitation), ApiError> {
+        let (authenticated, claims) = self.authenticate_session(headers).await?;
+        if !self
+            .access_allowed(&claims.entitlements, &authenticated.identity)
+            .await?
+        {
+            return Err(ApiError::new(
+                StatusCode::PAYMENT_REQUIRED,
+                "payment_required",
+            ));
+        }
+        let invitation = self
+            .get_invitation(invitation_id)
+            .await
+            .map_err(team_call)?;
+        if invitation.organization_id != authenticated.identity.org_id {
+            return Err(not_found());
+        }
+        let sent = if invitation.state == "revoked" {
+            if invitation.email.trim().is_empty() {
+                return Err(not_found());
+            }
+            self.send_invitation(
+                invitation.email.trim(),
+                &authenticated.identity.org_id,
+                &authenticated.identity.user_id,
+            )
+            .await
+            .map_err(workos_call)?
+        } else {
+            self.invitation_action(invitation_id, "resend")
+                .await
+                .map_err(team_call)?
+        };
+        Ok((authenticated.headers, sent))
+    }
+
+    async fn list_for_org<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        organization_id: &str,
+        what: &str,
+    ) -> Result<Vec<T>, WorkOsError> {
+        let mut items = Vec::new();
+        let mut after: Option<String> = None;
+        for _ in 0..20 {
+            let mut pairs = vec![
+                ("organization_id", organization_id.to_string()),
+                ("limit", "100".to_string()),
+            ];
+            if let Some(cursor) = &after {
+                pairs.push(("after", cursor.clone()));
+            }
+            let url = reqwest::Url::parse_with_params(
+                &self.url(path),
+                pairs.iter().map(|(key, value)| (*key, value.as_str())),
+            )
+            .expect("WorkOS API base is a valid URL");
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(&self.config.api_key)
+                .send()
+                .await
+                .map_err(|err| unavailable(what, err))?;
+            let page: Page<T> = parse_response(response, what).await?;
+            items.extend(page.data);
+            let next = page.list_metadata.after.filter(|cursor| !cursor.is_empty());
+            if next.is_none() || next == after {
+                return Ok(items);
+            }
+            after = next;
+        }
+        Ok(items)
+    }
+
+    async fn fetch_user(&self, user_id: &str) -> Result<ListedUser, WorkOsError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/user_management/users/{user_id}")))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("user", err))?;
+        parse_response(response, "user").await
+    }
+
+    async fn get_membership(&self, id: &str) -> Result<ListedMembership, WorkOsError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/user_management/organization_memberships/{id}")))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("organization membership", err))?;
+        parse_response(response, "organization membership").await
+    }
+
+    async fn delete_membership(&self, id: &str) -> Result<(), WorkOsError> {
+        let response = self
+            .http
+            .delete(self.url(&format!("/user_management/organization_memberships/{id}")))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("delete organization membership", err))?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(());
+        }
+        let _: Value = parse_response(response, "delete organization membership").await?;
+        Ok(())
+    }
+
+    async fn get_invitation(&self, id: &str) -> Result<StoredInvitation, WorkOsError> {
+        let response = self
+            .http
+            .get(self.url(&format!("/user_management/invitations/{id}")))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("invitation", err))?;
+        parse_response(response, "invitation").await
+    }
+
+    async fn invitation_action(&self, id: &str, action: &str) -> Result<Invitation, WorkOsError> {
+        let response = self
+            .http
+            .post(self.url(&format!("/user_management/invitations/{id}/{action}")))
+            .bearer_auth(&self.config.api_key)
+            .send()
+            .await
+            .map_err(|err| unavailable("invitation", err))?;
+        parse_response(response, "invitation").await
+    }
+
     pub(crate) async fn authenticate_session(
         &self,
         headers: &HeaderMap,
@@ -803,6 +1110,129 @@ fn nonempty(value: &Option<String>) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+struct KnownUser {
+    email: String,
+    name: Option<String>,
+}
+
+fn known_user(user: &ListedUser) -> Option<KnownUser> {
+    let email = user.email.trim();
+    if email.is_empty() {
+        return None;
+    }
+    Some(KnownUser {
+        email: email.to_string(),
+        name: person_name(
+            user.first_name.as_deref().unwrap_or(""),
+            user.last_name.as_deref().unwrap_or(""),
+        ),
+    })
+}
+
+fn person_name(first: &str, last: &str) -> Option<String> {
+    let name = [first.trim(), last.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn membership_status(status: &str) -> Option<&'static str> {
+    match status {
+        "active" => Some("joined"),
+        "inactive" => Some("inactive"),
+        "pending" => Some("invited"),
+        _ => None,
+    }
+}
+
+fn invitation_status(state: &str) -> Option<&'static str> {
+    match state {
+        "pending" => Some("invited"),
+        "expired" => Some("expired"),
+        "revoked" => Some("revoked"),
+        _ => None,
+    }
+}
+
+fn email_key(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+fn owned_id(id: &str) -> Option<String> {
+    workos_object_id(id).map(str::to_string)
+}
+
+fn assemble_team(
+    org_id: &str,
+    memberships: Vec<ListedMembership>,
+    users: &HashMap<String, KnownUser>,
+    invitations: Vec<StoredInvitation>,
+) -> Vec<TeamPerson> {
+    let mut invitation_emails = HashSet::new();
+    let mut people = Vec::new();
+    for invitation in invitations {
+        if invitation.organization_id != org_id {
+            continue;
+        }
+        let Some(status) = invitation_status(&invitation.state) else {
+            continue;
+        };
+        let email = invitation.email.trim();
+        if email.is_empty() {
+            continue;
+        }
+        invitation_emails.insert(email_key(email));
+        people.push(TeamPerson {
+            email: email.to_string(),
+            name: None,
+            status,
+            membership_id: None,
+            invitation_id: owned_id(&invitation.id),
+        });
+    }
+    for membership in memberships {
+        if membership.organization_id != org_id {
+            continue;
+        }
+        let Some(status) = membership_status(&membership.status) else {
+            continue;
+        };
+        let Some(user) = users.get(&membership.user_id) else {
+            continue;
+        };
+        if status == "invited" && invitation_emails.contains(&email_key(&user.email)) {
+            continue;
+        }
+        people.push(TeamPerson {
+            email: user.email.clone(),
+            name: user.name.clone(),
+            status,
+            membership_id: owned_id(&membership.id),
+            invitation_id: None,
+        });
+    }
+    people
+}
+
+fn not_found() -> ApiError {
+    ApiError::new(StatusCode::NOT_FOUND, "not_found")
+}
+
+fn team_call(err: WorkOsError) -> ApiError {
+    if let WorkOsError::Api(code) = &err {
+        if code == "http_404" || code == "entity_not_found" || code == "not_found" {
+            return not_found();
+        }
+    }
+    workos_call(err)
 }
 
 fn workos_call(err: WorkOsError) -> ApiError {

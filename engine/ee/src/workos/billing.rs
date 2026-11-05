@@ -260,6 +260,20 @@ impl WorkOs {
             .map_err(stripe_error)
     }
 
+    /// Invoices for the org's Stripe customer. No billing row yet is an empty history.
+    pub(crate) async fn billing_history(
+        &self,
+        identity: &Identity,
+    ) -> Result<Vec<stripe::BillingInvoice>, ApiError> {
+        let config = self.stripe.as_ref().ok_or_else(billing_disabled)?;
+        let Some(account) = self.account(&identity.org_id)? else {
+            return Ok(Vec::new());
+        };
+        stripe::list_invoices(&self.http, config, &account.stripe_customer_id)
+            .await
+            .map_err(stripe_error)
+    }
+
     pub(crate) async fn handle_stripe_webhook(
         &self,
         payload: &[u8],

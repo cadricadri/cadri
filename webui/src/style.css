@@ -254,29 +254,65 @@ button {
   color: inherit;
 }
 
-.nav-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.nav-footer .nav-signout {
+  padding-block: 5px;
 }
 
 .theme-toggle {
-  flex: none;
-  height: 24px;
-  padding: 0 8px;
-  border: 2px solid var(--ink);
-  background: none;
-  color: var(--ink);
-  font-family: var(--px);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.2rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 88%, var(--ink));
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
-.theme-toggle:hover,
-.theme-toggle:focus-visible {
-  background: var(--ink);
-  color: var(--paper);
+.theme-toggle button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0.55rem;
+  background: transparent;
+  color: var(--mute);
+  box-shadow: none;
+  line-height: 0;
+}
+
+.theme-toggle button:hover {
+  color: var(--ink);
+}
+
+.theme-toggle button[aria-pressed="true"] {
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 18%, transparent);
+}
+
+:root[data-theme="dark"] .theme-toggle {
+  background: var(--paper);
+  border-color: color-mix(in srgb, var(--ink) 12%, transparent);
+}
+
+:root[data-theme="dark"] .theme-toggle button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ink) 16%, var(--paper));
+  box-shadow: 0 1px 2px color-mix(in srgb, #000 40%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle {
+    background: var(--paper);
+    border-color: color-mix(in srgb, var(--ink) 12%, transparent);
+  }
+
+  :root:not([data-theme="light"]) .theme-toggle button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--ink) 16%, var(--paper));
+    box-shadow: 0 1px 2px color-mix(in srgb, #000 40%, transparent);
+  }
 }
 
 .main {
@@ -1708,10 +1744,17 @@ a.author-mark:hover span {
   overflow-wrap: break-word;
 }
 
-.team-you {
+.team-you,
+.team-name {
   margin-left: 8px;
   color: var(--mute);
   font-size: 13px;
+}
+
+.team-empty {
+  margin: 0;
+  color: var(--mute);
+  font-size: 14px;
 }
 
 .team-status {
@@ -1732,6 +1775,11 @@ a.author-mark:hover span {
 
 .team-status-expired {
   background: color-mix(in srgb, var(--sun) 55%, var(--paper));
+}
+
+.team-status-revoked,
+.team-status-inactive {
+  background: color-mix(in srgb, var(--mute) 28%, var(--paper));
 }
 
 .team-manage {
@@ -1805,6 +1853,59 @@ a.author-mark:hover span {
 .team-confirm-btn {
   padding: 4px 10px;
   font-size: 12px;
+}
+
+.billing-history {
+  margin-top: 28px;
+  max-width: 44rem;
+}
+
+.billing-history h2 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.billing-history-empty {
+  margin: 0;
+  color: var(--mute);
+  font-size: 14px;
+}
+
+.billing-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+
+.billing-table {
+  width: 100%;
+  min-width: 32rem;
+}
+
+.billing-table th {
+  background: transparent;
+  color: var(--mute);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.billing-table th,
+.billing-table td {
+  vertical-align: middle;
+}
+
+.billing-table th:nth-child(3),
+.billing-table td:nth-child(3),
+.billing-table th:nth-child(4),
+.billing-table td:nth-child(4) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.billing-amount {
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 640px) {

@@ -275,10 +275,11 @@ function AccountFooter() {
   if (session.mode === "token") {
     return (
       <footer className="nav-footer">
+        <SupportLine />
+        <ThemeToggle />
         <button className="btn ghost" type="button" onClick={session.forgetToken}>
           Forget token
         </button>
-        <SupportLine />
       </footer>
     );
   }
@@ -286,12 +287,15 @@ function AccountFooter() {
     return (
       <footer className="nav-footer">
         <SupportLine />
+        <ThemeToggle />
       </footer>
     );
   }
   const me = session.me;
   return (
     <footer className="nav-footer">
+      <SupportLine />
+      <ThemeToggle />
       <p className="account">{[me.email ?? me.user_id, me.org_name ?? me.org_id].join(" · ")}</p>
       {error ? (
         <p className="form-status" role="status">
@@ -299,7 +303,7 @@ function AccountFooter() {
         </p>
       ) : null}
       <button
-        className="btn ghost"
+        className="btn ghost nav-signout"
         type="button"
         disabled={busy}
         onClick={() => {
@@ -315,7 +319,6 @@ function AccountFooter() {
       >
         Sign out
       </button>
-      <SupportLine />
     </footer>
   );
 }
@@ -357,26 +360,42 @@ function ThemeToggle() {
     }
   }, [choice]);
 
-  function flip(): void {
-    const mediaDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    const showing = choice === "auto" ? (mediaDark ? "dark" : "light") : choice;
-    setChoice(showing === "light" ? "dark" : "light");
-  }
-
   return (
-    <button className="theme-toggle" type="button" aria-label="Switch light or dark theme" onClick={flip}>
-      ◐
-    </button>
+    <div className="theme-toggle" role="group" aria-label="Color theme">
+      <button type="button" aria-label="Auto" title="Auto" aria-pressed={choice === "auto"} onClick={() => setChoice("auto")}>
+        <ThemeGlyph>
+          <rect x="3" y="4" width="18" height="12" rx="1.5" />
+          <path d="M8 20h8" />
+          <path d="M12 16v4" />
+        </ThemeGlyph>
+      </button>
+      <button type="button" aria-label="Light" title="Light" aria-pressed={choice === "light"} onClick={() => setChoice("light")}>
+        <ThemeGlyph>
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+        </ThemeGlyph>
+      </button>
+      <button type="button" aria-label="Dark" title="Dark" aria-pressed={choice === "dark"} onClick={() => setChoice("dark")}>
+        <ThemeGlyph>
+          <path d="M21 14.5A8.5 8.5 0 1 1 9.5 3 7 7 0 0 0 21 14.5z" />
+        </ThemeGlyph>
+      </button>
+    </div>
+  );
+}
+
+function ThemeGlyph({ children }: { children: ReactNode }) {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+      {children}
+    </svg>
   );
 }
 
 function SupportLine() {
   return (
-    <div className="nav-meta">
-      <ThemeToggle />
-      <p className="nav-support">
-        questions? <a href="mailto:support@cadri.io">support@cadri.io</a>
-      </p>
-    </div>
+    <p className="nav-support">
+      questions? <a href="mailto:support@cadri.io">support@cadri.io</a>
+    </p>
   );
 }

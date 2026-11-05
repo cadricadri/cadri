@@ -64,6 +64,15 @@ async fn send(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap, V
     (status, headers, body)
 }
 
+async fn send_text(app: &Router, request: Request<Body>) -> (StatusCode, String) {
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
 fn get_request(path: &str, headers: &[(&str, &str)]) -> Request<Body> {
     let mut builder = Request::builder().uri(path);
     for (name, value) in headers {
@@ -104,6 +113,56 @@ async fn healthz_reports_ok_without_auth() {
     let (status, _, body) = send(&app, get_request("/healthz", &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "status": "ok" }));
+}
+
+#[tokio::test]
+async fn metrics_record_http_and_page_load_without_raw_ids() {
+    let app = app(Arc::new(TokenAuth::new("secret")));
+    let (status, _, _) = send(&app, get_request("/healthz", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, _) = send(
+        &app,
+        post_json(
+            "/api/telemetry/page",
+            &json!({ "page": "/", "duration_ms": 1500 }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = send(
+        &app,
+        post_json(
+            "/api/telemetry/page",
+            &json!({ "page": "/team/org_secret/user@example.com", "duration_ms": 20 }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _, _) = send(&app, get_request("/api/repos/my-repo-name", &[])).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send(&app, get_request("/api/memories", &[])).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, body) = send_text(&app, get_request("/metrics", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.contains("cadri_http_request_duration_seconds_bucket"));
+    assert!(body.contains("cadri_http_requests_total"));
+    assert!(body.contains("route=\"/healthz\""));
+    assert!(body.contains("route=\"/api/memories\""));
+    assert!(body.contains("status_class=\"2xx\""));
+    assert!(body.contains("status_class=\"4xx\""));
+    assert!(body.contains("cadri_page_load_duration_seconds_bucket"));
+    assert!(body.contains("page=\"/\""));
+    assert!(body.contains("page=\"other\""));
+    assert!(!body.contains("my-repo-name"));
+    assert!(!body.contains("user@example.com"));
+    assert!(!body.contains("org_secret"));
 }
 
 #[tokio::test]

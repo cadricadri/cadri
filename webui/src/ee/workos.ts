@@ -143,3 +143,111 @@ export async function sendInvite(email: string): Promise<InviteResult> {
     return { kind: "error", message: "Could not send the invite. Try again." };
   }
 }
+
+export type TeamStatus = "joined" | "invited" | "expired" | "revoked" | "inactive";
+
+export type TeamPerson = {
+  email: string;
+  name: string | null;
+  status: TeamStatus;
+  membershipId: string | null;
+  invitationId: string | null;
+};
+
+export type TeamResult =
+  | { kind: "ok"; people: TeamPerson[] }
+  | { kind: "unauthorized" }
+  | { kind: "error"; message: string };
+
+export type TeamActionResult =
+  | { kind: "ok" }
+  | { kind: "unauthorized" }
+  | { kind: "error"; message: string };
+
+const TEAM_STATUSES = new Set<TeamStatus>(["joined", "invited", "expired", "revoked", "inactive"]);
+
+const ACTION_ERRORS: Record<string, string> = {
+  not_found: "That person is no longer on this team.",
+  cannot_remove_self: "You can't remove yourself.",
+  invalid_id: "Could not update the team. Try again.",
+  workos_unavailable: "Could not update the team. Try again.",
+  workos_rejected: "Could not update the team. Try again.",
+  payment_required: "This team's trial has ended. Open Billing to add a payment method.",
+  already_member: "That person is already on this team.",
+  already_invited: "An invite is already waiting for that email.",
+};
+
+function isTeamStatus(status: string): status is TeamStatus {
+  return TEAM_STATUSES.has(status as TeamStatus);
+}
+
+function parsePerson(value: unknown): TeamPerson | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  if (typeof row.email !== "string" || typeof row.status !== "string" || !isTeamStatus(row.status)) {
+    return null;
+  }
+  const name = typeof row.name === "string" && row.name.trim() ? row.name.trim() : null;
+  return {
+    email: row.email,
+    name,
+    status: row.status,
+    membershipId: typeof row.membership_id === "string" ? row.membership_id : null,
+    invitationId: typeof row.invitation_id === "string" ? row.invitation_id : null,
+  };
+}
+
+export async function loadTeam(): Promise<TeamResult> {
+  try {
+    const response = await fetch("/auth/team");
+    if (response.status === 401) {
+      return { kind: "unauthorized" };
+    }
+    if (!response.ok) {
+      return { kind: "error", message: "Could not load the team." };
+    }
+    const body = (await response.json()) as { people?: unknown };
+    const people = Array.isArray(body.people)
+      ? body.people.flatMap((person) => {
+          const parsed = parsePerson(person);
+          return parsed ? [parsed] : [];
+        })
+      : [];
+    return { kind: "ok", people };
+  } catch {
+    return { kind: "error", message: "Could not load the team." };
+  }
+}
+
+async function teamAction(path: string, method: "POST" | "DELETE"): Promise<TeamActionResult> {
+  try {
+    const response = await fetch(path, { method });
+    if (response.status === 401) {
+      return { kind: "unauthorized" };
+    }
+    if (!response.ok) {
+      const code = await errorCode(response);
+      return {
+        kind: "error",
+        message: ACTION_ERRORS[code] ?? "Could not update the team. Try again.",
+      };
+    }
+    return { kind: "ok" };
+  } catch {
+    return { kind: "error", message: "Could not update the team. Try again." };
+  }
+}
+
+export function removeMember(membershipId: string): Promise<TeamActionResult> {
+  return teamAction(`/auth/memberships/${encodeURIComponent(membershipId)}`, "DELETE");
+}
+
+export function revokeInvitation(invitationId: string): Promise<TeamActionResult> {
+  return teamAction(`/auth/invitations/${encodeURIComponent(invitationId)}/revoke`, "POST");
+}
+
+export function resendInvitation(invitationId: string): Promise<TeamActionResult> {
+  return teamAction(`/auth/invitations/${encodeURIComponent(invitationId)}/resend`, "POST");
+}

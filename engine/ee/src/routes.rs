@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -16,8 +16,8 @@ use serde_json::json;
 use subtle::ConstantTimeEq;
 
 use crate::workos::{
-    read_session, session_cookie, workos_unavailable, DeviceAuthorization, Session, WorkOs,
-    WorkOsError, SESSION_COOKIE,
+    read_session, session_cookie, workos_object_id, workos_unavailable, DeviceAuthorization,
+    Session, WorkOs, WorkOsError, SESSION_COOKIE,
 };
 
 pub const LOGIN_COOKIE: &str = "cadri_login";
@@ -31,11 +31,16 @@ pub fn router(workos: Arc<WorkOs>) -> Router {
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
         .route("/auth/organization", post(create_organization))
+        .route("/auth/team", get(list_team))
         .route("/auth/invitations", post(create_invitation))
+        .route("/auth/invitations/{id}/revoke", post(revoke_invitation))
+        .route("/auth/invitations/{id}/resend", post(resend_invitation))
+        .route("/auth/memberships/{id}", delete(remove_membership))
         .route("/auth/device/start", post(device_start))
         .route("/auth/device/token", post(device_token))
         .route("/auth/refresh", post(refresh))
         .route("/api/billing", get(billing_status))
+        .route("/api/billing/invoices", get(billing_invoices))
         .route("/api/billing/portal", post(billing_portal))
         .route("/api/stripe/webhook", post(stripe_webhook))
         .with_state(workos)
@@ -223,6 +228,64 @@ async fn create_organization(
     Ok((jar, Json(identity)).into_response())
 }
 
+fn object_id(raw: &str) -> Result<&str, ApiError> {
+    workos_object_id(raw).ok_or_else(|| bad_request("invalid_id"))
+}
+
+async fn list_team(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (session_headers, people) = workos.list_team(&headers).await?;
+    let mut response = Json(json!({ "people": people })).into_response();
+    response.headers_mut().extend(session_headers);
+    Ok(response)
+}
+
+async fn remove_membership(
+    State(workos): State<Arc<WorkOs>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = object_id(&id)?;
+    let session_headers = workos.remove_member(&headers, id).await?;
+    let mut response = Json(json!({ "ok": true })).into_response();
+    response.headers_mut().extend(session_headers);
+    Ok(response)
+}
+
+async fn revoke_invitation(
+    State(workos): State<Arc<WorkOs>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = object_id(&id)?;
+    let (session_headers, invitation) = workos.revoke_invitation(&headers, id).await?;
+    let mut response = Json(json!({
+        "email": invitation.email,
+        "state": invitation.state,
+    }))
+    .into_response();
+    response.headers_mut().extend(session_headers);
+    Ok(response)
+}
+
+async fn resend_invitation(
+    State(workos): State<Arc<WorkOs>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let id = object_id(&id)?;
+    let (session_headers, invitation) = workos.resend_invitation(&headers, id).await?;
+    let mut response = Json(json!({
+        "email": invitation.email,
+        "state": invitation.state,
+    }))
+    .into_response();
+    response.headers_mut().extend(session_headers);
+    Ok(response)
+}
+
 async fn create_invitation(
     State(workos): State<Arc<WorkOs>>,
     headers: HeaderMap,
@@ -263,6 +326,17 @@ async fn billing_status(
         &refreshed
     };
     response.headers_mut().extend(extra.clone());
+    Ok(response)
+}
+
+async fn billing_invoices(
+    State(workos): State<Arc<WorkOs>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (authenticated, _) = workos.authenticate_session(&headers).await?;
+    let invoices = workos.billing_history(&authenticated.identity).await?;
+    let mut response = Json(json!({ "invoices": invoices })).into_response();
+    response.headers_mut().extend(authenticated.headers);
     Ok(response)
 }
 
@@ -407,6 +481,26 @@ mod tests {
         assert!(organization_name("   ").is_err());
         assert!(organization_name(&"a".repeat(MAX_ORGANIZATION_NAME + 1)).is_err());
         assert!(organization_name("line\nbreak").is_err());
+    }
+
+    #[test]
+    fn object_ids_are_single_safe_segments() {
+        assert_eq!(
+            object_id("om_01E4ZCR3C56J083X43JQXF3JK5").unwrap(),
+            "om_01E4ZCR3C56J083X43JQXF3JK5"
+        );
+        assert_eq!(object_id("invitation_1").unwrap(), "invitation_1");
+        let long = "a".repeat(129);
+        for bad in [
+            "",
+            "om/other",
+            "om_evil?x=1",
+            "has space",
+            "../secret",
+            long.as_str(),
+        ] {
+            assert!(object_id(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

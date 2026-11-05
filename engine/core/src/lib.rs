@@ -6,6 +6,7 @@ pub mod memory;
 
 mod api;
 mod error;
+mod telemetry;
 
 pub use api::{assemble, router, serve};
 pub use auth::{AuthFuture, Authenticated, Authenticator, Identity};

@@ -3,7 +3,10 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { SessionProvider } from "./session";
 import { App } from "./shell";
+import { installPageLoadTelemetry } from "./telemetry";
 import "./style.css";
+
+installPageLoadTelemetry();
 
 const root = document.querySelector("#root");
 if (root) {

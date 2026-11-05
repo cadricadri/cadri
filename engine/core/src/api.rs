@@ -68,12 +68,16 @@ pub fn assemble(
         .route("/healthz", get(healthz))
         .route("/api/auth/config", get(auth_config))
         .merge(protected)
-        .with_state(state);
+        .with_state(state)
+        .merge(crate::telemetry::routes());
     if let Some(extra) = extra {
         app = app.merge(extra);
     }
+    // The metrics middleware is the outer layer so it times every route, including ee
+    // routes merged above and the fallback.
     app.fallback(not_found)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(middleware::from_fn(crate::telemetry::track))
 }
 
 /// Opens `CADRI_DB`, listens on `CADRI_BIND` and serves until SIGINT/SIGTERM. Exits the

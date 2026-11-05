@@ -1,31 +1,34 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from "react";
+import {
+  loadTeam,
+  removeMember,
+  resendInvitation,
+  revokeInvitation,
+  sendInvite,
+  type TeamActionResult,
+  type TeamPerson,
+  type TeamStatus,
+} from "../ee/workos";
 import { Page } from "../page";
 import { useSession } from "../session";
 
-type Status = "joined" | "invited" | "expired";
+type Person = TeamPerson;
 
-type Person = {
-  email: string;
-  status: Status;
-};
-
-const STATUS_LABEL: Record<Status, string> = {
+const STATUS_LABEL: Record<TeamStatus, string> = {
   joined: "Joined",
   invited: "Invited",
   expired: "Invite Expired",
+  revoked: "Revoked",
+  inactive: "Inactive",
 };
 
-const RANK: Record<Status, number> = {
+const RANK: Record<TeamStatus, number> = {
   joined: 0,
   invited: 1,
   expired: 2,
+  revoked: 3,
+  inactive: 4,
 };
-
-const SAMPLE: Person[] = [
-  { email: "sam@company.com", status: "joined" },
-  { email: "new@company.com", status: "invited" },
-  { email: "old@company.com", status: "expired" },
-];
 
 function EmailText({ email }: { email: string }) {
   const at = email.indexOf("@");
@@ -59,24 +62,21 @@ function sortPeople(people: Person[], you: string | null): Person[] {
   });
 }
 
-function initialPeople(you: string | null): Person[] {
-  const people = SAMPLE.filter((person) => you === null || !sameEmail(person.email, you));
-  if (you) {
-    people.unshift({ email: you, status: "joined" });
-  }
-  return sortPeople(people, you);
+function rowKey(person: Person): string {
+  return `${person.status}:${person.membershipId ?? ""}:${person.invitationId ?? ""}:${person.email}`;
 }
 
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
+function isMember(status: TeamStatus): boolean {
+  return status === "joined" || status === "inactive";
 }
 
 export default function Team() {
   const session = useSession();
   const you = session.me?.email?.trim() || null;
-  const [people, setPeople] = useState<Person[]>(() => initialPeople(you));
+  const unauthorized = session.unauthorized;
+  const [people, setPeople] = useState<Person[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [email, setEmail] = useState("");
   const [note, setNote] = useState("");
   const [sent, setSent] = useState(false);
@@ -85,12 +85,37 @@ export default function Team() {
   const [fresh, setFresh] = useState<{ email: string; at: number } | null>(null);
   const mounted = useRef(true);
 
+  const reload = useCallback(async (): Promise<boolean> => {
+    const result = await loadTeam();
+    if (!mounted.current) {
+      return false;
+    }
+    if (result.kind === "unauthorized") {
+      unauthorized();
+      return false;
+    }
+    if (result.kind === "error") {
+      setLoadError(result.message);
+      setPeople([]);
+      setLoaded(true);
+      return false;
+    }
+    setLoadError("");
+    setPeople(sortPeople(result.people, you));
+    setLoaded(true);
+    return true;
+  }, [unauthorized, you]);
+
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
 
   useEffect(() => {
     if (!fresh) {
@@ -107,6 +132,23 @@ export default function Team() {
     setPending(null);
   }
 
+  function applyAction(result: TeamActionResult): boolean {
+    if (!mounted.current) {
+      return false;
+    }
+    setBusy(false);
+    if (result.kind === "unauthorized") {
+      unauthorized();
+      return false;
+    }
+    if (result.kind === "error") {
+      setSent(false);
+      setNote(result.message);
+      return false;
+    }
+    return true;
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     const value = email.trim();
@@ -114,7 +156,7 @@ export default function Team() {
       return;
     }
     const existing = people.find((person) => sameEmail(person.email, value));
-    if (existing?.status === "joined") {
+    if (existing && isMember(existing.status)) {
       setSent(false);
       setNote("That person is already on this team.");
       return;
@@ -127,51 +169,93 @@ export default function Team() {
     setBusy(true);
     setSent(false);
     setNote("Sending invite…");
-    await wait(450);
+    const result = await sendInvite(value);
     if (!mounted.current) {
+      return;
+    }
+    if (result.kind === "unauthorized") {
+      setBusy(false);
+      unauthorized();
+      return;
+    }
+    if (result.kind === "error") {
+      setBusy(false);
+      setNote(result.message);
       return;
     }
     setBusy(false);
     setEmail("");
-    if (existing) {
-      setPeople((current) =>
-        sortPeople(
-          current.map((person) =>
-            sameEmail(person.email, existing.email) ? { ...person, status: "invited" } : person,
-          ),
-          you,
-        ),
-      );
-      markSent(existing.email, true);
+    const refreshed = await reload();
+    if (!mounted.current) {
       return;
     }
-    setPeople((current) => sortPeople([...current, { email: value, status: "invited" }], you));
-    markSent(value, false);
+    if (!refreshed) {
+      setSent(true);
+      setNote(`Invite sent to ${result.email}, but the team list could not be refreshed.`);
+      return;
+    }
+    markSent(result.email, existing !== undefined);
   }
 
-  function resend(person: Person): void {
-    if (busy) {
+  async function resend(person: Person): Promise<void> {
+    if (busy || !person.invitationId) {
       return;
     }
-    setPeople((current) =>
-      sortPeople(
-        current.map((item) =>
-          sameEmail(item.email, person.email) ? { ...item, status: "invited" } : item,
-        ),
-        you,
-      ),
-    );
+    setBusy(true);
+    setSent(false);
+    setNote("Sending invite…");
+    const result = await resendInvitation(person.invitationId);
+    if (!applyAction(result)) {
+      return;
+    }
+    const refreshed = await reload();
+    if (!mounted.current) {
+      return;
+    }
+    if (!refreshed) {
+      setSent(true);
+      setNote(`Invite sent again to ${person.email}, but the team list could not be refreshed.`);
+      return;
+    }
     markSent(person.email, true);
   }
 
-  function remove(person: Person): void {
-    setPeople((current) => current.filter((item) => !sameEmail(item.email, person.email)));
-    setPending(null);
+  async function remove(person: Person): Promise<void> {
+    if (busy) {
+      return;
+    }
+    const member = isMember(person.status);
+    setBusy(true);
     setSent(false);
+    setNote(member ? "Removing…" : "Revoking…");
+    const result = member
+      ? person.membershipId
+        ? await removeMember(person.membershipId)
+        : { kind: "error" as const, message: "Could not update the team. Try again." }
+      : person.invitationId
+        ? await revokeInvitation(person.invitationId)
+        : { kind: "error" as const, message: "Could not update the team. Try again." };
+    if (!applyAction(result)) {
+      return;
+    }
+    setPending(null);
+    const refreshed = await reload();
+    if (!mounted.current) {
+      return;
+    }
+    setSent(false);
+    if (member) {
+      setNote(
+        refreshed
+          ? `Removed ${person.email} from this team.`
+          : `Removed ${person.email}, but the team list could not be refreshed.`,
+      );
+      return;
+    }
     setNote(
-      person.status === "joined"
-        ? `Removed ${person.email} from this team.`
-        : `Revoked the invite to ${person.email}.`,
+      refreshed
+        ? `Revoked the invite to ${person.email}.`
+        : `Revoked the invite to ${person.email}, but the team list could not be refreshed.`,
     );
   }
 
@@ -186,12 +270,12 @@ export default function Team() {
           type="email"
           autoComplete="email"
           required
-          placeholder="teammate@company.com"
+          placeholder="name@example.com"
           value={email}
           onChange={(event) => setEmail(event.target.value)}
         />
         <button className="btn" type="submit" disabled={busy}>
-          {busy ? "Sending…" : "Send Invite"}
+          {busy && note === "Sending invite…" ? "Sending…" : "Send Invite"}
         </button>
         <div className="team-invite-note">
           <p className={sent ? "team-sent" : "form-status"} role="status">
@@ -200,33 +284,50 @@ export default function Team() {
         </div>
       </form>
       <h2 className="team-heading">People</h2>
-      <div className="team-table-wrap">
-        <table className="team-table">
-          <thead>
-            <tr>
-              <th scope="col">email address</th>
-              <th scope="col">status</th>
-              <th scope="col">admin action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {people.map((person) => (
-              <PersonRow
-                key={person.email}
-                person={person}
-                you={you !== null && sameEmail(person.email, you)}
-                fresh={fresh !== null && sameEmail(fresh.email, person.email)}
-                confirming={pending !== null && sameEmail(pending, person.email)}
-                busy={busy}
-                onAsk={() => setPending(person.email)}
-                onCancel={() => setPending(null)}
-                onResend={() => resend(person)}
-                onRemove={() => remove(person)}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {loadError ? (
+        <p className="form-status" role="status">
+          {loadError}
+        </p>
+      ) : null}
+      {!loaded && !loadError ? (
+        <p className="team-empty" role="status">
+          Loading…
+        </p>
+      ) : null}
+      {loaded && !loadError && people.length === 0 ? (
+        <p className="team-empty" role="status">
+          No one is on this team yet.
+        </p>
+      ) : null}
+      {people.length > 0 ? (
+        <div className="team-table-wrap">
+          <table className="team-table">
+            <thead>
+              <tr>
+                <th scope="col">email address</th>
+                <th scope="col">status</th>
+                <th scope="col">admin action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {people.map((person) => (
+                <PersonRow
+                  key={rowKey(person)}
+                  person={person}
+                  you={you !== null && sameEmail(person.email, you)}
+                  fresh={fresh !== null && sameEmail(fresh.email, person.email)}
+                  confirming={pending !== null && pending === rowKey(person)}
+                  busy={busy}
+                  onAsk={() => setPending(rowKey(person))}
+                  onCancel={() => setPending(null)}
+                  onResend={() => void resend(person)}
+                  onRemove={() => void remove(person)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </Page>
   );
 }
@@ -255,7 +356,13 @@ function PersonRow({
   const confirmRef = useRef<HTMLButtonElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const restoreFocus = useRef(false);
-  const joined = person.status === "joined";
+  const member = isMember(person.status);
+  const canResend =
+    (person.status === "expired" || person.status === "revoked") && person.invitationId !== null;
+  const canRevoke =
+    (person.status === "invited" || person.status === "expired") && person.invitationId !== null;
+  const canRemove = member && person.membershipId !== null;
+  const manageable = canResend || canRevoke || canRemove;
 
   useEffect(() => {
     if (confirming) {
@@ -289,17 +396,19 @@ function PersonRow({
           <span className="team-email">
             <EmailText email={person.email} />
           </span>
+          {person.name ? <span className="team-name">{person.name}</span> : null}
           {you ? <span className="team-you">You</span> : null}
         </td>
         <td>
           <span className={`team-status team-status-${person.status}`}>{STATUS_LABEL[person.status]}</span>
         </td>
         <td>
-          {you || confirming ? null : (
+          {you || confirming || !manageable ? null : (
             <ManageMenu
               email={person.email}
-              joined={joined}
-              expired={person.status === "expired"}
+              canResend={canResend}
+              canRevoke={canRevoke}
+              canRemove={canRemove}
               busy={busy}
               buttonRef={triggerRef}
               onAsk={onAsk}
@@ -312,11 +421,11 @@ function PersonRow({
         <tr className="team-confirm-row">
           <td colSpan={3}>
             <div className="team-confirm" onKeyDown={onKey}>
-              <p>{joined ? `Remove ${person.email} from this team?` : `Revoke the invite to ${person.email}?`}</p>
-              <button ref={confirmRef} className="btn team-confirm-btn" type="button" onClick={onRemove}>
-                {joined ? "Remove" : "Revoke"}
+              <p>{member ? `Remove ${person.email} from this team?` : `Revoke the invite to ${person.email}?`}</p>
+              <button ref={confirmRef} className="btn team-confirm-btn" type="button" disabled={busy} onClick={onRemove}>
+                {member ? "Remove" : "Revoke"}
               </button>
-              <button className="btn ghost team-confirm-btn" type="button" onClick={cancel}>
+              <button className="btn ghost team-confirm-btn" type="button" disabled={busy} onClick={cancel}>
                 Cancel
               </button>
             </div>
@@ -329,16 +438,18 @@ function PersonRow({
 
 function ManageMenu({
   email,
-  joined,
-  expired,
+  canResend,
+  canRevoke,
+  canRemove,
   busy,
   buttonRef,
   onAsk,
   onResend,
 }: {
   email: string;
-  joined: boolean;
-  expired: boolean;
+  canResend: boolean;
+  canRevoke: boolean;
+  canRemove: boolean;
   busy: boolean;
   buttonRef: RefObject<HTMLButtonElement | null>;
   onAsk: () => void;
@@ -388,7 +499,7 @@ function ManageMenu({
       </button>
       {open ? (
         <div className="team-menu" role="menu" ref={menuRef}>
-          {expired ? (
+          {canResend ? (
             <button
               role="menuitem"
               type="button"
@@ -400,16 +511,18 @@ function ManageMenu({
               Resend
             </button>
           ) : null}
-          <button
-            role="menuitem"
-            type="button"
-            onClick={() => {
-              setOpen(false);
-              onAsk();
-            }}
-          >
-            {joined ? "Remove" : "Revoke"}
-          </button>
+          {canRevoke || canRemove ? (
+            <button
+              role="menuitem"
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onAsk();
+              }}
+            >
+              {canRemove ? "Remove" : "Revoke"}
+            </button>
+          ) : null}
         </div>
       ) : null}
     </div>

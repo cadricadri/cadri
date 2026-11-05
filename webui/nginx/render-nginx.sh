@@ -56,6 +56,8 @@ security_headers() {
 app_locations() {
     hsts=$1
     cat <<EOF
+    # /metrics is intentionally not listed. Prometheus scrapes the engine Service
+    # inside the cluster. Adding it here would publish metrics on the public NLB.
     location ~ ^/(api/|auth/|git/|healthz\$) {
         proxy_pass ${upstream};
         proxy_http_version 1.1;
