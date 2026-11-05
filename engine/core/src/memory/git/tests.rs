@@ -786,3 +786,182 @@ fn a_lost_compare_and_swap_catches_up_and_both_writes_land() {
     assert_eq!(third.read_log(repo).unwrap().len(), 2);
     let _ = fs::remove_dir_all(root);
 }
+
+fn spawned() -> usize {
+    super::git_cli_exec::SPAWNS.with(|count| count.get())
+}
+
+fn thousand_file_book(service: &MemoryService, repo: &str) {
+    let (user, label) = author();
+    let files: Vec<Change> = (0..1000)
+        .map(|index| {
+            write(
+                &format!("notes/{}/{index}.md", index % 10),
+                &format!("n{index}"),
+            )
+        })
+        .collect();
+    service.commit(repo, user, label, "seed", &files).unwrap();
+}
+
+#[test]
+fn a_ui_commit_on_a_1000_file_book_runs_a_constant_number_of_git_processes() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_count_repo_0";
+    let (user, label) = author();
+    thousand_file_book(&service, repo);
+    let before = spawned();
+    let store = service
+        .commit(
+            repo,
+            user,
+            label,
+            "edit one",
+            &[write("notes/3/3.md", "changed")],
+        )
+        .unwrap();
+    let used = spawned() - before;
+    assert!(used < 15, "one edit spawned {used} git processes");
+    assert_eq!(store.files.len(), 1000);
+    let file = store.files.iter().find(|file| file.path == "notes/3/3.md");
+    assert_eq!(file.unwrap().content, "changed");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn renames_deletes_and_folders_keep_the_snapshot_in_step_with_the_tree() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_edit_repo_0";
+    let (user, label) = author();
+    service
+        .commit(
+            repo,
+            user,
+            label,
+            "seed",
+            &[
+                write("a.md", "A"),
+                write("dir/.keep", ""),
+                write("b.md", "B"),
+            ],
+        )
+        .unwrap();
+    let moved = service
+        .commit(
+            repo,
+            user,
+            label,
+            "move",
+            &[
+                Change::Rename {
+                    from: "a.md".into(),
+                    to: "dir/a.md".into(),
+                },
+                Change::Delete {
+                    path: "b.md".into(),
+                },
+                write("c.md", "A"),
+            ],
+        )
+        .unwrap();
+    let paths: Vec<&str> = moved.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, vec!["c.md", "dir/a.md"]);
+    assert_eq!(moved.directories, vec!["dir".to_string()]);
+    // A fresh process reading the repo sees the same book.
+    let again = MemoryService::new(
+        root.join("again"),
+        Backend::Directory(root.join("store")),
+        root.join("scratch-again"),
+        None,
+        false,
+    );
+    let seen = again.read_store(repo).unwrap();
+    let seen: Vec<(&str, &str)> = seen
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.content.as_str()))
+        .collect();
+    assert_eq!(seen, vec![("c.md", "A"), ("dir/a.md", "A")]);
+    let missing = service.commit(
+        repo,
+        user,
+        label,
+        "gone",
+        &[Change::Delete {
+            path: "nope.md".into(),
+        }],
+    );
+    assert!(matches!(missing, Err(err) if err.message == "invalid memory path"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_push_of_three_commits_validates_with_a_constant_number_of_git_processes() {
+    use std::process::Command;
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_push_repo_0";
+    thousand_file_book(&service, repo);
+    let bare = root.join("repos").join(format!("{repo}.git"));
+    let work = root.join("work");
+    let run = |dir: &Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .args(["-c", "user.name=Ada", "-c", "user.email=ada@example.com"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    run(&root, &["clone", "-q", &bare.to_string_lossy(), "work"]);
+    let old = run(&work, &["rev-parse", "HEAD"]);
+    for index in 0..3 {
+        fs::write(work.join(format!("pushed-{index}.md")), format!("p{index}")).unwrap();
+        run(&work, &["add", "."]);
+        let message = format!(
+            "push {index}\n\nCadri-Author-Kind: human\nCadri-Author-Id: ada\nCadri-Author-Label: Ada\n"
+        );
+        run(&work, &["commit", "-q", "-m", &message]);
+    }
+    let new = run(&work, &["rev-parse", "HEAD"]);
+    let pack = Command::new("git")
+        .current_dir(&work)
+        .args(["pack-objects", "--revs", "--stdout", "-q"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        let mut pack = pack;
+        pack.stdin
+            .take()
+            .unwrap()
+            .write_all(format!("{new}\n^{old}\n").as_bytes())
+            .unwrap();
+        let out = pack.wait_with_output().unwrap();
+        let mut body = pkt(&format!("{old} {new} refs/heads/main\0report-status\n"));
+        body.extend_from_slice(b"0000");
+        body.extend(out.stdout);
+        let before = spawned();
+        let result = service
+            .serve_git(repo, "git-receive-pack", true, None, &body, "ada")
+            .unwrap();
+        // index-pack is the one call that depends on the pack, not the book.
+        let used = spawned() - before - 1;
+        assert!(used < 15, "a push spawned {used} git processes");
+        let super::protocol::GitHttp::Ready { body, .. } = result;
+        assert!(String::from_utf8_lossy(&body).contains("ok refs/heads/main"));
+    }
+    let store = service.read_store(repo).unwrap();
+    assert_eq!(store.files.len(), 1003);
+    let _ = fs::remove_dir_all(root);
+}

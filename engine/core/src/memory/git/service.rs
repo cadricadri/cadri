@@ -10,7 +10,9 @@ use crate::memory::s3::S3Books;
 use crate::memory::types::{BlameEntry, Change, MemoryCommit, MemoryStore, MemoryTree};
 use crate::ApiError;
 
-use super::commit::{apply_changes, clean_message, commit_tree, current_files, write_tree};
+use super::commit::{
+    apply_changes, build_tree, clean_message, commit_tree, current_sources, Source,
+};
 use super::error::{into_api, s3_fail, Fail};
 use super::git_cli_exec::{
     ensure_repo, git_bytes, git_ok, is_ancestor, local_head, object_exists, Repo,
@@ -20,7 +22,7 @@ use super::protocol::{
     advertise_receive, advertise_upload, index_pack, inspect, ready, report, split_pack,
     unpack_fail, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
 };
-use super::snapshot::{snapshot_from_repo, Snapshot};
+use super::snapshot::{snapshot_after, snapshot_from_repo, Snapshot};
 use super::store::{cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path};
 use super::view::{blame_file, read_commits};
 
@@ -390,17 +392,35 @@ impl MemoryService {
     ) -> Result<MemoryStore, Fail> {
         let snapshot = loaded(book)?;
         let message = clean_message(message)?;
-        let mut files = current_files(repo)?;
-        let before = files.clone();
+        let before = current_sources(&snapshot);
+        let mut files = before.clone();
         apply_changes(&mut files, changes)?;
+        // Writing what a file already holds is not a change.
+        for (path, source) in files.iter_mut() {
+            if let (Source::Text(text), Some(Source::Blob(blob))) = (&*source, before.get(path)) {
+                if snapshot.blobs.get(blob).is_some_and(|old| **old == **text) {
+                    *source = Source::Blob(blob.clone());
+                }
+            }
+        }
         if files == before {
             return Ok(snapshot.to_store());
         }
-        let tree = write_tree(repo, &files)?;
         let parent = snapshot.tip.as_deref();
-        let sha = commit_tree(repo, &tree, parent, &message, user_id, label)?;
+        let built = build_tree(repo, parent, &before, &files)?;
+        let sha = commit_tree(repo, &built.tree, parent, &message, user_id, label)?;
         self.publish(repo, repo_id, parent, &sha)?;
-        let updated = self.install_published(repo, repo_id, book, &snapshot, &sha)?;
+        let next = match snapshot_after(&snapshot, &sha, &built.files, built.new_blobs) {
+            Ok(next) => next,
+            Err(err) => {
+                *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = None;
+                return Err(err);
+            }
+        };
+        self.install(repo_id, book, next);
+        let updated = book
+            .current()
+            .ok_or_else(|| Fail::git("memory snapshot was not installed"))?;
         Ok(updated.to_store())
     }
 
@@ -500,7 +520,7 @@ impl MemoryService {
                 return Ok(ready(report(Err("non-fast-forward"))));
             }
         }
-        if let Err(err) = inspect(repo, old, &command.new, user_id) {
+        if let Err(err) = inspect(repo, snapshot, old, &command.new, user_id) {
             if let Fail::Api(err) = &err {
                 if err.status == StatusCode::BAD_REQUEST {
                     return Ok(ready(report(Err(err.message.as_str()))));
