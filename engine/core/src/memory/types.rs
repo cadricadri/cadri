@@ -25,6 +25,31 @@ pub struct BlameEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEntry {
+    pub path: String,
+    pub blob: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFile {
+    pub path: String,
+    pub blob: String,
+    pub content: String,
+}
+
+/// A book's tip without file text, except for the one file the page opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryTree {
+    pub tip: Option<String>,
+    pub seq: u64,
+    pub files: Vec<TreeEntry>,
+    pub directories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<OpenFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryFile {
     pub path: String,
     pub content: String,

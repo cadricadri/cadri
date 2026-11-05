@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use crate::memory::types::{MemoryFile, MemoryStore};
+use crate::memory::types::{MemoryFile, MemoryStore, MemoryTree, OpenFile, TreeEntry};
 
 use super::error::Fail;
 use super::git_cli_exec::Repo;
@@ -12,7 +12,6 @@ use super::tree::{cat_blobs, list_tree};
 
 pub(super) struct FileEntry {
     pub blob: String,
-    #[allow(dead_code)]
     pub size: u64,
 }
 
@@ -26,6 +25,39 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    /// Paths, blob SHAs, and sizes, plus the text of one file: `open` if it exists,
+    /// else `README.md`, else the first file.
+    pub(super) fn to_tree(&self, open: Option<&str>) -> MemoryTree {
+        let chosen = open
+            .filter(|path| self.files.contains_key(*path))
+            .or_else(|| self.files.contains_key("README.md").then_some("README.md"))
+            .or_else(|| self.files.keys().next().map(String::as_str));
+        let open = chosen.and_then(|path| {
+            let entry = self.files.get(path)?;
+            let content = self.blobs.get(&entry.blob)?;
+            Some(OpenFile {
+                path: path.to_string(),
+                blob: entry.blob.clone(),
+                content: content.to_string(),
+            })
+        });
+        MemoryTree {
+            tip: self.tip.clone(),
+            seq: self.seq,
+            files: self
+                .files
+                .iter()
+                .map(|(path, entry)| TreeEntry {
+                    path: path.clone(),
+                    blob: entry.blob.clone(),
+                    size: entry.size,
+                })
+                .collect(),
+            directories: self.directories.clone(),
+            open,
+        }
+    }
+
     /// Legacy view: file text, no blame, no history.
     pub(super) fn to_store(&self) -> MemoryStore {
         let files = self

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -18,7 +18,9 @@ use serde_json::{json, Value};
 
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
-use crate::memory::{self, BlameEntry, Change, GitHttp, MemoryCommit, MemoryService, MemoryStore};
+use crate::memory::{
+    self, BlameEntry, Change, GitHttp, MemoryCommit, MemoryService, MemoryStore, MemoryTree,
+};
 use crate::ApiError;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
@@ -61,6 +63,9 @@ pub fn assemble(
             get(list_transcripts).post(post_transcript),
         )
         .route("/api/memories", get(get_memories))
+        .route("/api/memories/tree", get(get_memory_tree))
+        .route("/api/memories/blob/{sha}", get(get_memory_blob))
+        .route("/api/memories/tip", get(get_memory_tip))
         .route("/api/memories/log", get(get_memory_log))
         .route("/api/memories/blame", get(get_memory_blame))
         .route("/api/memories/commits", post(post_memories))
@@ -290,6 +295,18 @@ struct MemoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct TreeQuery {
+    scope: Option<String>,
+    open: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitQuery {
+    scope: Option<String>,
+    view: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BlameQuery {
     scope: Option<String>,
     path: String,
@@ -362,6 +379,106 @@ async fn get_memories(
     Ok(Json(store))
 }
 
+fn tip_etag(tip: Option<&str>) -> String {
+    format!("\"{}\"", tip.unwrap_or("empty"))
+}
+
+fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
+}
+
+fn validated_json(
+    headers: &HeaderMap,
+    etag: String,
+    cache: &'static str,
+    body: &impl Serialize,
+) -> Response {
+    let mut response = if matches_etag(headers, &etag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        Json(body).into_response()
+    };
+    let map = response.headers_mut();
+    if let Ok(value) = header::HeaderValue::from_str(&etag) {
+        map.insert(header::ETAG, value);
+    }
+    map.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(cache),
+    );
+    response
+}
+
+async fn get_memory_tree(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    query: Result<Query<TreeQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let open = query.open;
+    let tree = blocking(move || service.read_tree(&repo_id, open.as_deref())).await?;
+    Ok(validated_json(
+        &headers,
+        tip_etag(tree.tip.as_deref()),
+        "private, no-cache",
+        &tree,
+    ))
+}
+
+async fn get_memory_blob(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    UrlPath(sha): UrlPath<String>,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let etag = format!("\"{sha}\"");
+    let text = blocking(move || service.read_blob(&repo_id, &sha)).await?;
+    let mut response = text.to_string().into_response();
+    let map = response.headers_mut();
+    map.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    map.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    if let Ok(value) = header::HeaderValue::from_str(&etag) {
+        map.insert(header::ETAG, value);
+    }
+    Ok(response)
+}
+
+async fn get_memory_tip(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let (tip, seq) = blocking(move || service.read_tip(&repo_id)).await?;
+    Ok(validated_json(
+        &headers,
+        tip_etag(tip.as_deref()),
+        "no-cache",
+        &json!({ "tip": tip, "seq": seq }),
+    ))
+}
+
 async fn get_memory_log(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -393,9 +510,9 @@ async fn get_memory_blame(
 async fn post_memories(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
-    query: Result<Query<MemoryQuery>, QueryRejection>,
+    query: Result<Query<CommitQuery>, QueryRejection>,
     body: Result<Json<CommitRequest>, JsonRejection>,
-) -> Result<Json<MemoryStore>, ApiError> {
+) -> Result<Response, ApiError> {
     let Query(query) = query?;
     let Json(request) = body?;
     let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
@@ -406,11 +523,18 @@ async fn post_memories(
         .email
         .clone()
         .unwrap_or_else(|| identity.user_id.clone());
+    if query.view.as_deref() == Some("tree") {
+        let tree: MemoryTree = blocking(move || {
+            service.commit_tree_view(&repo_id, &actor, &label, &request.message, &request.changes)
+        })
+        .await?;
+        return Ok(Json(tree).into_response());
+    }
     let store = blocking(move || {
         service.commit(&repo_id, &actor, &label, &request.message, &request.changes)
     })
     .await?;
-    Ok(Json(store))
+    Ok(Json(store).into_response())
 }
 
 async fn git_http(
