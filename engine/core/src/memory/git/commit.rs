@@ -140,84 +140,130 @@ pub(super) struct Built {
     pub new_blobs: HashMap<String, Arc<str>>,
 }
 
-/// Builds the tree for `after` on top of `tip` with a fixed number of git calls.
-/// `after` holds only `Blob` entries that are in `before` or new `Text`.
-pub(super) fn build_tree(
-    repo: &Repo,
-    tip: Option<&str>,
-    before: &BTreeMap<String, Source>,
-    after: &BTreeMap<String, Source>,
-) -> Result<Built, Fail> {
-    let texts: Vec<(&String, &String)> = after
-        .iter()
-        .filter_map(|(path, source)| match source {
-            Source::Text(text) => Some((path, text)),
-            Source::Blob(_) => None,
-        })
-        .collect();
-    let work = Scratch::new(&repo.scratch);
-    let mut shas = Vec::new();
-    if !texts.is_empty() {
+/// Builds trees for a run of commits, each on top of the last, with one index and
+/// as few `hash-object` calls as the caller allows (see `hash_texts`).
+pub(super) struct TreeBuilder<'a> {
+    repo: &'a Repo,
+    work: Scratch,
+    /// Blob SHA of every text hashed so far.
+    hashed: HashMap<String, String>,
+    /// The commit (`None` for an empty book) whose tree the index holds, if known.
+    index_at: Option<Option<String>>,
+}
+
+impl<'a> TreeBuilder<'a> {
+    pub(super) fn new(repo: &'a Repo) -> Self {
+        TreeBuilder {
+            repo,
+            work: Scratch::new(&repo.scratch),
+            hashed: HashMap::new(),
+            index_at: None,
+        }
+    }
+
+    /// Writes every text not hashed yet as a blob, with one `git hash-object`.
+    pub(super) fn hash_texts<'t>(
+        &mut self,
+        texts: impl IntoIterator<Item = &'t str>,
+    ) -> Result<(), Fail> {
+        let mut todo: Vec<&str> = Vec::new();
+        let mut seen = HashSet::new();
+        for text in texts {
+            if !self.hashed.contains_key(text) && seen.insert(text) {
+                todo.push(text);
+            }
+        }
+        if todo.is_empty() {
+            return Ok(());
+        }
         let mut list = String::new();
-        for (index, (_, text)) in texts.iter().enumerate() {
-            let file = work.dir.join(format!("blob-{index}"));
+        for (index, text) in todo.iter().enumerate() {
+            let file = self.work.dir.join(format!("blob-{index}"));
             fs::write(&file, text.as_bytes()).map_err(|err| Fail::git(err.to_string()))?;
             list.push_str(&file.to_string_lossy());
             list.push('\n');
         }
         let out = git_text(
-            repo,
+            self.repo,
             &["hash-object", "-w", "--stdin-paths"],
             Some(list.as_bytes()),
             &[],
         )?;
-        shas = out.lines().map(|line| line.trim().to_string()).collect();
-        if shas.len() != texts.len() || shas.iter().any(|sha| !is_hex(sha, 40)) {
+        let shas: Vec<&str> = out.lines().map(str::trim).collect();
+        if shas.len() != todo.len() || shas.iter().any(|sha| !is_hex(sha, 40)) {
             return Err(Fail::git("hash-object returned the wrong number of blobs"));
         }
+        for (text, sha) in todo.into_iter().zip(shas) {
+            self.hashed.insert(text.to_string(), sha.to_string());
+        }
+        Ok(())
     }
-    let mut files = BTreeMap::new();
-    let mut new_blobs = HashMap::new();
-    let mut lines = String::new();
-    for path in before.keys().filter(|path| !after.contains_key(*path)) {
-        lines.push_str(&format!("0 {ZERO}\t{path}\n"));
-    }
-    let mut next = shas.iter();
-    for (path, source) in after {
-        match source {
-            Source::Blob(blob) => {
-                if before.get(path) != Some(source) {
-                    lines.push_str(&format!("100644 {blob}\t{path}\n"));
+
+    /// The tree for `after` on top of `tip`. `after` holds only `Blob` entries that
+    /// are in `before` or new `Text`. Call `committed` once the tree is committed.
+    pub(super) fn build(
+        &mut self,
+        tip: Option<&str>,
+        before: &BTreeMap<String, Source>,
+        after: &BTreeMap<String, Source>,
+    ) -> Result<Built, Fail> {
+        self.hash_texts(after.values().filter_map(|source| match source {
+            Source::Text(text) => Some(text.as_str()),
+            Source::Blob(_) => None,
+        }))?;
+        let mut files = BTreeMap::new();
+        let mut new_blobs = HashMap::new();
+        let mut lines = String::new();
+        for path in before.keys().filter(|path| !after.contains_key(*path)) {
+            lines.push_str(&format!("0 {ZERO}\t{path}\n"));
+        }
+        for (path, source) in after {
+            match source {
+                Source::Blob(blob) => {
+                    if before.get(path) != Some(source) {
+                        lines.push_str(&format!("100644 {blob}\t{path}\n"));
+                    }
+                    files.insert(path.clone(), blob.clone());
                 }
-                files.insert(path.clone(), blob.clone());
-            }
-            Source::Text(text) => {
-                let sha = next.next().expect("one sha per text").clone();
-                lines.push_str(&format!("100644 {sha}\t{path}\n"));
-                new_blobs.insert(sha.clone(), Arc::from(text.as_str()));
-                files.insert(path.clone(), sha);
+                Source::Text(text) => {
+                    let sha = self.hashed[text].clone();
+                    lines.push_str(&format!("100644 {sha}\t{path}\n"));
+                    new_blobs.insert(sha.clone(), Arc::from(text.as_str()));
+                    files.insert(path.clone(), sha);
+                }
             }
         }
+        let index = self.work.dir.join("index");
+        let index = index.to_string_lossy();
+        let env = [("GIT_INDEX_FILE", index.as_ref())];
+        let wanted = tip.map(str::to_string);
+        if self.index_at.as_ref() != Some(&wanted) {
+            self.index_at = None;
+            match tip {
+                Some(tip) => git_ok(self.repo, &["read-tree", tip], None, &env)?,
+                None => git_ok(self.repo, &["read-tree", "--empty"], None, &env)?,
+            }
+        }
+        // From here until `committed`, the index matches no commit.
+        self.index_at = None;
+        git_ok(
+            self.repo,
+            &["update-index", "--index-info"],
+            Some(lines.as_bytes()),
+            &env,
+        )?;
+        let tree = git_text(self.repo, &["write-tree"], None, &env)?;
+        Ok(Built {
+            tree,
+            files,
+            new_blobs,
+        })
     }
-    let index = work.dir.join("index");
-    let index = index.to_string_lossy();
-    let env = [("GIT_INDEX_FILE", index.as_ref())];
-    match tip {
-        Some(tip) => git_ok(repo, &["read-tree", tip], None, &env)?,
-        None => git_ok(repo, &["read-tree", "--empty"], None, &env)?,
+
+    /// The tree from the last `build` is now the tree of `commit`.
+    pub(super) fn committed(&mut self, commit: &str) {
+        self.index_at = Some(Some(commit.to_string()));
     }
-    git_ok(
-        repo,
-        &["update-index", "--index-info"],
-        Some(lines.as_bytes()),
-        &env,
-    )?;
-    let tree = git_text(repo, &["write-tree"], None, &env)?;
-    Ok(Built {
-        tree,
-        files,
-        new_blobs,
-    })
 }
 
 /// A private directory under the repo's scratch, removed on drop.
@@ -245,23 +291,43 @@ impl Drop for Scratch {
     }
 }
 
+/// Who a UI or API commit is written for. A robot is an agent acting for the
+/// signed-in human, whose label it keeps.
+pub(super) enum CommitAuthor<'a> {
+    Human { user_id: &'a str, label: &'a str },
+    Robot { agent: &'a str, label: &'a str },
+}
+
 pub(super) fn commit_tree(
     repo: &Repo,
     tree: &str,
     parent: Option<&str>,
     message: &str,
-    user_id: &str,
-    label: &str,
+    author: &CommitAuthor,
 ) -> Result<String, Fail> {
     let mut args = vec!["commit-tree", tree];
     if let Some(parent) = parent {
         args.push("-p");
         args.push(parent);
     }
-    let email = format!("{}@users.cadri.local", sanitize_email(user_id));
-    let name = sanitize_name(label);
+    let (kind, id, label, name, email) = match *author {
+        CommitAuthor::Human { user_id, label } => (
+            "human",
+            user_id,
+            label,
+            sanitize_name(label),
+            format!("{}@users.cadri.local", sanitize_email(user_id)),
+        ),
+        CommitAuthor::Robot { agent, label } => (
+            "robot",
+            agent,
+            label,
+            sanitize_name(agent),
+            format!("{}@agents.cadri.local", sanitize_email(agent)),
+        ),
+    };
     let body = format!(
-        "{message}\n\nCadri-Author-Kind: human\nCadri-Author-Id: {user_id}\nCadri-Author-Label: {label}\n"
+        "{message}\n\nCadri-Author-Kind: {kind}\nCadri-Author-Id: {id}\nCadri-Author-Label: {label}\n"
     );
     git_text(
         repo,
@@ -274,6 +340,14 @@ pub(super) fn commit_tree(
             ("GIT_COMMITTER_EMAIL", "engine@cadri.local"),
         ],
     )
+}
+
+/// `^[A-Za-z0-9._-]{1,64}$`.
+pub(super) fn valid_agent(agent: &str) -> bool {
+    (1..=64).contains(&agent.len())
+        && agent
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 pub(super) fn sanitize_name(label: &str) -> String {

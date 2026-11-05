@@ -2839,6 +2839,69 @@ async fn a_webhook_from_another_api_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn workos_agent_edits_land_in_the_callers_book_as_a_robot() {
+    let (app, mock) = setup().await;
+    let ada = bearer(&member_token(&mock, "user_ada", "org_1"));
+    let sam = bearer(&member_token(&mock, "user_sam", "org_1"));
+    let ada_h = [("authorization", ada.as_str())];
+    let sam_h = [("authorization", sam.as_str())];
+    let edit = |content: &str, base: Option<&str>| {
+        let mut body = json!({
+            "message": "Agent note",
+            "changes": [{ "op": "write", "path": "notes.md", "content": content }],
+            "agent": "claude-code-7f3a"
+        });
+        if let Some(base) = base {
+            body["base"] = json!(base);
+        }
+        body
+    };
+    let uri = "/api/memories/commits?view=tree&scope=user";
+    let (status, _, saved) = send(
+        &app,
+        request(Method::POST, uri, &ada_h, Some(edit("one\n", None))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let first = saved["commit"].as_str().unwrap().to_string();
+    let (_, _, log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    assert_eq!(
+        log["commits"][0]["author"],
+        json!({ "kind": "robot", "id": "claude-code-7f3a" })
+    );
+    let (_, _, sam_book) = send(&app, get_with("/api/memories?scope=user", &sam_h)).await;
+    assert_eq!(sam_book["files"].as_array().unwrap().len(), 0);
+
+    // Ada's commit is not a base in Sam's book.
+    let (status, _, unknown) = send(
+        &app,
+        request(Method::POST, uri, &sam_h, Some(edit("x\n", Some(&first)))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unknown["error"], "unknown base");
+
+    let (status, _, second) = send(
+        &app,
+        request(Method::POST, uri, &ada_h, Some(edit("two\n", Some(&first)))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let (status, _, conflict) = send(
+        &app,
+        request(
+            Method::POST,
+            uri,
+            &ada_h,
+            Some(edit("three\n", Some(&first))),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["paths"], json!(["notes.md"]));
+}
+
+#[tokio::test]
 async fn workos_token_isolates_team_and_personal_books() {
     let (app, mock) = setup().await;
     let ada = bearer(&member_token(&mock, "user_ada", "org_1"));
