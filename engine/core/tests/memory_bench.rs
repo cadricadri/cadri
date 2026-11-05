@@ -215,6 +215,37 @@ fn page_load(bench: &Bench, addr: &SocketAddr, corpus: Corpus) {
     out.write();
 }
 
+/// A small book with 250 log entries. With checkpoints a cold server loads the
+/// checkpoint at 200 plus 50 entries instead of replaying all 250.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "benchmark; run scripts/bench-memory"]
+async fn cold_read_250_writes() {
+    let bench = Bench::new();
+    let addr = bench.server("main");
+    bench.seed(&addr, Corpus::Small);
+    bench.fake.set_latency(Duration::ZERO);
+    for round in 0..242 {
+        let change = json!({
+            "op": "write",
+            "path": Corpus::Small.path(round % Corpus::Small.files()),
+            "content": format!("edit {round}\n"),
+        });
+        post_commit(&addr, &format!("more {round}"), vec![change]).expect("edit commit");
+    }
+    // Let the background checkpoint uploads finish.
+    std::thread::sleep(Duration::from_secs(3));
+    bench.fake.set_latency(latency());
+    let cold = bench.server("srv-cold-250");
+    let started = Instant::now();
+    let (status, _) = http(&cold, "GET", "/api/memories", None);
+    let elapsed = started.elapsed();
+    assert_eq!(status, 200);
+    let mut out = Results::new("cold_read_250_writes");
+    out.ms("first_read_ms", elapsed);
+    out.write();
+    bench.finish();
+}
+
 fn cold_read(bench: &Bench, corpus: Corpus) {
     let cold = bench.server("srv-cold-read");
     let started = Instant::now();

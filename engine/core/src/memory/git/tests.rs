@@ -1600,3 +1600,96 @@ fn one_bad_edit_in_a_batch_does_not_fail_the_others() {
     assert_eq!(service.read_tip(repo).unwrap().1, 1);
     let _ = fs::remove_dir_all(root);
 }
+
+fn checkpoint_path(root: &Path, repo: &str, seq: u64) -> PathBuf {
+    root.join("store")
+        .join("repos")
+        .join(repo)
+        .join(format!("checkpoint/{seq:020}"))
+}
+
+fn write_notes(service: &MemoryService, repo: &str, count: usize) {
+    let (user, label) = author();
+    for n in 0..count {
+        service
+            .commit(
+                repo,
+                user,
+                label,
+                "note",
+                &[write(&format!("note-{}.md", n % 7), &format!("text {n}"))],
+            )
+            .unwrap();
+    }
+}
+
+fn wait_for(path: &Path) -> bool {
+    for _ in 0..100 {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn a_hundredth_write_creates_a_checkpoint() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, false);
+    let repo = "org_checkpoint_a_repo_0";
+    write_notes(&service, repo, 100);
+    assert!(wait_for(&checkpoint_path(&root, repo, 100)));
+    assert!(!checkpoint_path(&root, repo, 99).exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_fresh_service_loads_from_the_checkpoint_and_the_entries_after_it() {
+    let fake = crate::memory::s3::FakeS3::start();
+    let root = temp();
+    let service = counted_s3_service(&root, &fake);
+    let repo = "org_checkpoint_b_repo_0";
+    write_notes(&service, repo, 105);
+    // Wait for the background upload to finish before counting.
+    let mut stored = false;
+    for _ in 0..100 {
+        if service.writer_state(repo).1 == 100 {
+            stored = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(stored);
+    let expected = service.read_store(repo).unwrap();
+
+    let fresh_root = temp();
+    let fresh = counted_s3_service(&fresh_root, &fake);
+    let (before, _) = fake.requests();
+    let store = fresh.read_store(repo).unwrap();
+    let gets = fake.requests().0 - before;
+    assert_eq!(store.files.len(), expected.files.len());
+    for (a, b) in store.files.iter().zip(&expected.files) {
+        assert_eq!((&a.path, &a.content), (&b.path, &b.content));
+    }
+    assert_eq!(fresh.read_tip(repo).unwrap().1, 105);
+    assert!(gets <= 12, "loading made {gets} GETs, not about 8");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(fresh_root);
+}
+
+#[test]
+fn a_failed_checkpoint_upload_does_not_fail_the_write() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, false);
+    let repo = "org_checkpoint_c_repo_0";
+    service.fail_next_checkpoint_upload(1);
+    write_notes(&service, repo, 100);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(!checkpoint_path(&root, repo, 100).exists());
+    // The next write finds the checkpoint still due and retries it.
+    write_notes(&service, repo, 1);
+    assert!(wait_for(&checkpoint_path(&root, repo, 101)));
+    assert_eq!(service.writer_state(repo).0, 101);
+    let _ = fs::remove_dir_all(root);
+}

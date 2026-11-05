@@ -40,6 +40,11 @@ pub(super) enum Backend {
 /// Log entries downloaded at once while loading a book.
 const LOG_FETCHES: usize = 8;
 
+/// A checkpoint is written once this many log entries, or this many bytes of them,
+/// have piled up since the last one.
+const CHECKPOINT_ENTRIES: u64 = 100;
+const CHECKPOINT_BYTES: u64 = 8 * 1024 * 1024;
+
 /// How long an edit waits for the writer that took it from the queue to answer.
 const EDIT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -58,6 +63,8 @@ struct Inner {
     /// Test-only. The next this many log creates find their key taken, so a UI
     /// commit can be shown exhausting its retries.
     log_failures: Mutex<u32>,
+    /// Test-only. The next this many checkpoint uploads fail.
+    checkpoint_failures: Mutex<u32>,
 }
 
 /// One book in this process. Writers hold `writer`; readers only clone the snapshot
@@ -67,6 +74,8 @@ struct Book {
     snapshot: RwLock<Option<Arc<Snapshot>>>,
     /// Edits waiting for the writer. Whoever holds `writer` next commits them all.
     queue: Mutex<Vec<Pending>>,
+    /// A checkpoint upload is running, so no second one starts.
+    checkpointing: AtomicBool,
 }
 
 struct Pending {
@@ -101,10 +110,8 @@ impl EditOutcome {
 struct WriterState {
     /// Last log entry applied to the local repo and the snapshot.
     seq: u64,
-    /// Inputs for deciding when to write a checkpoint; only tests read them so far.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Highest checkpoint known to be durable.
     checkpoint_seq: u64,
-    #[cfg_attr(not(test), allow(dead_code))]
     log_bytes_since_checkpoint: u64,
 }
 
@@ -160,6 +167,7 @@ impl MemoryService {
                 blames: Mutex::new(HashMap::new()),
                 gate: Mutex::new(None),
                 log_failures: Mutex::new(0),
+                checkpoint_failures: Mutex::new(0),
             }),
         }
     }
@@ -168,6 +176,15 @@ impl MemoryService {
     /// writer, without anything being stored.
     pub fn fail_next_log_create(&self, times: u32) {
         *self.inner.log_failures.lock().expect("log failures") = times;
+    }
+
+    /// Test helper: the next `times` checkpoint uploads fail.
+    pub fn fail_next_checkpoint_upload(&self, times: u32) {
+        *self
+            .inner
+            .checkpoint_failures
+            .lock()
+            .expect("checkpoint failures") = times;
     }
 
     /// Test helper: directory store with explicit git/scratch paths.
@@ -477,6 +494,7 @@ impl MemoryService {
                     writer: Mutex::new(WriterState::default()),
                     snapshot: RwLock::new(None),
                     queue: Mutex::new(Vec::new()),
+                    checkpointing: AtomicBool::new(false),
                 })
             })
             .clone())
@@ -898,6 +916,96 @@ impl MemoryService {
         if let Err(err) = git_ok(repo, &["update-ref", "refs/heads/main", sha], None, &[]) {
             self.unload(book);
             return Err(err);
+        }
+        self.maybe_checkpoint(repo, repo_id, book, state, sha);
+        Ok(())
+    }
+
+    /// Starts a background checkpoint of `tip` when enough log has piled up. The ref
+    /// pins the commit's objects while the bundle is written without the writer lock.
+    fn maybe_checkpoint(
+        &self,
+        repo: &Repo,
+        repo_id: &str,
+        book: &Book,
+        state: &WriterState,
+        tip: &str,
+    ) {
+        let due = state.seq - state.checkpoint_seq >= CHECKPOINT_ENTRIES
+            || state.log_bytes_since_checkpoint >= CHECKPOINT_BYTES;
+        if !due
+            || book
+                .checkpointing
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+        {
+            return;
+        }
+        let seq = state.seq;
+        if let Err(err) = git_ok(
+            repo,
+            &["update-ref", "refs/cadri/checkpoint", tip],
+            None,
+            &[],
+        ) {
+            eprintln!("memory checkpoint {seq} for {repo_id}: {err:?}");
+            book.checkpointing.store(false, Ordering::SeqCst);
+            return;
+        }
+        let service = self.clone();
+        let repo_id = repo_id.to_string();
+        std::thread::spawn(move || {
+            let result = service.write_checkpoint(&repo_id, seq);
+            if let Err(err) = result {
+                eprintln!("memory checkpoint {seq} for {repo_id}: {err:?}");
+            }
+            if let Ok(book) = service.book(&repo_id) {
+                book.checkpointing.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
+    fn write_checkpoint(&self, repo_id: &str, seq: u64) -> Result<(), Fail> {
+        let repo = self.repo(repo_id)?;
+        let path = repo.scratch.join(format!("checkpoint-{seq:020}.bundle"));
+        let uploaded = (|| {
+            let _ = fs::remove_file(&path);
+            git_ok(
+                &repo,
+                &[
+                    "bundle",
+                    "create",
+                    &path.to_string_lossy(),
+                    "refs/cadri/checkpoint",
+                ],
+                None,
+                &[],
+            )?;
+            let bytes = fs::read(&path).map_err(|err| Fail::git(err.to_string()))?;
+            {
+                let mut left = self
+                    .inner
+                    .checkpoint_failures
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
+                if *left > 0 {
+                    *left -= 1;
+                    return Err(Fail::git("checkpoint upload failed"));
+                }
+            }
+            // `Exists` means an earlier attempt or another process stored it.
+            self.inner
+                .durable
+                .create(repo_id, &checkpoint_key(seq), &bytes)
+                .map(|_| ())
+        })();
+        let _ = fs::remove_file(&path);
+        uploaded?;
+        let book = self.book(repo_id)?;
+        let mut writer = book.writer.lock().unwrap_or_else(|err| err.into_inner());
+        if seq > writer.checkpoint_seq {
+            writer.checkpoint_seq = seq;
+            writer.log_bytes_since_checkpoint = 0;
         }
         Ok(())
     }
