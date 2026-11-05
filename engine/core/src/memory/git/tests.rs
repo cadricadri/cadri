@@ -1405,7 +1405,7 @@ fn twenty_threads_of_five_edits_all_land_in_fewer_log_entries_than_commits() {
 #[test]
 fn an_edit_with_a_stale_base_touching_a_changed_file_is_a_conflict() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_base0_repo_0";
     service
         .edit(
@@ -1447,7 +1447,7 @@ fn an_edit_with_a_stale_base_touching_a_changed_file_is_a_conflict() {
 #[test]
 fn an_edit_with_a_stale_base_touching_other_files_lands() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_base1_repo_0";
     service
         .edit(
@@ -1483,7 +1483,7 @@ fn an_edit_with_a_stale_base_touching_other_files_lands() {
 #[test]
 fn edits_without_a_base_are_last_writer_wins() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_base2_repo_0";
     service
         .edit(repo, edit_request("first", vec![write("a.md", "1")]))
@@ -1503,7 +1503,7 @@ fn edits_without_a_base_are_last_writer_wins() {
 #[test]
 fn an_agent_edit_is_authored_as_a_robot() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_robot0_repo_0";
     let mut request = edit_request("agent note", vec![write("a.md", "1")]);
     request.agent = Some("claude-code-7f3a".to_string());
@@ -1539,7 +1539,7 @@ fn an_agent_edit_is_authored_as_a_robot() {
 #[test]
 fn an_invalid_agent_id_is_rejected() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_robot1_repo_0";
     let long = "a".repeat(65);
     for agent in ["", "has space", "new\nline", "slash/agent", long.as_str()] {
@@ -1559,7 +1559,7 @@ fn an_invalid_agent_id_is_rejected() {
 #[test]
 fn one_bad_edit_in_a_batch_does_not_fail_the_others() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_batch0_repo_0";
     service.read_store(repo).unwrap();
     // Hold the writer so every edit below queues up and runs as one batch.
