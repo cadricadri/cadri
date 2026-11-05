@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use axum::http::StatusCode;
 
 use crate::memory::types::memory_path_ok;
@@ -9,7 +7,8 @@ use super::commit::check_layout;
 use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_out, git_text, Repo};
 use super::ids::{is_hex, MAX_FILE_BYTES, ZERO};
-use super::tree::list_tree;
+use super::snapshot::Snapshot;
+use super::tree::{cat_blobs, list_tree};
 
 pub(super) const UPLOAD_AD: &str = "application/x-git-upload-pack-advertisement";
 pub(super) const RECEIVE_AD: &str = "application/x-git-receive-pack-advertisement";
@@ -32,22 +31,27 @@ pub(super) fn ready(body: Vec<u8>) -> GitHttp {
 
 pub(super) fn inspect(
     repo: &Repo,
+    snapshot: &Snapshot,
     old: Option<&str>,
     new_sha: &str,
     user_id: &str,
 ) -> Result<(), Fail> {
-    let range = if let Some(old) = old {
-        git_text(repo, &["rev-list", &format!("{old}..{new_sha}")], None, &[])?
-    } else {
-        git_text(repo, &["rev-list", new_sha], None, &[])?
+    let range = match old {
+        Some(old) => format!("{old}..{new_sha}"),
+        None => new_sha.to_string(),
     };
-    for sha in range.lines() {
+    let log = git_text(repo, &["log", "--format=%x02%H%x1e%B", &range], None, &[])?;
+    let mut trees = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for record in log.split('\u{2}') {
+        let Some((sha, message)) = record.split_once('\u{1e}') else {
+            continue;
+        };
         let sha = sha.trim();
         if !is_hex(sha, 40) {
             continue;
         }
-        let message = git_text(repo, &["log", "-1", "--format=%B", sha], None, &[])?;
-        match required_author(&message)? {
+        match required_author(message.trim())? {
             Parsed::Human { id, .. } if id != user_id => {
                 return Err(Fail::api(
                     StatusCode::BAD_REQUEST,
@@ -62,38 +66,43 @@ pub(super) fn inspect(
                 return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid author"));
             }
         }
-        validate_tree(repo, sha)?;
+        let mut entries = Vec::new();
+        for (mode, blob, path) in list_tree(repo, sha)? {
+            if (mode != "100644" && mode != "100755") || !memory_path_ok(&path) {
+                return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
+            }
+            if !snapshot.blobs.contains_key(&blob) && !unknown.contains(&blob) {
+                unknown.push(blob.clone());
+            }
+            entries.push((blob, path));
+        }
+        trees.push(entries);
+    }
+    let bodies = cat_blobs(repo, &unknown)?;
+    for entries in &trees {
+        for (blob, _) in entries {
+            if snapshot.blobs.contains_key(blob) {
+                continue;
+            }
+            let bytes = bodies
+                .get(blob)
+                .ok_or_else(|| Fail::git(format!("blob {blob} missing from cat-file --batch")))?;
+            if bytes.len() > MAX_FILE_BYTES {
+                return Err(Fail::api(
+                    StatusCode::BAD_REQUEST,
+                    "memory file is too large",
+                ));
+            }
+            if bytes.contains(&0) || std::str::from_utf8(bytes).is_err() {
+                return Err(Fail::api(
+                    StatusCode::BAD_REQUEST,
+                    "memory file must be utf-8 text",
+                ));
+            }
+        }
+        check_layout(entries.iter().map(|(_, path)| path.as_str()))?;
     }
     Ok(())
-}
-
-pub(super) fn validate_tree(repo: &Repo, sha: &str) -> Result<(), Fail> {
-    let mut files = BTreeMap::new();
-    for (mode, blob, path) in list_tree(repo, sha)? {
-        if mode != "100644" && mode != "100755" {
-            return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
-        }
-        if !memory_path_ok(&path) {
-            return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
-        }
-        let bytes = git_bytes(repo, &["cat-file", "blob", &blob], None, &[])?;
-        if bytes.len() > MAX_FILE_BYTES {
-            return Err(Fail::api(
-                StatusCode::BAD_REQUEST,
-                "memory file is too large",
-            ));
-        }
-        if bytes.contains(&0) {
-            return Err(Fail::api(
-                StatusCode::BAD_REQUEST,
-                "memory file must be utf-8 text",
-            ));
-        }
-        let content = String::from_utf8(bytes)
-            .map_err(|_| Fail::api(StatusCode::BAD_REQUEST, "memory file must be utf-8 text"))?;
-        files.insert(path, content);
-    }
-    check_layout(&files)
 }
 
 pub(super) fn index_pack(repo: &Repo, pack: &[u8]) -> Result<(), String> {

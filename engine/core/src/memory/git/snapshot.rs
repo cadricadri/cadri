@@ -117,3 +117,45 @@ pub(super) fn snapshot_from_repo(
         blobs,
     })
 }
+
+/// The snapshot after a commit built from `previous`: the new tree's files, with
+/// text taken from `previous` or from the blobs the commit added.
+pub(super) fn snapshot_after(
+    previous: &Snapshot,
+    tip: &str,
+    all_files: &BTreeMap<String, String>,
+    new_blobs: HashMap<String, Arc<str>>,
+) -> Result<Snapshot, Fail> {
+    let mut files = BTreeMap::new();
+    let mut directories = Vec::new();
+    let mut blobs: HashMap<String, Arc<str>> = HashMap::new();
+    for (path, sha) in all_files {
+        if is_keep(path) {
+            if let Some((directory, _)) = path.rsplit_once('/') {
+                directories.push(directory.to_string());
+            }
+            continue;
+        }
+        let text = new_blobs
+            .get(sha)
+            .or_else(|| previous.blobs.get(sha))
+            .ok_or_else(|| Fail::git(format!("blob {sha} is not in the snapshot")))?;
+        files.insert(
+            path.clone(),
+            FileEntry {
+                blob: sha.clone(),
+                size: text.len() as u64,
+            },
+        );
+        blobs.insert(sha.clone(), Arc::clone(text));
+    }
+    directories.sort();
+    directories.dedup();
+    Ok(Snapshot {
+        tip: Some(tip.to_string()),
+        seq: previous.seq,
+        files,
+        directories,
+        blobs,
+    })
+}
