@@ -1,4 +1,4 @@
-"""Credential helpers shared by the capture hook and cadri-login.
+"""Credential helpers shared by the capture hooks and cadri login.
 
 Credentials live in ~/.config/cadri/credentials.json (mode 0600), keyed by the
 normalized server URL: {"<url>": {"access_token", "refresh_token", "expires_at"}}.
@@ -33,7 +33,28 @@ def normalize_url(url: str) -> str:
 
 
 def server_url(override: str | None = None) -> str:
-    return normalize_url(override or os.environ.get("CADRI_URL") or DEFAULT_URL)
+    """--url, then CADRI_URL, then the server `cadri init` last set up, then hosted Cadri."""
+    return normalize_url(override or os.environ.get("CADRI_URL") or saved_url() or DEFAULT_URL)
+
+
+def config_path() -> Path:
+    return Path.home() / ".config" / "cadri" / "config.json"
+
+
+def saved_url() -> str | None:
+    try:
+        data = json.loads(config_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    url = data.get("url") if isinstance(data, dict) else None
+    return url if isinstance(url, str) and url else None
+
+
+def save_url(base: str) -> None:
+    """Remember the server for hooks, which run without the CADRI_URL of the shell that ran init."""
+    path = config_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(json.dumps({"url": normalize_url(base)}, indent=2) + "\n", encoding="utf-8")
 
 
 def credentials_path() -> Path:
@@ -116,7 +137,7 @@ def token_entry(body: dict, previous: dict | None = None) -> dict | None:
 def refresh_entry(base: str, entry: dict, timeout: float) -> dict | None:
     refresh = entry.get("refresh_token")
     if not isinstance(refresh, str) or not refresh:
-        print("cadri: no refresh token; run cadri-login", file=sys.stderr)
+        print("cadri: no refresh token; run cadri login", file=sys.stderr)
         return None
     try:
         status, body = post_json(f"{base}/auth/refresh", {"refresh_token": refresh}, timeout)
@@ -125,7 +146,7 @@ def refresh_entry(base: str, entry: dict, timeout: float) -> dict | None:
         return None
     refreshed = token_entry(body, entry) if status == 200 else None
     if refreshed is None:
-        print(f"cadri: credential refresh failed ({status}); run cadri-login", file=sys.stderr)
+        print(f"cadri: credential refresh failed ({status}); run cadri login", file=sys.stderr)
         return None
     try:
         update_entry(base, refreshed)

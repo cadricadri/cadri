@@ -16,6 +16,10 @@ def _db_candidates(home: Path) -> list[Path]:
     ]
 
 
+def database(home: Path) -> Path | None:
+    return next((path for path in _db_candidates(home) if path.is_file()), None)
+
+
 def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
     refs: list[SessionRef] = []
     for db_path in _db_candidates(home):

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# uv-backed Cadri CLI shim.
+# uv-backed Cadri CLI for a source checkout. Installed copies use the shim install.sh writes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if ! command -v uv >/dev/null 2>&1; then
@@ -7,5 +7,4 @@ if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="${HOME}/.local/bin:${PATH}"
 fi
-cd "$ROOT"
-exec uv run --quiet python bin/cadri_cli.py "$@"
+exec uv run --quiet --project "$ROOT" python "$ROOT/bin/cadri_cli.py" "$@"

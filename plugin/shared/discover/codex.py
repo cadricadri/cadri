@@ -1,10 +1,19 @@
-"""Codex sessions under ~/.codex/sessions/YYYY/MM/DD/*.jsonl."""
+"""Codex sessions under ~/.codex/sessions/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .types import SessionRef
+
+SESSION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+
+
+def thread_id(path: Path) -> str:
+    """The session id Codex hooks report, which is the UUID that ends the rollout file name."""
+    match = SESSION_ID.search(path.stem)
+    return match.group(0) if match else path.stem
 
 
 def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
@@ -22,7 +31,7 @@ def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
         refs.append(
             SessionRef(
                 harness="codex",
-                thread_id=path.stem,
+                thread_id=thread_id(path),
                 path=path,
                 updated_at=updated,
             )

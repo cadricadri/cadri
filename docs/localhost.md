@@ -19,27 +19,17 @@ From the `cadri/` repo root:
 - Engine: `http://127.0.0.1:8080` (auth mode `none`)
 - Web UI: `http://127.0.0.1:5173`
 
-Or start only the engine in the background via the plugin CLI:
+Or start only the engine in the background and point this machine's agents at it, from the `cadri/` repo root:
 
 ```bash
-cd plugin
-./install.sh
-export PATH="$HOME/.local/bin:$PATH"
-export CADRI_URL=http://127.0.0.1:8080
-cadri init --local --start-engine
+./plugin/bin/cadri init --local --start-engine
 ```
 
-## Plugin / harnesses
+`cadri init` installs the capture hooks and remembers the server URL in `~/.config/cadri/config.json`, so hooks keep uploading to localhost. `--local` skips device login unless you also pass `--login`. Credentials are keyed by URL, so localhost and `https://app.cadri.io` do not overwrite each other. Run `cadri init` without `--local` to switch back to hosted Cadri.
 
-```bash
-cd plugin
-./install.sh   # or: uv sync && ./bin/cadri …
-CADRI_URL=http://127.0.0.1:8080 cadri init --local
-```
+To install the CLI from this checkout instead of the newest release: `bash plugin/install.sh`.
 
-`--local` skips WorkOS device login unless you also pass `--login`. Credentials are keyed by URL, so localhost and `https://app.cadri.io` do not overwrite each other.
-
-Claude Code (from a checkout):
+For plugin development, load the hooks straight from the checkout instead of running `cadri init` (doing both uploads every session twice):
 
 ```bash
 claude --plugin-dir "$(pwd)/plugin"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cadri CLI: login, init (discover + backfill + harness install), local helpers."""
+"""Cadri CLI: login, init (hooks + backfill + memory clone), agent hooks, memory books."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from shared import cadri_auth, memory  # noqa: E402
+from shared import cadri_auth, hooks, install, memory  # noqa: E402
 from shared.discover import detected_harnesses, discover_all  # noqa: E402
 from shared.discover.opencode import export_session_json  # noqa: E402
 from shared.discover.types import SessionRef  # noqa: E402
@@ -27,12 +27,11 @@ BACKFILL_MAX_SESSIONS = 200
 BACKFILL_MAX_BYTES = 24 * 1024 * 1024
 REQUEST_TIMEOUT = 15
 SLOW_DOWN_SECONDS = 5
-
-HARNESS_INSTALL = {
-    "claude_code": "harnesses/claude",
-    "cursor": "harnesses/cursor",
-    "codex": "harnesses/codex",
-    "opencode": "harnesses/opencode",
+HARNESS_NAMES = {
+    "claude_code": "Claude Code",
+    "cursor": "Cursor",
+    "codex": "Codex",
+    "opencode": "OpenCode",
 }
 
 
@@ -42,6 +41,13 @@ class CliError(Exception):
 
 def plugin_root() -> Path:
     return PLUGIN_ROOT
+
+
+def version() -> str:
+    try:
+        return (PLUGIN_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "source"
 
 
 def cmd_login(args: argparse.Namespace) -> int:
@@ -113,7 +119,7 @@ def ensure_auth(base: str, skip_login: bool) -> None:
     if isinstance(entry, dict) and entry.get("access_token"):
         return
     if skip_login:
-        raise CliError("not signed in; run cadri login or set CADRI_API_TOKEN")
+        return
     print("No credentials found; starting browser sign-in…")
     cmd_login(argparse.Namespace(url=base, logout=False, no_browser=False))
 
@@ -160,7 +166,10 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
             "harness": ref.harness,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
         }
-        status, body = post_transcript(base, payload)
+        try:
+            status, body = post_transcript(base, payload)
+        except (OSError, ValueError) as exc:
+            raise CliError(f"could not reach {base}: {exc}") from exc
         if status in (200, 201):
             uploaded += 1
             bytes_used += size
@@ -187,77 +196,11 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
     }
 
 
-def install_harness(name: str) -> str:
-    rel = HARNESS_INSTALL.get(name)
-    if not rel:
-        return f"{name}: unknown harness"
-    source = plugin_root() / rel
-    if not source.is_dir():
-        return f"{name}: package missing at {source}"
-    home = Path.home()
-    if name == "claude_code":
-        dest = home / ".claude" / "plugins" / "cadri"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() or dest.is_symlink():
-            if dest.is_dir() and not dest.is_symlink():
-                shutil.rmtree(dest)
-            else:
-                dest.unlink()
-        shutil.copytree(source, dest)
-        # Also drop skills into ~/.claude/skills and ~/.agents/skills
-        for skills_root in (home / ".claude" / "skills", home / ".agents" / "skills"):
-            skills_root.mkdir(parents=True, exist_ok=True)
-            src_skills = source / "skills"
-            if src_skills.is_dir():
-                for skill in src_skills.iterdir():
-                    target = skills_root / skill.name
-                    if target.exists():
-                        shutil.rmtree(target) if target.is_dir() else target.unlink()
-                    shutil.copytree(skill, target)
-        return f"{name}: installed plugin to {dest}"
-    if name == "cursor":
-        dest = home / ".cursor" / "cadri"
-        dest.mkdir(parents=True, exist_ok=True)
-        for item in source.iterdir():
-            target = dest / item.name
-            if target.exists():
-                shutil.rmtree(target) if target.is_dir() else target.unlink()
-            if item.is_dir():
-                shutil.copytree(item, target)
-            else:
-                shutil.copy2(item, target)
-        mcp_src = source / "mcp" / "cadri.json"
-        if mcp_src.is_file():
-            mcp_dir = home / ".cursor"
-            mcp_dir.mkdir(parents=True, exist_ok=True)
-            # Bake the effective server URL (hosted / staging / localhost) at install time.
-            base = cadri_auth.server_url()
-            text = mcp_src.read_text(encoding="utf-8").replace("${CADRI_URL}", base)
-            (mcp_dir / "cadri-mcp.json").write_text(text, encoding="utf-8")
-            dest_mcp = dest / "mcp" / "cadri.json"
-            if dest_mcp.is_file():
-                dest_mcp.write_text(text, encoding="utf-8")
-        return f"{name}: installed files under {dest} (CADRI_URL={cadri_auth.server_url()})"
-    if name == "codex":
-        dest = home / ".codex" / "cadri"
-        dest.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, dest, dirs_exist_ok=True)
-        return f"{name}: installed files under {dest}"
-    if name == "opencode":
-        dest = home / ".config" / "opencode" / "plugins" / "cadri"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(source, dest)
-        return f"{name}: installed plugin to {dest}"
-    return f"{name}: no installer"
-
-
 def start_local_engine() -> None:
     repo = plugin_root().parent
     script = repo / "scripts" / "run"
     if not script.is_file():
-        raise CliError(f"missing {script}; clone the cadri repo for localhost mode")
+        raise CliError(f"missing {script}; run ./plugin/bin/cadri init --local --start-engine from a cadri checkout")
     log = Path.home() / ".cadri" / "engine.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -274,42 +217,123 @@ def start_local_engine() -> None:
     print(f"Started local engine (log {log}). pid={proc.stdout.strip() or 'unknown'}")
 
 
+def git_ready() -> bool:
+    """Whether git runs. On a fresh Mac /usr/bin/git is a stub that asks to install the Command Line Tools."""
+    path = shutil.which("git")
+    if path is None:
+        return False
+    if sys.platform == "darwin" and Path(path) == Path("/usr/bin/git"):
+        return subprocess.run(["xcode-select", "-p"], capture_output=True, check=False).returncode == 0
+    return True
+
+
+def install_hooks(harnesses: list[str]) -> list[str]:
+    install.remove_legacy(Path.home())
+    lines = []
+    for name in harnesses:
+        try:
+            lines.append(install.install_harness(name))
+        except (install.InstallError, OSError) as exc:
+            lines.append(f"{HARNESS_NAMES[name]}: not installed: {exc}")
+    for root in install.install_skills(Path.home(), harnesses):
+        lines.append(f"Skills: {root}")
+    return lines
+
+
+def clone_books(url: str | None) -> str:
+    if not git_ready():
+        return (
+            "Memory: skipped, git is not installed. Run `xcode-select --install`, "
+            "then `cadri memory clone` and `cadri memory clone --scope user`."
+        )
+    started = time.monotonic()
+    paths = []
+    try:
+        for scope in ("team", "user"):
+            book = memory.open_book(scope, url)
+            memory.ensure_clone(book)
+            paths.append(str(book.path))
+    except memory.MemoryFailure as exc:
+        return f"Memory: not cloned ({exc}); run `cadri memory clone` later"
+    return f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}"
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     if args.local:
         os.environ.setdefault("CADRI_URL", "http://127.0.0.1:8080")
         if args.start_engine:
             start_local_engine()
             time.sleep(1)
-    base = cadri_auth.server_url(args.url)
+    # init picks the server afresh; the saved URL is what it leaves behind for hooks.
+    base = cadri_auth.normalize_url(args.url or os.environ.get("CADRI_URL") or cadri_auth.DEFAULT_URL)
+    os.environ["CADRI_URL"] = base
     ensure_auth(base, skip_login=args.local and not args.login)
-    since = time.time() - BACKFILL_WINDOW_SECONDS
-    print(f"Discovering harness sessions under {Path.home()}…")
-    detected = detected_harnesses()
-    print(f"Detected: {', '.join(detected) if detected else '(none)'}")
-    summary = backfill(base, since, BACKFILL_MAX_SESSIONS, BACKFILL_MAX_BYTES)
+    cadri_auth.save_url(base)
+    harnesses = sorted(
+        set(install.installed_harnesses()) | set(detected_harnesses()),
+        key=list(HARNESS_NAMES).index,
+    )
+    found = ", ".join(HARNESS_NAMES[name] for name in harnesses)
+    print(f"Agents on this machine: {found or 'none found'}")
+    print("Installing capture hooks…")
+    for line in install_hooks(harnesses):
+        print(f"  {line}")
+    print(f"Uploading the last 30 days of sessions to {base}…")
+    summary = backfill(base, time.time() - BACKFILL_WINDOW_SECONDS, BACKFILL_MAX_SESSIONS, BACKFILL_MAX_BYTES)
     print(
-        f"Backfill: uploaded {summary['uploaded']} sessions "
-        f"({summary['bytes']} bytes); skipped {summary['skipped']}; errors {summary['errors']}"
+        f"  uploaded {summary['uploaded']} sessions ({summary['bytes'] // 1024} KiB); "
+        f"skipped {summary['skipped']}; errors {summary['errors']}"
     )
     if summary["by_harness"]:
-        print("  " + ", ".join(f"{k} {v}" for k, v in summary["by_harness"].items()))
-    print("Installing harness packages…")
-    for name in detected or list(HARNESS_INSTALL):
-        # Only install detected; if none detected, still install claude package as default.
-        if not detected and name != "claude_code":
-            continue
-        if detected and name not in detected:
-            continue
-        print("  " + install_harness(name))
-    print("Done. Open Cadri — the Transcripts tab should populate shortly.")
-    print("Next: ask your agent to follow the memory seeding steps in the install docs.")
+        print("  " + ", ".join(f"{HARNESS_NAMES[k]} {v}" for k, v in summary["by_harness"].items()))
+    print(clone_books(args.url))
+    if "codex" in harnesses:
+        print("Codex runs new hooks only after you trust them: open Codex, type /hooks, and trust the Cadri hooks.")
+    print("Done. New sessions upload when each agent turn finishes.")
+    print("Next: load the cadri-memory-seed skill to turn these sessions into memories.")
     return 0
 
 
-def cmd_discover(_: argparse.Namespace) -> int:
-    for ref in discover_all()[:50]:
+def cmd_uninstall(_: argparse.Namespace) -> int:
+    try:
+        removed = install.uninstall_all()
+    except install.InstallError as exc:
+        raise CliError(str(exc)) from exc
+    print(f"Removed: {', '.join(removed) if removed else 'no Cadri hooks were installed'}")
+    print("Skills removed. Credentials stay in ~/.config/cadri; run `cadri login --logout` to remove them.")
+    return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    return hooks.run(args.harness, sys.stdin.read())
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    since = time.time() - args.days * 24 * 60 * 60
+    refs = [ref for ref in discover_all() if ref.updated_at >= since][: args.limit]
+    if args.json:
+        rows = [
+            {
+                "harness": ref.harness,
+                "thread_id": ref.thread_id,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
+                "cwd": ref.cwd,
+            }
+            for ref in refs
+        ]
+        print(json.dumps(rows, indent=2))
+        return 0
+    for ref in refs:
         print(f"{ref.harness}\t{ref.thread_id}\t{ref.path}")
     return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    for ref in discover_all():
+        if ref.thread_id == args.thread_id:
+            sys.stdout.write(read_session_content(ref))
+            return 0
+    raise CliError(f"no local session {args.thread_id}; list them with cadri discover")
 
 
 def cmd_memory(args: argparse.Namespace) -> int:
@@ -341,7 +365,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
                     raise CliError(f"could not read {args.file}: {exc}") from exc
             else:
                 content = sys.stdin.read()
-            return memory.write(book, args.path, content, args.message, args.agent)
+            return memory.write(book, args.path, content, "\n\n".join(args.message), args.agent)
     except memory.MemoryFailure as exc:
         print(f"cadri: {exc}", file=sys.stderr)
         return exc.code
@@ -350,6 +374,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cadri", description="Cadri agent bootstrap CLI")
+    parser.add_argument("--version", action="version", version=f"cadri {version()}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     login = sub.add_parser("login", help="Sign in via browser device flow")
@@ -358,15 +383,29 @@ def build_parser() -> argparse.ArgumentParser:
     login.add_argument("--no-browser", action="store_true")
     login.set_defaults(func=cmd_login)
 
-    init = sub.add_parser("init", help="Login (if needed), backfill transcripts, install harness plugins")
+    init = sub.add_parser("init", help="Sign in (if needed), install capture hooks, upload recent sessions")
     init.add_argument("--url", default=None)
     init.add_argument("--local", action="store_true", help="Target localhost Cadri (no WorkOS by default)")
     init.add_argument("--login", action="store_true", help="Force device login even with --local")
     init.add_argument("--start-engine", action="store_true", help="With --local, start cadri-engine in background")
     init.set_defaults(func=cmd_init)
 
-    discover = sub.add_parser("discover", help="List local harness sessions")
+    uninstall = sub.add_parser("uninstall", help="Remove Cadri's hooks, OpenCode plugin, and skills")
+    uninstall.set_defaults(func=cmd_uninstall)
+
+    hook = sub.add_parser("hook", help="Run by agent hooks: upload the session named on stdin")
+    hook.add_argument("harness", choices=[*hooks.HARNESSES, *hooks.ALIASES])
+    hook.set_defaults(func=cmd_hook)
+
+    discover = sub.add_parser("discover", help="List local agent sessions, newest first")
+    discover.add_argument("--json", action="store_true")
+    discover.add_argument("--limit", type=int, default=50)
+    discover.add_argument("--days", type=float, default=30)
     discover.set_defaults(func=cmd_discover)
+
+    show = sub.add_parser("show", help="Print one local session transcript")
+    show.add_argument("thread_id")
+    show.set_defaults(func=cmd_show)
 
     mem = sub.add_parser("memory", help="Shared clone of the team and personal memory books")
     mem_sub = mem.add_subparsers(dest="memory_command", required=True)
@@ -384,7 +423,7 @@ def build_parser() -> argparse.ArgumentParser:
     write = scoped("write", "Write one file through the edit API")
     write.add_argument("path")
     write.add_argument("--file", default=None, help="read content from this file instead of stdin")
-    write.add_argument("-m", "--message", required=True)
+    write.add_argument("-m", "--message", required=True, action="append", help="repeat for more paragraphs, like git")
     write.add_argument("--agent", default=None)
     watch = mem_sub.add_parser("watch", help="Keep clones within a minute of the server")
     watch.add_argument("--detach", action="store_true")
