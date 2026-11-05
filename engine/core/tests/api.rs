@@ -368,6 +368,187 @@ async fn memories_start_empty_and_stay_inside_the_org() {
     assert_eq!(kept["files"][0]["content"], "hello");
 }
 
+async fn commit_files(app: &Router, query: &str, files: &[(&str, &str)]) -> Value {
+    let changes: Vec<Value> = files
+        .iter()
+        .map(|(path, content)| json!({ "op": "write", "path": path, "content": content }))
+        .collect();
+    let (status, _, body) = send(
+        app,
+        post_json(
+            &format!("/api/memories/commits{query}"),
+            &json!({ "message": "write", "changes": changes }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn the_tree_lists_blob_ids_and_opens_one_file() {
+    let app = app(Arc::new(NoAuth));
+    let (status, headers, empty) = send(&app, get_request("/api/memories/tree", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["tip"], Value::Null);
+    assert!(empty.get("open").is_none());
+    assert_eq!(headers[header::ETAG], "\"empty\"");
+
+    commit_files(
+        &app,
+        "",
+        &[
+            ("b.md", "bee\n"),
+            ("README.md", "# hi\n"),
+            ("a/c.md", "see\n"),
+        ],
+    )
+    .await;
+    let (_, headers, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    let paths: Vec<&str> = tree["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["README.md", "a/c.md", "b.md"]);
+    assert_eq!(tree["files"][2]["size"], 4);
+    assert_eq!(tree["files"][2]["blob"].as_str().unwrap().len(), 40);
+    assert_eq!(tree["open"]["path"], "README.md");
+    assert_eq!(tree["open"]["content"], "# hi\n");
+    assert_eq!(tree["open"]["blob"], tree["files"][0]["blob"]);
+    let tip = tree["tip"].as_str().unwrap();
+    assert_eq!(headers[header::ETAG], format!("\"{tip}\"").as_str());
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
+
+    let (_, _, other) = send(&app, get_request("/api/memories/tree?open=b.md", &[])).await;
+    assert_eq!(other["open"]["path"], "b.md");
+    assert_eq!(other["open"]["content"], "bee\n");
+    let (_, _, missing) = send(&app, get_request("/api/memories/tree?open=nope.md", &[])).await;
+    assert_eq!(missing["open"]["path"], "README.md");
+}
+
+#[tokio::test]
+async fn the_tree_without_a_readme_opens_the_first_file() {
+    let app = app(Arc::new(NoAuth));
+    commit_files(&app, "", &[("z.md", "zed\n"), ("m.md", "em\n")]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    assert_eq!(tree["open"]["path"], "m.md");
+}
+
+#[tokio::test]
+async fn the_tree_and_tip_answer_304_for_a_matching_etag() {
+    let app = app(Arc::new(NoAuth));
+    commit_files(&app, "", &[("a.md", "a\n")]).await;
+    for path in ["/api/memories/tree", "/api/memories/tip"] {
+        let (_, headers, _) = send(&app, get_request(path, &[])).await;
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+        let (status, headers, body) =
+            send(&app, get_request(path, &[("if-none-match", etag.as_str())])).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(body, Value::Null);
+        assert_eq!(headers[header::ETAG].to_str().unwrap(), etag);
+        let (status, _, _) = send(&app, get_request(path, &[("if-none-match", "\"old\"")])).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_blob_returns_exact_text_and_is_cacheable_forever() {
+    let app = app(Arc::new(NoAuth));
+    let text = "line one\n\n  caf\u{e9} \u{1f600}\nno newline";
+    commit_files(&app, "", &[("a.md", text)]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    let sha = tree["files"][0]["blob"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(get_request(&format!("/api/memories/blob/{sha}"), &[]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert_eq!(
+        headers[header::CACHE_CONTROL],
+        "private, max-age=31536000, immutable"
+    );
+    assert_eq!(headers[header::ETAG], format!("\"{sha}\"").as_str());
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), text.as_bytes());
+}
+
+#[tokio::test]
+async fn a_blob_outside_this_book_or_malformed_is_rejected() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let a = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let b = [("x-test-org", "org-b"), ("x-test-user", "ada")];
+    commit_files_as(&app, &a, &[("a.md", "only in a\n")]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &a)).await;
+    let sha = tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let path = format!("/api/memories/blob/{sha}");
+    let (status, _) = send_text(&app, get_request(&path, &a)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, get_request(&path, &b)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let absent = "0".repeat(40);
+    let (status, _, _) = send(
+        &app,
+        get_request(&format!("/api/memories/blob/{absent}"), &a),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for bad in ["abc", &sha.to_uppercase(), &format!("{}g", &sha[..39])] {
+        let (status, _, _) =
+            send(&app, get_request(&format!("/api/memories/blob/{bad}"), &a)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+async fn commit_files_as(app: &Router, headers: &[(&str, &str)], files: &[(&str, &str)]) {
+    let changes: Vec<Value> = files
+        .iter()
+        .map(|(path, content)| json!({ "op": "write", "path": path, "content": content }))
+        .collect();
+    let (status, _, body) = send(
+        app,
+        post_json(
+            "/api/memories/commits",
+            &json!({ "message": "write", "changes": changes }),
+            headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn the_tip_changes_after_a_commit_and_a_tree_view_commit_returns_the_tree() {
+    let app = app(Arc::new(NoAuth));
+    let (_, headers, first) = send(&app, get_request("/api/memories/tip", &[])).await;
+    assert_eq!(first["tip"], Value::Null);
+    assert_eq!(first["seq"], 0);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+
+    commit_files(&app, "", &[("a.md", "one\n")]).await;
+    let (_, _, second) = send(&app, get_request("/api/memories/tip", &[])).await;
+    let tip = second["tip"].as_str().unwrap().to_string();
+
+    let tree = commit_files(&app, "?view=tree", &[("a.md", "two\n")]).await;
+    assert!(tree.get("commits").is_none());
+    assert_eq!(tree["files"][0]["path"], "a.md");
+    assert_eq!(tree["files"][0]["size"], 4);
+    assert!(tree.get("open").is_none());
+    assert_ne!(tree["tip"].as_str().unwrap(), tip);
+    let (_, _, third) = send(&app, get_request("/api/memories/tip", &[])).await;
+    assert_eq!(third["tip"], tree["tip"]);
+
+    let legacy = commit_files(&app, "", &[("b.md", "x\n")]).await;
+    assert_eq!(legacy["files"][1]["content"], "x\n");
+}
+
 #[tokio::test]
 async fn personal_memories_are_a_separate_book() {
     let app = app(Arc::new(OrgHeaderAuth));

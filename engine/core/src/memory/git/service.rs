@@ -7,7 +7,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 
 use crate::memory::s3::S3Books;
-use crate::memory::types::{BlameEntry, Change, MemoryCommit, MemoryStore};
+use crate::memory::types::{BlameEntry, Change, MemoryCommit, MemoryStore, MemoryTree};
 use crate::ApiError;
 
 use super::commit::{apply_changes, clean_message, commit_tree, current_files, write_tree};
@@ -145,6 +145,34 @@ impl MemoryService {
             .map_err(into_api)
     }
 
+    pub(crate) fn read_tree(
+        &self,
+        repo_id: &str,
+        open: Option<&str>,
+    ) -> Result<MemoryTree, ApiError> {
+        self.snapshot(repo_id)
+            .map(|snapshot| snapshot.to_tree(open))
+            .map_err(into_api)
+    }
+
+    /// One file's text by blob SHA. Only blobs in this book's tip are served.
+    pub(crate) fn read_blob(&self, repo_id: &str, sha: &str) -> Result<Arc<str>, ApiError> {
+        if sha.len() != 40 || !sha.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid blob id"));
+        }
+        let snapshot = self.snapshot(repo_id).map_err(into_api)?;
+        snapshot
+            .blobs
+            .get(sha)
+            .cloned()
+            .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "not found"))
+    }
+
+    pub(crate) fn read_tip(&self, repo_id: &str) -> Result<(Option<String>, u64), ApiError> {
+        let snapshot = self.snapshot(repo_id).map_err(into_api)?;
+        Ok((snapshot.tip.clone(), snapshot.seq))
+    }
+
     pub(crate) fn read_log(&self, repo_id: &str) -> Result<Vec<MemoryCommit>, ApiError> {
         self.read_history(repo_id).map_err(into_api)
     }
@@ -181,6 +209,34 @@ impl MemoryService {
         message: &str,
         changes: &[Change],
     ) -> Result<MemoryStore, ApiError> {
+        self.commit_book(repo_id, user_id, label, message, changes)
+            .map(|snapshot| snapshot.to_store())
+    }
+
+    /// Same as `commit`, answered as the new tree.
+    pub(crate) fn commit_tree_view(
+        &self,
+        repo_id: &str,
+        user_id: &str,
+        label: &str,
+        message: &str,
+        changes: &[Change],
+    ) -> Result<MemoryTree, ApiError> {
+        self.commit_book(repo_id, user_id, label, message, changes)
+            .map(|snapshot| MemoryTree {
+                open: None,
+                ..snapshot.to_tree(None)
+            })
+    }
+
+    fn commit_book(
+        &self,
+        repo_id: &str,
+        user_id: &str,
+        label: &str,
+        message: &str,
+        changes: &[Change],
+    ) -> Result<Arc<Snapshot>, ApiError> {
         for _ in 0..8 {
             match self.with_writer(repo_id, |repo, book, _writer| {
                 match self.commit_once(repo, repo_id, book, user_id, label, message, changes) {
@@ -188,7 +244,9 @@ impl MemoryService {
                         self.refresh(repo, repo_id, book)?;
                         Err(Fail::Conflict)
                     }
-                    other => other,
+                    Err(err) => Err(err),
+                    // The writer lock is still held, so this is the snapshot just installed.
+                    Ok(_) => loaded(book),
                 }
             }) {
                 Ok(store) => return Ok(store),

@@ -2897,6 +2897,26 @@ async fn workos_token_isolates_team_and_personal_books() {
     let (_, _, other_personal) = send(&app, get_with("/api/memories?scope=user", &other_h)).await;
     assert_eq!(other_personal["files"].as_array().unwrap().len(), 0);
 
+    let (_, _, ada_tree) = send(&app, get_with("/api/memories/tree?scope=user", &ada_h)).await;
+    let private_blob = ada_tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let (_, _, team_tree) = send(&app, get_with("/api/memories/tree", &ada_h)).await;
+    let shared_blob = team_tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let blob_path = |sha: &str, scope: &str| format!("/api/memories/blob/{sha}?scope={scope}");
+    let (status, bytes) = send_raw(&app, get_with(&blob_path(&private_blob, "user"), &ada_h)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"private\n");
+    let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "user"), &sam_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "team"), &sam_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, bytes) = send_raw(&app, get_with(&blob_path(&shared_blob, "team"), &sam_h)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"shared\n");
+    let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "team"), &other_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "user"), &other_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     let (status, _, rejected) = send(
         &app,
         request(

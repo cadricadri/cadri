@@ -195,6 +195,8 @@ fn route_template(path: &str) -> &'static str {
         "/api/me" => "/api/me",
         "/api/transcripts" => "/api/transcripts",
         "/api/memories" => "/api/memories",
+        "/api/memories/tree" => "/api/memories/tree",
+        "/api/memories/tip" => "/api/memories/tip",
         "/api/memories/log" => "/api/memories/log",
         "/api/memories/blame" => "/api/memories/blame",
         "/api/memories/commits" => "/api/memories/commits",
@@ -212,6 +214,7 @@ fn route_template(path: &str) -> &'static str {
         "/auth/device/start" => "/auth/device/start",
         "/auth/device/token" => "/auth/device/token",
         "/auth/refresh" => "/auth/refresh",
+        _ if path.starts_with("/api/memories/blob/") => "/api/memories/blob/{sha}",
         _ if is_git_route(path) => "/git/{book}/{path}",
         _ => auth_id_route(path).unwrap_or("unmatched"),
     }
@@ -271,6 +274,12 @@ mod tests {
     fn templates_keep_labels_low_cardinality() {
         assert_eq!(route_template("/api/memories"), "/api/memories");
         assert_eq!(route_template("/api/memories/log"), "/api/memories/log");
+        assert_eq!(route_template("/api/memories/tree"), "/api/memories/tree");
+        assert_eq!(route_template("/api/memories/tip"), "/api/memories/tip");
+        assert_eq!(
+            route_template("/api/memories/blob/0123abcd"),
+            "/api/memories/blob/{sha}"
+        );
         assert_eq!(route_template("/api/memories/blame"), "/api/memories/blame");
         assert_eq!(
             route_template("/git/team.git/info/refs"),
