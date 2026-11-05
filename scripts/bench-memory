@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run the memory book benchmarks and keep the output in engine/target/memory-bench/latest.txt.
+set -eu
+set -o pipefail
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$root/engine"
+mkdir -p target/memory-bench
+
+{
+  echo "commit $(git rev-parse HEAD)"
+  cargo test --release -p cadri-core --test memory_bench -- --ignored --nocapture --test-threads=1
+  cargo test --release -p cadri-core --lib memory_read_benchmark -- --ignored --nocapture
+} 2>&1 | tee target/memory-bench/latest.txt

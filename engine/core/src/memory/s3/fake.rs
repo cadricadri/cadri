@@ -23,6 +23,9 @@ struct FakeState {
     /// The `If-Match` value from the latest ref update, when the client sent one.
     last_ref_match: Option<String>,
     saw_checksum: bool,
+    latency_ms: u64,
+    gets: usize,
+    puts: usize,
 }
 
 /// Local S3 stand-in. It ignores signatures and speaks the two calls the
@@ -48,6 +51,9 @@ impl FakeS3 {
             conflicts_left: 0,
             last_ref_match: None,
             saw_checksum: false,
+            latency_ms: 0,
+            gets: 0,
+            puts: 0,
         }));
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let shared = state.clone();
@@ -99,6 +105,17 @@ impl FakeS3 {
         self.state.lock().unwrap().ref_conflicts
     }
 
+    /// Delays every request by `per_request` before it is handled.
+    pub fn set_latency(&self, per_request: std::time::Duration) {
+        self.state.lock().unwrap().latency_ms = per_request.as_millis() as u64;
+    }
+
+    /// Requests received so far, as `(gets, puts)`.
+    pub fn requests(&self) -> (usize, usize) {
+        let state = self.state.lock().unwrap();
+        (state.gets, state.puts)
+    }
+
     pub fn keys(&self) -> Vec<String> {
         self.state.lock().unwrap().objects.keys().cloned().collect()
     }
@@ -117,6 +134,18 @@ async fn fake_route(
         return xml(StatusCode::NOT_FOUND, "NoSuchKey");
     };
     let key = key.to_string();
+    let latency = {
+        let mut state = state.lock().unwrap();
+        match request.method().as_str() {
+            "GET" => state.gets += 1,
+            "PUT" => state.puts += 1,
+            _ => {}
+        }
+        state.latency_ms
+    };
+    if latency > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(latency)).await;
+    }
     match request.method().as_str() {
         "GET" => {
             let found = state.lock().unwrap().objects.get(&key).cloned();
@@ -222,4 +251,26 @@ fn xml(status: axum::http::StatusCode, code: &str) -> axum::response::Response {
         .header(header::CONTENT_TYPE, "application/xml")
         .body(Body::from(body))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_latency_delays_each_request() {
+        let fake = FakeS3::start();
+        fake.set_latency(std::time::Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        let mut stream =
+            std::net::TcpStream::connect(fake.endpoint.trim_start_matches("http://")).unwrap();
+        use std::io::{Read, Write};
+        stream
+            .write_all(b"GET /bucket/missing HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(50));
+        assert_eq!(fake.requests(), (1, 0));
+    }
 }
