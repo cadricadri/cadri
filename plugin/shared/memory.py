@@ -160,9 +160,9 @@ def http_json(
 
 def git(book: Book, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
     auth = cadri_auth.auth_headers(book.base).get("Authorization")
-    if not auth:
-        raise MemoryFailure("not signed in; run cadri login or set CADRI_API_TOKEN")
-    command = ["git", "-c", f"http.extraHeader=Authorization: {auth}", *args]
+    # A server in auth mode none needs no header; one that wants it answers 401 and
+    # whoami/sync report "not signed in".
+    command = ["git", *(["-c", f"http.extraHeader=Authorization: {auth}"] if auth else []), *args]
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
         result = subprocess.run(
@@ -235,8 +235,8 @@ def sync(book: Book, quiet: bool = False) -> int:
             record_sync(book)
             return 0
         head = local_head(book)
-        headers = {"If-None-Match": f'"{head}"'} if head else {}
-        status, _, _ = http_json("GET", f"{book.base}/api/memories/tip{book.query}", book.base, headers=headers)
+        headers = {"If-None-Match": f'"{head or "empty"}"'}
+        status, _, tip = http_json("GET", f"{book.base}/api/memories/tip{book.query}", book.base, headers=headers)
         if status == 304:
             record_sync(book)
             return 0
@@ -244,6 +244,9 @@ def sync(book: Book, quiet: bool = False) -> int:
             raise MemoryFailure("not signed in; run cadri login or set CADRI_API_TOKEN")
         if status != 200:
             raise MemoryFailure(f"tip request failed ({status})")
+        if tip.get("tip") is None:
+            record_sync(book)
+            return 0
         git(book, "fetch", "origin", "main", cwd=book.path)
         if git(book, "merge", "--ff-only", "origin/main", cwd=book.path, check=False).returncode != 0:
             if git(book, "rebase", "origin/main", cwd=book.path, check=False).returncode != 0:
@@ -331,7 +334,8 @@ def heartbeat_age() -> float:
 def watch(url: str | None = None, interval: float = WATCH_INTERVAL_SECONDS, sleep=time.sleep) -> int:
     base = cadri_auth.server_url(url)
     org_id, user_id = whoami(base)
-    touch_heartbeat_quietly()
+    if not heartbeat_path().exists():
+        touch_heartbeat_quietly()
     team = Book(base, org_id, user_id, "team")
     personal = Book(base, org_id, user_id, "user")
     with SyncLock(team.watch_lock_path) as lock:
