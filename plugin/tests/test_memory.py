@@ -202,7 +202,7 @@ class MemoryClientTests(unittest.TestCase):
 
     def test_sync_aborts_the_rebase_and_exits_1_when_local_commits_conflict(self):
         self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {})})
+        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": NEW})})
         git = GitRecorder(fail=("--ff-only",))
         real = git.__call__
 
@@ -233,21 +233,46 @@ class MemoryClientTests(unittest.TestCase):
         memory.touch_heartbeat()
         old = 1_000_000_000
         os.utime(memory.heartbeat_path(), (old, old))
+        sleeps = []
         with mock.patch("urllib.request.urlopen", server):
-            # touching at start makes it fresh; make it stale again on the first sleep
-            calls = []
+            with mock.patch("shared.memory.sync", side_effect=AssertionError("must not sync")):
+                self.assertEqual(memory.watch(BASE, sleep=sleeps.append), 0)
+            self.assertEqual(sleeps, [])
 
-            def fake_sleep(_):
-                calls.append(1)
+            def go_stale(seconds):
+                sleeps.append(seconds)
                 os.utime(memory.heartbeat_path(), (old, old))
 
-            with mock.patch("shared.memory.sync", return_value=0):
-                self.assertEqual(memory.watch(BASE, sleep=fake_sleep), 0)
-            self.assertEqual(len(calls), 1)
+            os.utime(memory.heartbeat_path(), None)
+            with mock.patch("shared.memory.sync", return_value=0) as synced:
+                self.assertEqual(memory.watch(BASE, sleep=go_stale), 0)
+            self.assertEqual(len(sleeps), 1)
+            self.assertEqual(synced.call_count, 1)
             held = memory.SyncLock(self.team.watch_lock_path)
             self.addCleanup(held.release)
+            os.utime(memory.heartbeat_path(), None)
             with mock.patch("shared.memory.sync", side_effect=AssertionError("must not sync")):
-                self.assertEqual(memory.watch(BASE, sleep=fake_sleep), 0)
+                self.assertEqual(memory.watch(BASE, sleep=go_stale), 0)
+
+    def test_sync_of_an_empty_book_does_not_fetch(self):
+        self.make_clone(self.team)
+        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": None, "seq": 0})})
+        git = GitRecorder(head=None)
+        self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
+        tip = next(r for r in server.requests if r["url"].endswith("/api/memories/tip"))
+        self.assertEqual(tip["headers"]["if-none-match"], '"empty"')
+        self.assertFalse(any("fetch" in c for c in git.calls))
+
+    def test_git_runs_without_an_auth_header_when_the_server_needs_none(self):
+        self.make_clone(self.team)
+        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": NEW})})
+        git = GitRecorder()
+        with mock.patch.dict(os.environ, {"CADRI_API_TOKEN": ""}), mock.patch(
+            "shared.cadri_auth.stored_access_token", return_value=None
+        ):
+            self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
+        self.assertTrue(any("fetch" in c for c in git.calls))
+        self.assertFalse(any("http.extraHeader" in part for c in git.calls for part in c))
 
     def test_detach_starts_a_new_session_and_returns_at_once(self):
         with mock.patch("subprocess.Popen") as popen:
