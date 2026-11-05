@@ -6,7 +6,7 @@ use serde_json::Value;
 pub const TRIAL_DAYS: u64 = 30;
 /// Pinned so an account-default upgrade cannot change the fields this client parses.
 /// Webhook endpoints in the Dashboard must use this same version.
-pub const API_VERSION: &str = "2026-09-30.endive";
+pub const API_VERSION: &str = "2026-10-28.endive";
 const DEFAULT_API_BASE: &str = "https://api.stripe.com";
 
 #[derive(Clone)]
