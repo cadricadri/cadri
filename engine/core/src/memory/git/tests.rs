@@ -46,7 +46,7 @@ fn service_header_is_the_classic_pkt_line() {
 #[test]
 fn ui_commit_round_trip_stores_a_large_book() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_demo_repo_0";
     let (user, label) = author();
     let empty = service.read_store(repo).unwrap();
@@ -131,14 +131,12 @@ fn two_caches_share_one_ref_and_both_changes_land() {
         root.join("left"),
         Backend::Directory(store.clone()),
         root.join("sl"),
-        None,
         false,
     );
     let right = MemoryService::new(
         root.join("right"),
         Backend::Directory(store),
         root.join("sr"),
-        None,
         false,
     );
     let repo = "org_pair_repo_0";
@@ -156,7 +154,6 @@ fn two_caches_share_one_ref_and_both_changes_land() {
         root.join("fresh"),
         Backend::Directory(root.join("store")),
         root.join("sf"),
-        None,
         false,
     );
     let store = fresh.read_store(repo).unwrap();
@@ -166,63 +163,57 @@ fn two_caches_share_one_ref_and_both_changes_land() {
 }
 
 #[test]
-fn a_stale_mount_does_not_hide_the_legacy_tip_and_fills_in_a_missing_bundle() {
+fn a_legacy_book_migrates_and_a_missing_bundle_fails_with_a_clear_error() {
     let root = temp();
     let history = legacy_history(
         &root.join("legacy"),
         &[&[("note.md", "one")], &[("note.md", "two")]],
     );
-    let (stale, current) = (&history[0], &history[1]);
+    let current = &history[1];
     let repo = "org_cache_repo_0";
-    let mount = root.join("mount");
     legacy_layout(&root.join("data/store"), repo, current, true);
-    legacy_layout(&mount, repo, stale, true);
-    let service = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
+    let service = MemoryService::open_local(root.join("data"), false);
     assert_eq!(service.read_store(repo).unwrap().files[0].content, "two");
+    assert_eq!(service.read_log(repo).unwrap().len(), 2);
 
-    // The store has the legacy ref but lost the bundle; the mount has both.
     legacy_layout(&root.join("other/store"), repo, current, false);
-    legacy_layout(&mount, repo, current, true);
-    let restarted = MemoryService::open_local(root.join("other"), Some(mount), false);
-    let from_mount = restarted.read_store(repo).unwrap();
-    assert_eq!(from_mount.files[0].content, "two");
-    assert_eq!(restarted.read_log(repo).unwrap().len(), 2);
+    let restarted = MemoryService::open_local(root.join("other"), false);
+    let err = restarted.read_store(repo).expect_err("missing bundle");
+    assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn s3_legacy_book_ignores_a_stale_mount_and_falls_back_to_it_for_a_missing_bundle() {
+fn s3_legacy_book_migrates_and_a_missing_bundle_fails_with_a_clear_error() {
     let fake = crate::memory::s3::FakeS3::start();
     let root = temp();
     let history = legacy_history(
         &root.join("legacy"),
         &[&[("note.md", "one")], &[("note.md", "two")]],
     );
-    let (stale, current) = (&history[0], &history[1]);
-    let mount = root.join("mount");
+    let current = &history[1];
     let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
     let repo = "org_cache_repo_0";
     legacy_s3(&books, repo, current, true);
-    legacy_layout(&mount, repo, stale, true);
-    let reader = MemoryService::open_s3(root.join("reader"), Some(mount.clone()), false, books);
+    let reader = MemoryService::open_s3(root.join("reader"), false, books);
     assert_eq!(reader.read_store(repo).unwrap().files[0].content, "two");
+    assert!(fake
+        .keys()
+        .contains(&format!("repos/{repo}/checkpoint/00000000000000000000")));
 
     let other = "org_other_repo_0";
     let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
     legacy_s3(&books, other, current, false);
-    legacy_layout(&mount, other, current, true);
-    let restarted = MemoryService::open_s3(root.join("restarted"), Some(mount), false, books);
-    assert_eq!(restarted.read_store(other).unwrap().files[0].content, "two");
-    assert!(fake
-        .keys()
-        .contains(&format!("repos/{other}/checkpoint/00000000000000000000")));
+    let restarted = MemoryService::open_s3(root.join("restarted"), false, books);
+    let err = restarted.read_store(other).expect_err("missing bundle");
+    assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
 fn ui_commit_returns_conflict_after_eight_lost_log_creates() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_test_repo_0";
     let (user, label) = author();
     service.fail_next_log_create(8);
@@ -255,7 +246,6 @@ fn a_failed_bundle_put_removes_the_staging_ref() {
     let root = temp();
     let service = MemoryService::open_s3(
         &root,
-        None,
         false,
         S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
     );
@@ -283,7 +273,7 @@ fn a_failed_bundle_put_removes_the_staging_ref() {
 #[test]
 fn one_commit_produces_the_same_bundle_twice() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_pair_repo_0";
     let (user, label) = author();
     service
@@ -366,7 +356,7 @@ fn a_reader_does_not_wait_for_the_book_lock() {
     use std::time::{Duration, Instant};
 
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_lock_repo_0";
     let (user, label) = author();
     service
@@ -409,7 +399,7 @@ fn a_clone_does_not_wait_for_a_writer() {
     use std::time::{Duration, Instant};
 
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_clone_repo_0";
     let (user, label) = author();
     service
@@ -511,7 +501,7 @@ fn memory_read_benchmark() {
     const FILES: usize = 40;
     const LINES: usize = 400;
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo_id = "org_bench_repo_0";
     let (user, label) = author();
     let body = "the team keeps this note so agents can reuse it.\n".repeat(LINES);
@@ -645,7 +635,6 @@ fn ms(duration: std::time::Duration) -> u128 {
 fn counted_s3_service(root: &Path, fake: &crate::memory::s3::FakeS3) -> MemoryService {
     MemoryService::open_s3(
         root,
-        None,
         false,
         S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
     )
@@ -706,7 +695,6 @@ fn a_lost_compare_and_swap_catches_up_and_both_writes_land() {
             root.join(name),
             Backend::Directory(store.clone()),
             root.join(format!("scratch-{name}")),
-            None,
             false,
         )
     };
@@ -751,7 +739,7 @@ fn thousand_file_book(service: &MemoryService, repo: &str) {
 #[test]
 fn a_ui_commit_on_a_1000_file_book_runs_a_constant_number_of_git_processes() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_count_repo_0";
     let (user, label) = author();
     thousand_file_book(&service, repo);
@@ -776,7 +764,7 @@ fn a_ui_commit_on_a_1000_file_book_runs_a_constant_number_of_git_processes() {
 #[test]
 fn renames_deletes_and_folders_keep_the_snapshot_in_step_with_the_tree() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_edit_repo_0";
     let (user, label) = author();
     service
@@ -818,7 +806,6 @@ fn renames_deletes_and_folders_keep_the_snapshot_in_step_with_the_tree() {
         root.join("again"),
         Backend::Directory(root.join("store")),
         root.join("scratch-again"),
-        None,
         false,
     );
     let seen = again.read_store(repo).unwrap();
@@ -845,7 +832,7 @@ fn renames_deletes_and_folders_keep_the_snapshot_in_step_with_the_tree() {
 fn a_push_of_three_commits_validates_with_a_constant_number_of_git_processes() {
     use std::process::Command;
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_push_repo_0";
     thousand_file_book(&service, repo);
     let bare = root.join("repos").join(format!("{repo}.git"));
@@ -980,7 +967,7 @@ fn legacy_history(dir: &Path, steps: &[&[(&str, &str)]]) -> Vec<Legacy> {
     states
 }
 
-/// Writes the legacy keys for `repo` under a directory store (or mount) root.
+/// Writes the legacy keys for `repo` under a directory store root.
 fn legacy_layout(root: &Path, repo: &str, legacy: &Legacy, with_bundle: bool) {
     let book = root.join("repos").join(repo);
     fs::create_dir_all(book.join("refs/heads")).unwrap();
@@ -1013,7 +1000,7 @@ fn file_pairs(store: &crate::memory::types::MemoryStore) -> Vec<(String, String)
 #[test]
 fn the_first_write_creates_log_entry_one_without_prerequisites() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_log_repo_0";
     let (user, label) = author();
     service
@@ -1037,7 +1024,7 @@ fn the_first_write_creates_log_entry_one_without_prerequisites() {
 #[test]
 fn the_second_write_creates_log_entry_two_whose_prerequisite_is_the_first_tip() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_log_repo_0";
     let (user, label) = author();
     service
@@ -1061,7 +1048,7 @@ fn the_second_write_creates_log_entry_two_whose_prerequisite_is_the_first_tip() 
 #[test]
 fn a_one_line_edit_on_a_1000_file_book_stores_less_than_16_kib() {
     let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
+    let service = MemoryService::open_local(&root, false);
     let repo = "org_size_repo_0";
     let (user, label) = author();
     let body: String = (0..40)
@@ -1149,7 +1136,7 @@ fn assert_restart_loads_the_same_book(first: &MemoryService, fresh: &MemoryServi
 fn a_restarted_service_loads_the_same_tip_and_files() {
     let root = temp();
     let repo = "org_restart_repo_0";
-    let first = MemoryService::open_local(root.join("a"), None, false);
+    let first = MemoryService::open_local(root.join("a"), false);
     let fresh = MemoryService::open_at(
         root.join("b/repos"),
         root.join("a/store"),
@@ -1300,7 +1287,7 @@ fn a_lost_log_create_catches_up_and_the_ui_commit_retries() {
 #[test]
 fn a_log_gap_is_reported_not_repaired() {
     let root = temp();
-    let service = MemoryService::open_local(root.join("a"), None, false);
+    let service = MemoryService::open_local(root.join("a"), false);
     let repo = "org_gap_repo_0";
     let (user, label) = author();
     for (index, name) in ["a.md", "b.md", "c.md"].iter().enumerate() {

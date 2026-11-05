@@ -510,13 +510,11 @@ async fn live_s3_many_books_and_conflicting_pushes() {
 
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_env(bucket.clone()).await.unwrap(),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_env(bucket.clone()).await.unwrap(),
     );
@@ -545,7 +543,6 @@ async fn live_s3_many_books_and_conflicting_pushes() {
     // running servers each saw only the writes that went through them.
     let fresh = MemoryService::open_s3(
         root.join("fresh"),
-        None,
         false,
         S3Books::from_env(bucket.clone()).await.unwrap(),
     );

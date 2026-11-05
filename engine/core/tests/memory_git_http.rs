@@ -304,7 +304,7 @@ fn gzip(data: &[u8]) -> Vec<u8> {
 }
 
 fn serve_router(root: &Path) -> Router {
-    let memories = MemoryService::open_local(root.join("memories"), None, false);
+    let memories = MemoryService::open_local(root.join("memories"), false);
     assemble(
         db::open(&root.join("transcripts.db")).unwrap(),
         Arc::new(OrgHeader),
@@ -338,7 +338,7 @@ async fn post_upload_pack(app: &Router, encoding: Option<&str>, body: Vec<u8>) -
 }
 
 async fn serve(root: &Path) -> std::net::SocketAddr {
-    let memories = MemoryService::open_local(root.join("memories"), None, false);
+    let memories = MemoryService::open_local(root.join("memories"), false);
     let app = assemble(
         db::open(&root.join("transcripts.db")).unwrap(),
         Arc::new(OrgHeader),
