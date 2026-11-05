@@ -20,7 +20,7 @@ use super::git_cli_exec::{
 use super::ids::{is_hex, valid_repo_id, ZERO};
 use super::protocol::{
     advertise_receive, advertise_upload, index_pack, inspect, ready, report, split_pack,
-    unpack_fail, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
+    unpack_fail, upload_args, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
 };
 use super::snapshot::{snapshot_after, snapshot_from_repo, Snapshot};
 use super::store::{cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path};
@@ -268,10 +268,46 @@ impl MemoryService {
         body: &[u8],
         user_id: &str,
     ) -> Result<GitHttp, ApiError> {
-        self.with_writer(repo_id, |repo, book, _writer| {
-            self.git_once(repo, repo_id, book, path, is_post, service, body, user_id)
+        match (path, is_post, service) {
+            ("info/refs", false, Some("git-upload-pack")) | ("git-upload-pack", true, _) => {
+                self.serve_upload(repo_id, path, body).map_err(into_api)
+            }
+            ("info/refs", false, Some("git-receive-pack")) => self
+                .snapshot(repo_id)
+                .map(|snapshot| GitHttp::Ready {
+                    content_type: RECEIVE_AD,
+                    body: advertise_receive(snapshot.tip.as_deref()),
+                })
+                .map_err(into_api),
+            _ => self
+                .with_writer(repo_id, |repo, book, _writer| {
+                    self.git_once(repo, repo_id, book, path, is_post, service, body, user_id)
+                })
+                .map_err(into_api),
+        }
+    }
+
+    /// Clone and fetch: waits for the book to load, never for a writer. Git writes
+    /// objects before it moves a ref, so it sees the old tip or the new one.
+    fn serve_upload(&self, repo_id: &str, path: &str, body: &[u8]) -> Result<GitHttp, Fail> {
+        self.snapshot(repo_id)?;
+        let repo = self.repo(repo_id)?;
+        if path == "info/refs" {
+            return Ok(GitHttp::Ready {
+                content_type: UPLOAD_AD,
+                body: advertise_upload(&repo)?,
+            });
+        }
+        let body = git_bytes(
+            &repo,
+            &upload_args(&["--stateless-rpc", "."]),
+            Some(body),
+            &[],
+        )?;
+        Ok(GitHttp::Ready {
+            content_type: UPLOAD_RESULT,
+            body,
         })
-        .map_err(into_api)
     }
 
     fn book(&self, repo_id: &str) -> Result<Arc<Book>, Fail> {
@@ -438,28 +474,8 @@ impl MemoryService {
     ) -> Result<GitHttp, Fail> {
         let snapshot = loaded(book)?;
         match (path, is_post, service) {
-            ("info/refs", false, Some("git-upload-pack")) => Ok(GitHttp::Ready {
-                content_type: UPLOAD_AD,
-                body: advertise_upload(repo)?,
-            }),
-            ("info/refs", false, Some("git-receive-pack")) => Ok(GitHttp::Ready {
-                content_type: RECEIVE_AD,
-                body: advertise_receive(snapshot.tip.as_deref()),
-            }),
             ("info/refs", false, _) => {
                 Err(Fail::api(StatusCode::BAD_REQUEST, "invalid git service"))
-            }
-            ("git-upload-pack", true, _) => {
-                let body = git_bytes(
-                    repo,
-                    &["upload-pack", "--stateless-rpc", "."],
-                    Some(body),
-                    &[],
-                )?;
-                Ok(GitHttp::Ready {
-                    content_type: UPLOAD_RESULT,
-                    body,
-                })
             }
             ("git-receive-pack", true, _) => {
                 self.receive(repo, repo_id, book, &snapshot, body, user_id)

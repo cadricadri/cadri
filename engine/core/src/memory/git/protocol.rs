@@ -123,10 +123,17 @@ pub(super) fn index_pack(repo: &Repo, pack: &[u8]) -> Result<(), String> {
     }
 }
 
+/// `git upload-pack` arguments that never expose internal refs.
+pub(super) fn upload_args<'a>(rest: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec!["-c", "uploadpack.hideRefs=refs/cadri", "upload-pack"];
+    args.extend_from_slice(rest);
+    args
+}
+
 pub(super) fn advertise_upload(repo: &Repo) -> Result<Vec<u8>, Fail> {
     let advertised = git_bytes(
         repo,
-        &["upload-pack", "--stateless-rpc", "--advertise-refs", "."],
+        &upload_args(&["--stateless-rpc", "--advertise-refs", "."]),
         None,
         &[],
     )?;
