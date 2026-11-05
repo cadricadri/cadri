@@ -19,6 +19,7 @@ export function FileView({
   onSave,
   onEditingChange,
   onDiscard,
+  onNeedHistory,
 }: {
   file: MemoryFile;
   createIn?: string;
@@ -30,6 +31,7 @@ export function FileView({
   onSave: (content: string, message: string, nextPath: string) => void;
   onEditingChange: (editing: boolean) => void;
   onDiscard?: () => void;
+  onNeedHistory?: () => void;
 }) {
   const creating = createIn !== undefined;
   const filename = creating ? "" : (file.path.split("/").pop() ?? file.path);
@@ -214,7 +216,14 @@ export function FileView({
               type="button"
               aria-pressed={blameOpen}
               aria-label={blameOpen ? "Hide blame" : "Show blame"}
-              onClick={() => setBlameOpen((open) => !open)}
+              onClick={() =>
+                setBlameOpen((open) => {
+                  if (!open) {
+                    onNeedHistory?.();
+                  }
+                  return !open;
+                })
+              }
             >
               <span>Blame</span>
             </button>

@@ -13,12 +13,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
-use crate::memory::{self, Change, GitHttp, MemoryService, MemoryStore};
+use crate::memory::{self, BlameEntry, Change, GitHttp, MemoryCommit, MemoryService, MemoryStore};
 use crate::ApiError;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
@@ -61,6 +61,8 @@ pub fn assemble(
             get(list_transcripts).post(post_transcript),
         )
         .route("/api/memories", get(get_memories))
+        .route("/api/memories/log", get(get_memory_log))
+        .route("/api/memories/blame", get(get_memory_blame))
         .route("/api/memories/commits", post(post_memories))
         .route("/git/{book}/{*path}", get(git_http).post(git_http))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -288,6 +290,23 @@ struct MemoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct BlameQuery {
+    scope: Option<String>,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct MemoryLogBody {
+    commits: Vec<MemoryCommit>,
+}
+
+#[derive(Serialize)]
+struct MemoryBlameBody {
+    path: String,
+    blame: Vec<BlameEntry>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommitRequest {
     #[serde(default)]
     message: String,
@@ -341,6 +360,34 @@ async fn get_memories(
     let service = state.memories.clone();
     let store = blocking(move || service.read_store(&repo_id)).await?;
     Ok(Json(store))
+}
+
+async fn get_memory_log(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Json<MemoryLogBody>, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let commits = blocking(move || service.read_log(&repo_id)).await?;
+    Ok(Json(MemoryLogBody { commits }))
+}
+
+async fn get_memory_blame(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    query: Result<Query<BlameQuery>, QueryRejection>,
+) -> Result<Json<MemoryBlameBody>, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let path = query.path;
+    let blame_path = path.clone();
+    let blame = blocking(move || service.read_blame(&repo_id, &blame_path)).await?;
+    Ok(Json(MemoryBlameBody { path, blame }))
 }
 
 async fn post_memories(

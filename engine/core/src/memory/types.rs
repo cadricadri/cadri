@@ -28,6 +28,7 @@ pub struct BlameEntry {
 pub struct MemoryFile {
     pub path: String,
     pub content: String,
+    #[serde(default)]
     pub blame: Vec<BlameEntry>,
 }
 
@@ -47,6 +48,7 @@ pub struct MemoryStore {
     pub files: Vec<MemoryFile>,
     #[serde(default)]
     pub directories: Vec<String>,
+    #[serde(default)]
     pub commits: Vec<MemoryCommit>,
 }
 
@@ -295,7 +297,7 @@ impl MemoryStore {
                     "invalid memory path",
                 ));
             }
-            if file.blame.len() != file.content.split('\n').count() {
+            if !file.blame.is_empty() && file.blame.len() != file.content.split('\n').count() {
                 return Err(ApiError::new(
                     StatusCode::BAD_REQUEST,
                     "blame does not match the file",

@@ -195,6 +195,8 @@ fn route_template(path: &str) -> &'static str {
         "/api/me" => "/api/me",
         "/api/transcripts" => "/api/transcripts",
         "/api/memories" => "/api/memories",
+        "/api/memories/log" => "/api/memories/log",
+        "/api/memories/blame" => "/api/memories/blame",
         "/api/memories/commits" => "/api/memories/commits",
         "/api/telemetry/page" => "/api/telemetry/page",
         "/api/billing" => "/api/billing",
@@ -268,6 +270,8 @@ mod tests {
     #[test]
     fn templates_keep_labels_low_cardinality() {
         assert_eq!(route_template("/api/memories"), "/api/memories");
+        assert_eq!(route_template("/api/memories/log"), "/api/memories/log");
+        assert_eq!(route_template("/api/memories/blame"), "/api/memories/blame");
         assert_eq!(
             route_template("/git/team.git/info/refs"),
             "/git/{book}/{path}"

@@ -4,6 +4,7 @@ import type { Me } from "../ee/workos";
 import { Page } from "../page";
 import { useSession } from "../session";
 import { applySave } from "./memories/blame";
+import { LoadError, loadMemoryBlame, loadMemoryBook, loadMemoryLog, peekMemoryBook, rememberMemoryBook } from "./memories/books";
 import { changesBetween } from "./memories/changes";
 import { CommitLog } from "./memories/CommitLog";
 import { FileTree } from "./memories/FileTree";
@@ -41,28 +42,34 @@ export default function Memories() {
 
   const load = useCallback(async () => {
     const id = ++request.current;
-    setStatus("Loading…");
+    const known = peekMemoryBook(scope);
+    if (known) {
+      setStore(readStore(known));
+      setStatus("");
+    } else {
+      setStatus("Loading…");
+    }
     try {
-      const response = await fetch(memoriesUrl(scope), { headers: session.headers() });
+      const store = await loadMemoryBook(scope, session.headers());
       if (id !== request.current) {
         return;
       }
-      if (response.status === 401) {
-        session.unauthorized();
-        return;
-      }
-      if (response.status === 402) {
-        setStore(null);
-        setStatus("This team's trial has ended.");
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(`${response.status} ${response.statusText}`);
-      }
-      setStore(readStore((await response.json()) as MemoryStore));
+      setStore(readStore(store));
       setStatus("");
     } catch (error) {
       if (id !== request.current) {
+        return;
+      }
+      if (known) {
+        return;
+      }
+      if (error instanceof LoadError && error.status === 401) {
+        session.unauthorized();
+        return;
+      }
+      if (error instanceof LoadError && error.status === 402) {
+        setStore(null);
+        setStatus("This team's trial has ended.");
         return;
       }
       setStore(null);
@@ -79,6 +86,63 @@ export default function Memories() {
     }
     void load();
   }, [load, scope]);
+
+  const blamedPaths = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!file) {
+      return;
+    }
+    const path = file.path;
+    const key = `${scope}:${path}`;
+    if (file.blame.length > 0 || blamedPaths.current.has(key)) {
+      return;
+    }
+    blamedPaths.current.add(key);
+    let cancel = false;
+    void loadMemoryBlame(scope, path, session.headers())
+      .then((blame) => {
+        if (cancel) {
+          return;
+        }
+        setStore((current) => {
+          if (!current) {
+            return current;
+          }
+          return {
+            ...current,
+            files: current.files.map((item) => (item.path === path ? { ...item, blame } : item)),
+          };
+        });
+      })
+      .catch(() => {
+        blamedPaths.current.delete(key);
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [file, scope, session]);
+
+  const historyScope = useRef<MemoryScope | null>(null);
+  const ensureHistory = useCallback(() => {
+    if (historyScope.current === scope) {
+      return;
+    }
+    historyScope.current = scope;
+    void loadMemoryLog(scope, session.headers())
+      .then((commits) => {
+        setStore((current) => (current ? { ...current, commits } : current));
+      })
+      .catch(() => {
+        historyScope.current = null;
+      });
+  }, [scope, session]);
+
+  useEffect(() => {
+    if (committed) {
+      ensureHistory();
+    }
+  }, [committed, ensureHistory]);
 
   useEffect(() => {
     if (!store || committed) {
@@ -182,7 +246,11 @@ export default function Memories() {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `${response.status} ${response.statusText}`);
       }
-      setStore(readStore((await response.json()) as MemoryStore));
+      const next = readStore((await response.json()) as MemoryStore);
+      blamedPaths.current.clear();
+      historyScope.current = null;
+      rememberMemoryBook(scope, next);
+      setStore(next);
       setStatus("");
       if (openPath) {
         setParams((current) => {
@@ -403,6 +471,7 @@ export default function Memories() {
                   tab={tab}
                   onTab={showTab}
                   onEditingChange={setEditing}
+                  onNeedHistory={ensureHistory}
                   onDiscard={() => setDraftDirectory(null)}
                   onSave={(content, message, nextPath) => void createFile(content, message, nextPath)}
                 />
@@ -416,6 +485,7 @@ export default function Memories() {
                   tab={tab}
                   onTab={showTab}
                   onEditingChange={setEditing}
+                  onNeedHistory={ensureHistory}
                   onSave={(content, message, nextPath) => void save(content, message, nextPath)}
                 />
               ) : (
@@ -428,10 +498,6 @@ export default function Memories() {
       {notice ? <NoticeAlert notice={notice} onDismiss={() => setNotice(null)} /> : null}
     </Page>
   );
-}
-
-function memoriesUrl(scope: MemoryScope): string {
-  return scope === "user" ? "/api/memories?scope=user" : "/api/memories";
 }
 
 function commitsUrl(scope: MemoryScope): string {

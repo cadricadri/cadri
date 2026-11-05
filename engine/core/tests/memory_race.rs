@@ -140,12 +140,13 @@ async fn s3_crash_after_the_ref_swap_is_already_published() {
     assert!(!failed.status.success(), "{}", text(&failed.stderr));
 
     let body = get_json(&peer, "/api/memories");
-    assert_eq!(body["commits"][0]["id"], sha);
+    let log = get_json(&peer, "/api/memories/log");
+    assert_eq!(log["commits"][0]["id"], sha);
     assert_eq!(file_map(&body)["note.md"], "after\n");
 
     let again = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
-    let after = get_json(&peer, "/api/memories");
+    let after = get_json(&peer, "/api/memories/log");
     assert_eq!(after["commits"].as_array().unwrap().len(), 2);
     assert_eq!(after["commits"][0]["id"], sha);
     let _ = fs::remove_dir_all(root);
@@ -236,7 +237,8 @@ async fn race_git_pushes(
     let tip = rev_parse(&loser_dir, &config, "HEAD");
 
     let body = get_json(&right_addr, "/api/memories");
-    let ids: Vec<&str> = body["commits"]
+    let log = get_json(&right_addr, "/api/memories/log");
+    let ids: Vec<&str> = log["commits"]
         .as_array()
         .unwrap()
         .iter()
@@ -280,7 +282,8 @@ async fn race_ui_commits(
     let files = file_map(&body);
     assert_eq!(files["left.md"], "from the left server\n");
     assert_eq!(files["right.md"], "from the right server\n");
-    assert_eq!(body["commits"].as_array().unwrap().len(), 2);
+    let log = get_json(&right_addr, "/api/memories/log");
+    assert_eq!(log["commits"].as_array().unwrap().len(), 2);
     let _ = fs::remove_dir_all(root);
 }
 

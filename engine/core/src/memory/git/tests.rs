@@ -88,16 +88,21 @@ fn ui_commit_round_trip_stores_a_large_book() {
         )
         .unwrap();
     assert_eq!(saved.files[0].content, "hello");
+    assert!(saved.commits.is_empty());
+    assert!(saved.files[0].blame.is_empty());
+    let blame = service.read_blame(repo, "notes.md").unwrap();
     assert_eq!(
-        saved.files[0].blame[0].author,
+        blame[0].author,
         Author::Human {
             user_id: "ada".into(),
             label: "Ada".into(),
         }
     );
-    assert_eq!(saved.commits[0].message, "Add a note");
-    assert_eq!(saved.commits.len(), 1);
-    let again = service
+    let log = service.read_log(repo).unwrap();
+    assert_eq!(log[0].message, "Add a note");
+    assert_eq!(log.len(), 1);
+    assert_eq!(blame[0].commit_id, log[0].id);
+    service
         .commit(
             repo,
             user,
@@ -106,7 +111,7 @@ fn ui_commit_round_trip_stores_a_large_book() {
             &[write("notes.md", "hello")],
         )
         .unwrap();
-    assert_eq!(again.commits.len(), 1);
+    assert_eq!(service.read_log(repo).unwrap().len(), 1);
 
     let folder = service
         .commit(
@@ -138,7 +143,7 @@ fn ui_commit_round_trip_stores_a_large_book() {
         .commit(repo, user, label, "many notes", &many)
         .unwrap();
     assert!(wide.files.len() > 100);
-    assert_eq!(wide.commits[0].message, "many notes");
+    assert_eq!(service.read_log(repo).unwrap()[0].message, "many notes");
 
     let clash = service.commit(repo, user, label, "file", &[write("notes", "x")]);
     assert!(matches!(clash, Err(err) if err.message == "invalid memory path"));
@@ -398,7 +403,7 @@ fn one_commit_produces_the_same_bundle_twice() {
     let service = MemoryService::open_local(&root, None, false);
     let repo = "org_pair_repo_0";
     let (user, label) = author();
-    let saved = service
+    service
         .commit(
             repo,
             user,
@@ -407,7 +412,7 @@ fn one_commit_produces_the_same_bundle_twice() {
             &[write("note.md", "hello")],
         )
         .unwrap();
-    let sha = saved.commits[0].id.clone();
+    let sha = service.read_log(repo).unwrap()[0].id.clone();
     let git_dir = root.join("repos").join(format!("{repo}.git"));
     let stored = fs::read(
         root.join("store/repos")
@@ -485,4 +490,187 @@ fn rebuild_bundle(git_dir: &Path, sha: &str) -> Vec<u8> {
         String::from_utf8_lossy(&created.stderr)
     );
     fs::read(&bundle).unwrap()
+}
+
+#[test]
+fn a_reader_does_not_wait_for_the_book_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_lock_repo_0";
+    let (user, label) = author();
+    service
+        .commit(
+            repo,
+            user,
+            label,
+            "Add a note",
+            &[write("note.md", "hello")],
+        )
+        .unwrap();
+    let entered = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&entered);
+    let waiting = service.clone();
+    let holder = std::thread::spawn(move || {
+        waiting.hold_repo(repo, Duration::from_millis(1200), &flag);
+    });
+    let start = Instant::now();
+    while !entered.load(Ordering::SeqCst) {
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!("writer did not take the book lock");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let read_at = Instant::now();
+    let store = service.read_store(repo).unwrap();
+    let elapsed = read_at.elapsed();
+    holder.join().unwrap();
+    assert_eq!(store.files[0].content, "hello");
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "read waited on the writer: {elapsed:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Times the old page-load view against the tree read, blob batching, and a read
+/// that overlaps a held write lock. Run with:
+/// `cargo test --release -p cadri-core --lib memory_read_benchmark -- --ignored --nocapture`
+#[test]
+#[ignore = "performance benchmark; run in release"]
+fn memory_read_benchmark() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::git_cli_exec::Repo;
+    use super::tree::{cat_blobs, cat_blobs_serial, list_tree};
+    use super::view::{view_legacy, view_tree};
+
+    const FILES: usize = 40;
+    const LINES: usize = 400;
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo_id = "org_bench_repo_0";
+    let (user, label) = author();
+    let body = "the team keeps this note so agents can reuse it.\n".repeat(LINES);
+    let mut created = Vec::new();
+    for index in 0..FILES {
+        created.push(write(&format!("notes/{index}.md"), &body));
+    }
+    service
+        .commit(repo_id, user, label, "seed", &created)
+        .unwrap();
+    for round in 0..8 {
+        let mut edits = Vec::new();
+        for slot in 0..4 {
+            let index = (round * 4 + slot) % FILES;
+            edits.push(write(
+                &format!("notes/{index}.md"),
+                &format!("{body}\nedit {round}\n"),
+            ));
+        }
+        service
+            .commit(repo_id, user, label, &format!("edit {round}"), &edits)
+            .unwrap();
+    }
+
+    let git = Repo {
+        git_dir: root.join("repos").join(format!("{repo_id}.git")),
+        scratch: root.join("scratch").join(repo_id),
+        jail: false,
+    };
+    let shas: Vec<String> = list_tree(&git, "HEAD")
+        .unwrap()
+        .into_iter()
+        .map(|(_, sha, _)| sha)
+        .collect();
+
+    let serial = time(|| {
+        cat_blobs_serial(&git, &shas).unwrap();
+    });
+    let batched = time(|| {
+        cat_blobs(&git, &shas).unwrap();
+    });
+    let legacy = time(|| {
+        view_legacy(&git).unwrap();
+    });
+    let tree = time(|| {
+        view_tree(&git).unwrap();
+    });
+    let legacy_store = view_legacy(&git).unwrap();
+    let tree_store = view_tree(&git).unwrap();
+    let log = time(|| {
+        service.read_log(repo_id).unwrap();
+    });
+    let one_blame = time(|| {
+        service.read_blame(repo_id, "notes/0.md").unwrap();
+    });
+    let warm = time(|| {
+        service.read_store(repo_id).unwrap();
+    });
+    service.read_store(repo_id).unwrap();
+    let warm_again = time(|| {
+        service.read_store(repo_id).unwrap();
+    });
+
+    let entered = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&entered);
+    let waiting = service.clone();
+    let holder = std::thread::spawn(move || {
+        waiting.hold_repo(repo_id, Duration::from_millis(800), &flag);
+    });
+    while !entered.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let overlapped = time(|| {
+        service.read_store(repo_id).unwrap();
+    });
+    holder.join().unwrap();
+
+    let legacy_bytes = serde_json::to_vec(&legacy_store).unwrap().len();
+    let tree_bytes = serde_json::to_vec(&tree_store).unwrap().len();
+    println!(
+        "bench files={FILES} lines_per_file={LINES} blobs={}",
+        shas.len()
+    );
+    println!("bench serial_cat_file_ms={}", ms(serial));
+    println!("bench batch_cat_file_ms={}", ms(batched));
+    println!("bench legacy_full_view_ms={}", ms(legacy));
+    println!("bench tree_view_ms={}", ms(tree));
+    println!("bench history_ms={}", ms(log));
+    println!("bench one_file_blame_ms={}", ms(one_blame));
+    println!("bench warm_read_store_ms={}", ms(warm));
+    println!("bench warm_read_store_again_ms={}", ms(warm_again));
+    println!("bench read_while_writer_holds_lock_ms={}", ms(overlapped));
+    println!("bench writer_hold_ms=800");
+    println!("bench legacy_json_bytes={legacy_bytes}");
+    println!("bench tree_json_bytes={tree_bytes}");
+    assert_eq!(tree_store.files.len(), FILES);
+    assert!(tree_store.commits.is_empty());
+    assert!(legacy_store.commits.len() > 1);
+    assert!(
+        batched < serial,
+        "batch {batched:?} was not faster than per-file {serial:?}"
+    );
+    assert!(
+        tree < legacy,
+        "tree {tree:?} was not faster than the full view {legacy:?}"
+    );
+    assert!(
+        overlapped < Duration::from_millis(500),
+        "read waited on the writer: {overlapped:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+fn time(work: impl FnOnce()) -> std::time::Duration {
+    let start = std::time::Instant::now();
+    work();
+    start.elapsed()
+}
+
+fn ms(duration: std::time::Duration) -> u128 {
+    duration.as_millis()
 }

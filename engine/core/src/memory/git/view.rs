@@ -9,9 +9,110 @@ use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_text, local_head, Repo};
 use super::ids::is_hex;
 use super::ids::is_keep;
-use super::tree::{list_tree, parse_blame};
+use super::tree::{cat_blobs, list_tree, parse_blame};
 
-pub(super) fn view(repo: &Repo) -> Result<MemoryStore, Fail> {
+/// Tip of the book: paths, directory markers, and file text. No blame and no history.
+/// Caller has already confirmed `HEAD` exists.
+pub(super) fn view_tree(repo: &Repo) -> Result<MemoryStore, Fail> {
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    let mut blobs = Vec::new();
+    for (mode, sha, path) in list_tree(repo, "HEAD")? {
+        if mode != "100644" && mode != "100755" {
+            return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
+        }
+        if is_keep(&path) {
+            if let Some((directory, _)) = path.rsplit_once('/') {
+                directories.push(directory.to_string());
+            }
+            continue;
+        }
+        blobs.push((sha, path));
+    }
+    let shas: Vec<String> = blobs.iter().map(|(sha, _)| sha.clone()).collect();
+    let bodies = cat_blobs(repo, &shas)?;
+    for (sha, path) in blobs {
+        let bytes = bodies
+            .get(&sha)
+            .ok_or_else(|| Fail::git(format!("blob {sha} missing from cat-file --batch")))?;
+        let content = String::from_utf8(bytes.clone())
+            .map_err(|_| Fail::git(format!("{path} is not utf-8")))?;
+        files.push(MemoryFile {
+            path,
+            content,
+            blame: Vec::new(),
+        });
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    directories.sort();
+    directories.dedup();
+    Ok(MemoryStore {
+        files,
+        directories,
+        commits: Vec::new(),
+    })
+}
+
+pub(super) fn blame_file(repo: &Repo, path: &str) -> Result<Vec<BlameEntry>, Fail> {
+    if is_keep(path) {
+        return Err(Fail::api(StatusCode::NOT_FOUND, "memory file not found"));
+    }
+    let entries = list_tree(repo, "HEAD")?;
+    let Some((mode, sha, _)) = entries.into_iter().find(|(_, _, entry)| entry == path) else {
+        return Err(Fail::api(StatusCode::NOT_FOUND, "memory file not found"));
+    };
+    if mode != "100644" && mode != "100755" {
+        return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
+    }
+    let bytes = git_bytes(repo, &["cat-file", "blob", &sha], None, &[])?;
+    let content =
+        String::from_utf8(bytes).map_err(|_| Fail::git(format!("{path} is not utf-8")))?;
+    let mut authors = HashMap::new();
+    line_blame(repo, path, &content, &mut authors)
+}
+
+fn line_blame(
+    repo: &Repo,
+    path: &str,
+    content: &str,
+    authors: &mut HashMap<String, Author>,
+) -> Result<Vec<BlameEntry>, Fail> {
+    let mut blamed = parse_blame(&git_text(
+        repo,
+        &["blame", "-p", "HEAD", "--", path],
+        None,
+        &[],
+    )?);
+    if blamed.is_empty() && content.is_empty() {
+        if let Some(head) = local_head(repo)? {
+            blamed.push(head);
+        }
+    }
+    // `split('\n')` counts a trailing newline as its own line. Git blame does not.
+    let expected = content.split('\n').count();
+    if blamed.len() + 1 == expected && content.ends_with('\n') {
+        if let Some(last) = blamed.last().cloned() {
+            blamed.push(last);
+        }
+    }
+    if blamed.len() != expected {
+        return Err(Fail::git(format!(
+            "blame for {path} does not match the file"
+        )));
+    }
+    Ok(blamed
+        .into_iter()
+        .map(|commit_id| {
+            let author = author_of(repo, &commit_id, authors);
+            BlameEntry { author, commit_id }
+        })
+        .collect())
+}
+
+/// Previous page-load view: full history, per-file `cat-file`, and blame for every file.
+/// Kept so the read benchmark can time this path against `view_tree`.
+#[cfg(test)]
+pub(super) fn view_legacy(repo: &Repo) -> Result<MemoryStore, Fail> {
     let Some(_) = local_head(repo)? else {
         return Ok(MemoryStore::empty());
     };
@@ -35,36 +136,7 @@ pub(super) fn view(repo: &Repo) -> Result<MemoryStore, Fail> {
         let bytes = git_bytes(repo, &["cat-file", "blob", &sha], None, &[])?;
         let content =
             String::from_utf8(bytes).map_err(|_| Fail::git(format!("{path} is not utf-8")))?;
-        let mut blamed = parse_blame(&git_text(
-            repo,
-            &["blame", "-p", "HEAD", "--", &path],
-            None,
-            &[],
-        )?);
-        if blamed.is_empty() && content.is_empty() {
-            if let Some(commit) = commits.first() {
-                blamed.push(commit.id.clone());
-            }
-        }
-        // `split('\n')` counts a trailing newline as its own line. Git blame does not.
-        let expected = content.split('\n').count();
-        if blamed.len() + 1 == expected && content.ends_with('\n') {
-            if let Some(last) = blamed.last().cloned() {
-                blamed.push(last);
-            }
-        }
-        if blamed.len() != expected {
-            return Err(Fail::git(format!(
-                "blame for {path} does not match the file"
-            )));
-        }
-        let blame = blamed
-            .into_iter()
-            .map(|commit_id| {
-                let author = author_of(repo, &commit_id, &mut authors);
-                BlameEntry { author, commit_id }
-            })
-            .collect();
+        let blame = line_blame(repo, &path, &content, &mut authors)?;
         files.push(MemoryFile {
             path,
             content,

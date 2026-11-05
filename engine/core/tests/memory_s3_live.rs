@@ -260,6 +260,19 @@ fn store(addr: std::net::SocketAddr, book: &Book) -> Value {
     } else {
         "/api/memories"
     };
+    json_at(addr, book, path)
+}
+
+fn log(addr: std::net::SocketAddr, book: &Book) -> Value {
+    let path = if book.scope == "user" {
+        "/api/memories/log?scope=user"
+    } else {
+        "/api/memories/log"
+    };
+    json_at(addr, book, path)
+}
+
+fn json_at(addr: std::net::SocketAddr, book: &Book, path: &str) -> Value {
     let (status, body) = http(addr, "GET", path, &book.org, &book.user, None);
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     serde_json::from_slice(&body).unwrap()
@@ -556,7 +569,7 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             }
             None => {}
         }
-        let commits = from_right["commits"].as_array().unwrap();
+        let commits = log(right_addr, book)["commits"].as_array().unwrap().clone();
         let expected = NOTES + 1 + usize::from(book.conflict.is_some()) * 2;
         assert_eq!(commits.len(), expected, "{}", book.label());
     }
@@ -571,14 +584,14 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             keys.iter().any(|key| key.ends_with("/refs/heads/main")),
             "missing ref for {prefix}: {keys:?}"
         );
-        let commits = store(right_addr, book)["commits"].as_array().unwrap().len();
+        let commits = log(right_addr, book)["commits"].as_array().unwrap().len();
         let orphans = usize::from(book.conflict.is_some());
         assert!(
             (commits..=commits + orphans).contains(&objects),
             "{prefix} stored {objects} bundles for {commits} commits"
         );
         let remote = ls_remote(right_addr, book);
-        let tip = store(right_addr, book)["commits"][0]["id"]
+        let tip = log(right_addr, book)["commits"][0]["id"]
             .as_str()
             .unwrap()
             .to_string();

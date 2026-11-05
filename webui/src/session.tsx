@@ -18,6 +18,7 @@ import {
   type AuthMode,
 } from "./auth";
 import type { InviteResult, Me, OrgResult } from "./ee/workos";
+import { primeMemoryBook } from "./pages/memories/books";
 
 type WorkosModule = typeof import("./ee/workos");
 
@@ -51,8 +52,8 @@ function markInstallSkipped(): void {
 }
 
 function warmMemoryBooks(headers: Record<string, string>): void {
-  void fetch("/api/memories?scope=team", { headers });
-  void fetch("/api/memories?scope=user", { headers });
+  primeMemoryBook("team", headers);
+  primeMemoryBook("user", headers);
 }
 
 export type Session = {

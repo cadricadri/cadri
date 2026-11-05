@@ -338,14 +338,14 @@ async fn memories_start_empty_and_stay_inside_the_org() {
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["files"][0]["path"], "README.md");
     assert_eq!(saved["files"][0]["content"], "hello");
-    assert_eq!(saved["files"][0]["blame"][0]["author"]["user_id"], "ada");
-    assert_eq!(saved["commits"][0]["message"], "Add a note");
-    assert_eq!(
-        saved["files"][0]["blame"][0]["commit_id"],
-        saved["commits"][0]["id"]
-    );
+    assert!(saved["commits"].as_array().unwrap().is_empty());
+    let (_, _, blamed) = send(&app, get_request("/api/memories/blame?path=README.md", &a)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log", &a)).await;
+    assert_eq!(blamed["blame"][0]["author"]["user_id"], "ada");
+    assert_eq!(log["commits"][0]["message"], "Add a note");
+    assert_eq!(blamed["blame"][0]["commit_id"], log["commits"][0]["id"]);
 
-    let (_, _, again) = send(&app, get_request("/api/memories", &a)).await;
+    let (_, _, again) = send(&app, get_request("/api/memories/log", &a)).await;
     assert_eq!(again["commits"][0]["message"], "Add a note");
     let (_, _, other) = send(&app, get_request("/api/memories", &b)).await;
     assert_eq!(other["files"].as_array().unwrap().len(), 0);
@@ -449,7 +449,8 @@ async fn personal_memories_are_a_separate_book() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(defaulted["files"][0]["content"], "x");
-    assert_eq!(defaulted["commits"][0]["message"], "Update memory");
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    assert_eq!(log["commits"][0]["message"], "Update memory");
 }
 
 #[tokio::test]
@@ -535,15 +536,10 @@ async fn git_push_keeps_client_shas_and_rejects_a_bad_tree() {
         &config,
         &["push", &url, "HEAD:refs/heads/main"],
     ));
-    let (_, _, body) = send(
-        &app,
-        get_request(
-            "/api/memories",
-            &[("x-test-org", "org-a"), ("x-test-user", "ada")],
-        ),
-    )
-    .await;
-    assert_eq!(body["commits"][0]["id"], sha);
+    let headers = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let (_, _, body) = send(&app, get_request("/api/memories", &headers)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log", &headers)).await;
+    assert_eq!(log["commits"][0]["id"], sha);
     assert_eq!(body["files"][0]["content"], "hello\n");
 
     let other = root.join("other");
@@ -638,7 +634,7 @@ async fn git_push_keeps_client_shas_and_rejects_a_bad_tree() {
     let (_, _, store) = send(
         &app,
         get_request(
-            "/api/memories",
+            "/api/memories/log",
             &[("x-test-org", "org-a"), ("x-test-user", "ada")],
         ),
     )

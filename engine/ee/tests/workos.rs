@@ -2862,10 +2862,8 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(
-        saved["files"][0]["blame"][0]["author"]["user_id"],
-        "user_ada"
-    );
+    let (_, _, blamed) = send(&app, get_with("/api/memories/blame?path=team.md", &ada_h)).await;
+    assert_eq!(blamed["blame"][0]["author"]["user_id"], "user_ada");
 
     let personal = json!({
         "message": "Ada note",
@@ -2882,7 +2880,11 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let ada_commit = saved["commits"][0]["id"].as_str().unwrap().to_string();
+    let (_, _, personal_log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    let ada_commit = personal_log["commits"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let (_, _, sam_team) = send(&app, get_with("/api/memories", &sam_h)).await;
     assert_eq!(sam_team["files"][0]["content"], "shared\n");
@@ -2937,7 +2939,8 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let team_commit = sam_team["commits"][0]["id"].as_str().unwrap();
+    let (_, _, team_log) = send(&app, get_with("/api/memories/log", &sam_h)).await;
+    let team_commit = team_log["commits"][0]["id"].as_str().unwrap();
     assert!(!other_bytes
         .windows(team_commit.len())
         .any(|window| window == team_commit.as_bytes()));
