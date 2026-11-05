@@ -550,6 +550,97 @@ fn a_reader_does_not_wait_for_the_book_lock() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn a_clone_does_not_wait_for_a_writer() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_clone_repo_0";
+    let (user, label) = author();
+    service
+        .commit(
+            repo,
+            user,
+            label,
+            "Add a note",
+            &[write("note.md", "hello")],
+        )
+        .unwrap();
+    // A load takes the writer, so load first; the hold below must not delay the clone.
+    service.read_store(repo).unwrap();
+    let git_dir = root.join("repos").join(format!("{repo}.git"));
+    let parsed = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&git_dir)
+        .args(["rev-parse", "refs/heads/main"])
+        .output()
+        .unwrap();
+    let tip = String::from_utf8(parsed.stdout).unwrap().trim().to_string();
+    let hidden = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&git_dir)
+        .args(["update-ref", "refs/cadri/stage", &tip])
+        .status()
+        .unwrap();
+    assert!(hidden.success());
+
+    let entered = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&entered);
+    let waiting = service.clone();
+    let holder = std::thread::spawn(move || {
+        waiting.hold_writer(repo, Duration::from_millis(1500), &flag);
+    });
+    while !entered.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let started = Instant::now();
+    let ad = service
+        .serve_git(
+            repo,
+            "info/refs",
+            false,
+            Some("git-upload-pack"),
+            &[],
+            "ada",
+        )
+        .unwrap();
+    let mut want = pkt(&format!("want {tip}\n"));
+    want.extend_from_slice(b"0000");
+    want.extend(pkt("done\n"));
+    let fetched = service
+        .serve_git(repo, "git-upload-pack", true, None, &want, "ada")
+        .unwrap();
+    let receive_ad = service
+        .serve_git(
+            repo,
+            "info/refs",
+            false,
+            Some("git-receive-pack"),
+            &[],
+            "ada",
+        )
+        .unwrap();
+    let elapsed = started.elapsed();
+    holder.join().unwrap();
+    let super::protocol::GitHttp::Ready { body: ad, .. } = ad;
+    let super::protocol::GitHttp::Ready { body: fetched, .. } = fetched;
+    let super::protocol::GitHttp::Ready {
+        body: receive_ad, ..
+    } = receive_ad;
+    let ad = String::from_utf8_lossy(&ad);
+    assert!(ad.contains("refs/heads/main"));
+    assert!(!ad.contains("refs/cadri"), "internal refs were advertised");
+    assert!(fetched.windows(4).any(|w| w == b"PACK"));
+    assert!(String::from_utf8_lossy(&receive_ad).contains(&tip));
+    assert!(
+        elapsed < Duration::from_millis(700),
+        "clone waited on the writer: {elapsed:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Times the old page-load view against the tree read, blob batching, and a read
 /// that overlaps a held write lock. Run with:
 /// `cargo test --release -p cadri-core --lib memory_read_benchmark -- --ignored --nocapture`
