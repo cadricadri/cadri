@@ -164,6 +164,179 @@ async fn another_org_cannot_fetch_this_team_book() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_with_many_local_commits_sends_a_gzip_body_and_succeeds() {
+    let root = temp();
+    let addr = serve(&root).await;
+    let config = git_config(&root, "org-a", "ada");
+    let url = format!("http://{addr}/git/team.git");
+    let origin = root.join("origin");
+    assert_ok(git(
+        &origin,
+        &config,
+        &["init", "-b", "main"],
+        "org-a",
+        "ada",
+    ));
+    commit_file(
+        &origin, &config, "base.md", "base\n", "base", "org-a", "ada",
+    );
+    assert_ok(git(
+        &origin,
+        &config,
+        &["push", &url, "HEAD:refs/heads/main"],
+        "org-a",
+        "ada",
+    ));
+    let local = root.join("local");
+    assert_ok(git(&local, &config, &["clone", &url, "."], "org-a", "ada"));
+    for n in 0..120 {
+        commit_file(
+            &local,
+            &config,
+            &format!("local-{n}.md"),
+            "x\n",
+            &format!("local {n}"),
+            "org-a",
+            "ada",
+        );
+    }
+    let tip = commit_file(
+        &origin,
+        &config,
+        "remote.md",
+        "remote\n",
+        "remote",
+        "org-a",
+        "ada",
+    );
+    assert_ok(git(
+        &origin,
+        &config,
+        &["push", &url, "HEAD:refs/heads/main"],
+        "org-a",
+        "ada",
+    ));
+
+    let output = Command::new("git")
+        .current_dir(&local)
+        .env("GIT_CONFIG_GLOBAL", &config)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_TRACE_CURL", "1")
+        .env("GIT_TRACE_CURL_NO_DATA", "1")
+        .args(["-c", "http.extraHeader=x-cadri-org:org-a"])
+        .args(["-c", "http.extraHeader=x-cadri-user:ada"])
+        .args(["fetch", "origin"])
+        .output()
+        .unwrap();
+    let trace = text(&output.stderr);
+    assert!(output.status.success(), "fetch failed:\n{trace}");
+    assert!(
+        trace
+            .to_ascii_lowercase()
+            .contains("content-encoding: gzip"),
+        "git did not gzip the request:\n{trace}"
+    );
+    assert_eq!(
+        rev_parse(&local, &config, "origin/main", "org-a", "ada"),
+        tip
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gzip_upload_pack_request_matches_the_plain_request() {
+    let root = temp();
+    let app = serve_router(&root);
+    let plain = post_upload_pack(&app, None, upload_pack_body()).await;
+    assert_eq!(plain.0, 200);
+    let gzipped = post_upload_pack(&app, Some("gzip"), gzip(&upload_pack_body())).await;
+    assert_eq!(gzipped.0, 200);
+    assert_eq!(gzipped.1, plain.1);
+    let identity = post_upload_pack(&app, Some("identity"), upload_pack_body()).await;
+    assert_eq!(identity.0, 200);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn gzip_body_that_expands_past_the_cap_is_rejected() {
+    let root = temp();
+    let app = serve_router(&root);
+    let bomb = gzip(&vec![0u8; 32 * 1024 * 1024 + 1]);
+    assert!(bomb.len() < 1024 * 1024);
+    let response = post_upload_pack(&app, Some("gzip"), bomb).await;
+    assert_eq!(response.0, 413);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_gzip_body_is_a_bad_request() {
+    let root = temp();
+    let app = serve_router(&root);
+    let response = post_upload_pack(&app, Some("gzip"), b"not gzip at all".to_vec()).await;
+    assert_eq!(response.0, 400);
+    let mut truncated = gzip(&upload_pack_body());
+    truncated.truncate(truncated.len() - 4);
+    let response = post_upload_pack(&app, Some("gzip"), truncated).await;
+    assert_eq!(response.0, 400);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_content_encoding_is_unsupported() {
+    let root = temp();
+    let app = serve_router(&root);
+    let response = post_upload_pack(&app, Some("br"), upload_pack_body()).await;
+    assert_eq!(response.0, 415);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn upload_pack_body() -> Vec<u8> {
+    b"0000".to_vec()
+}
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn serve_router(root: &Path) -> Router {
+    let memories = MemoryService::open_local(root.join("memories"), None, false);
+    assemble(
+        db::open(&root.join("transcripts.db")).unwrap(),
+        Arc::new(OrgHeader),
+        None,
+        memories,
+    )
+}
+
+async fn post_upload_pack(app: &Router, encoding: Option<&str>, body: Vec<u8>) -> (u16, Vec<u8>) {
+    use tower::ServiceExt;
+    let mut request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/git/team.git/git-upload-pack")
+        .header("x-cadri-org", "org-a")
+        .header("x-cadri-user", "ada")
+        .header("git-protocol", "version=2")
+        .header("content-type", "application/x-git-upload-pack-request");
+    if let Some(encoding) = encoding {
+        request = request.header("content-encoding", encoding);
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(axum::body::Body::from(body)).unwrap())
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, bytes.to_vec())
+}
+
 async fn serve(root: &Path) -> std::net::SocketAddr {
     let memories = MemoryService::open_local(root.join("memories"), None, false);
     let app = assemble(
