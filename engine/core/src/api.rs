@@ -546,14 +546,19 @@ async fn git_http(
     let (scope, user_id) = git_book(&book, &identity)?;
     let is_post = request.method() == Method::POST;
     let service_name = request.uri().query().and_then(query_param_service);
+    let gzip = request_is_gzip(request.headers())?;
     let body = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES)
         .await
         .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "memory push is too large"))?;
     let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
     let actor = identity.user_id.clone();
     let service = state.memories.clone();
-    let payload = body.to_vec();
     let reply = blocking(move || {
+        let payload = if gzip {
+            gunzip_capped(&body)?
+        } else {
+            body.to_vec()
+        };
         service.serve_git(
             &repo_id,
             &path,
@@ -566,6 +571,37 @@ async fn git_http(
     .await?;
     let GitHttp::Ready { content_type, body } = reply;
     Ok(git_response(content_type, body))
+}
+
+fn request_is_gzip(headers: &HeaderMap) -> Result<bool, ApiError> {
+    let Some(value) = headers.get(header::CONTENT_ENCODING) else {
+        return Ok(false);
+    };
+    let encoding = value.to_str().unwrap_or("").trim().to_ascii_lowercase();
+    match encoding.as_str() {
+        "gzip" | "x-gzip" => Ok(true),
+        "" | "identity" => Ok(false),
+        _ => Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported content encoding",
+        )),
+    }
+}
+
+fn gunzip_capped(body: &[u8]) -> Result<Vec<u8>, ApiError> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "malformed gzip request body"))?;
+    if out.len() > MAX_BODY_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "decompressed request body is too large",
+        ));
+    }
+    Ok(out)
 }
 
 fn query_param_service(query: &str) -> Option<String> {
