@@ -1,5 +1,4 @@
-//! Header of a git bundle. Nothing in production calls it until the log format lands.
-#![allow(dead_code)]
+//! Header of a git bundle.
 
 use super::error::Fail;
 use super::ids::is_hex;

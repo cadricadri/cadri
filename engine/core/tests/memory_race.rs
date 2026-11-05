@@ -1,9 +1,9 @@
 //! Two engines, one book, one object store.
 //!
 //! Each engine has its own git directory and its own SQLite connection. They
-//! share the store, which is either the directory of lock files or the S3
-//! stand-in. A publish waits at [`PublishGate`] so both have finished
-//! validating before either compare-and-swap runs.
+//! share the store, which is either a directory or the S3 stand-in. A publish
+//! waits at [`PublishGate`] so both have finished validating before either
+//! creates the next log entry.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use cadri_core::auth::NoAuth;
 use cadri_core::db;
 use cadri_core::memory::testing::{
-    assemble, FakeS3, MemoryService, PublishGate, RefFault, S3Books,
+    assemble, FakeS3, LogFault, MemoryService, PublishGate, S3Books,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -65,7 +65,7 @@ async fn two_s3_servers_race_a_git_push_and_the_loser_retries() {
         S3Books::from_client("memories", client),
     );
     race_git_pushes(root, left, right, fresh, Some(&fake)).await;
-    assert_eq!(fake.ref_conflicts(), 1);
+    assert_eq!(fake.log_conflicts(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -110,45 +110,37 @@ async fn two_s3_servers_race_a_ui_commit_and_both_land() {
         S3Books::from_client("memories", client),
     );
     race_ui_commits(root, left, right, fresh, Some(&fake)).await;
-    assert_eq!(fake.ref_conflicts(), 1);
+    assert_eq!(fake.log_conflicts(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_crash_before_the_ref_swap_publishes_once_on_retry() {
+async fn s3_crash_before_the_log_create_publishes_once_on_retry() {
     let root = temp();
     let (fake, addr, _peer) = s3_pair(&root).await;
     let config = git_config(&root);
     let repo = root.join("agent");
     let url = format!("http://{addr}/git/team.git");
     seed(&repo, &config, &url);
+    assert_eq!(log_keys(&fake).len(), 1);
 
     let sha = commit_file(&repo, &config, "note.md", "after\n", "edit");
-    fake.fail_next_ref_put(RefFault::Refuse);
+    fake.fail_next_log_put(LogFault::Refuse);
     let failed = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(!failed.status.success(), "{}", text(&failed.stderr));
-    assert!(
-        fake.keys()
-            .iter()
-            .any(|key| key.ends_with(&format!("/objects/{sha}"))),
-        "the bundle was stored before the ref swap failed: {:?}",
-        fake.keys()
-    );
+    assert_eq!(log_keys(&fake).len(), 1, "nothing is stored for {sha}");
     assert_ne!(remote_tip(&url, &config, &root), sha);
 
     let again = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
     assert_eq!(remote_tip(&url, &config, &root), sha);
-    let objects = fake
-        .keys()
-        .into_iter()
-        .filter(|key| key.contains("/objects/"))
-        .count();
-    assert_eq!(objects, 2, "retry must not write a second bundle for {sha}");
+    let keys = log_keys(&fake);
+    assert_eq!(keys.len(), 2, "one log entry for {sha}: {keys:?}");
+    assert!(keys[1].ends_with("/log/00000000000000000002"), "{keys:?}");
     let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_crash_after_the_ref_swap_is_already_published() {
+async fn s3_crash_after_the_log_create_is_already_published() {
     let root = temp();
     let (fake, addr, peer) = s3_pair(&root).await;
     let config = git_config(&root);
@@ -157,10 +149,12 @@ async fn s3_crash_after_the_ref_swap_is_already_published() {
     seed(&repo, &config, &url);
 
     let sha = commit_file(&repo, &config, "note.md", "after\n", "edit");
-    fake.fail_next_ref_put(RefFault::StoreThenFail);
+    fake.fail_next_log_put(LogFault::StoreThenFail);
     let failed = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(!failed.status.success(), "{}", text(&failed.stderr));
+    assert_eq!(log_keys(&fake).len(), 2);
 
+    // The peer loads the book after the crash, so it sees the stored entry.
     let body = get_json(&peer, "/api/memories");
     let log = get_json(&peer, "/api/memories/log");
     assert_eq!(log["commits"][0]["id"], sha);
@@ -168,10 +162,26 @@ async fn s3_crash_after_the_ref_swap_is_already_published() {
 
     let again = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
+    assert_eq!(remote_tip(&url, &config, &root), sha);
+    assert_eq!(
+        log_keys(&fake).len(),
+        2,
+        "the retry reuses the stored entry for {sha}"
+    );
     let after = get_json(&peer, "/api/memories/log");
     assert_eq!(after["commits"].as_array().unwrap().len(), 2);
     assert_eq!(after["commits"][0]["id"], sha);
     let _ = fs::remove_dir_all(root);
+}
+
+fn log_keys(fake: &FakeS3) -> Vec<String> {
+    let mut keys: Vec<String> = fake
+        .keys()
+        .into_iter()
+        .filter(|key| key.contains("/log/"))
+        .collect();
+    keys.sort();
+    keys
 }
 
 async fn race_git_pushes(
@@ -225,10 +235,10 @@ async fn race_git_pushes(
     assert_eq!(
         gate.conflicts(),
         1,
-        "both servers must lose one compare-and-swap"
+        "exactly one server must lose the log create"
     );
     if let Some(fake) = fake {
-        assert_eq!(fake.ref_conflicts(), 1);
+        assert_eq!(fake.log_conflicts(), 1);
     }
     let failed_is_left = !left_result.success;
     assert!(
@@ -307,7 +317,7 @@ async fn race_ui_commits(
     assert_eq!(right_status, 200, "right UI commit failed");
     assert_eq!(gate.conflicts(), 1);
     if let Some(fake) = fake {
-        assert_eq!(fake.ref_conflicts(), 1);
+        assert_eq!(fake.log_conflicts(), 1);
     }
     // A server started after both writes loads the book from the durable store.
     let fresh_addr = listen(assemble(

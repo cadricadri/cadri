@@ -589,16 +589,18 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             .unwrap_or_else(|| panic!("repo id for {}", book.label()));
         let prefix = format!("repos/{repo_id}/");
         let keys = list_keys(&bucket, &prefix);
-        let objects = keys.iter().filter(|key| key.contains("/objects/")).count();
+        let entries = keys.iter().filter(|key| key.contains("/log/")).count();
         assert!(
-            keys.iter().any(|key| key.ends_with("/refs/heads/main")),
-            "missing ref for {prefix}: {keys:?}"
+            !keys
+                .iter()
+                .any(|key| key.ends_with("/refs/heads/main") || key.contains("/objects/")),
+            "legacy keys written for {prefix}: {keys:?}"
         );
+        // Every push here adds one commit, and a lost log create stores nothing.
         let commits = log(fresh_addr, book)["commits"].as_array().unwrap().len();
-        let orphans = usize::from(book.conflict.is_some());
-        assert!(
-            (commits..=commits + orphans).contains(&objects),
-            "{prefix} stored {objects} bundles for {commits} commits"
+        assert_eq!(
+            entries, commits,
+            "{prefix} stored {entries} log entries for {commits} commits"
         );
         let remote = ls_remote(fresh_addr, book);
         let tip = log(fresh_addr, book)["commits"][0]["id"]

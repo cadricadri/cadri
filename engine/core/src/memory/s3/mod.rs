@@ -1,18 +1,16 @@
-//! S3 publish path for a memory book.
+//! S3 durable store for memory books.
 //!
-//! Keys match the hosted layout: `repos/<repo_id>/objects/<sha>` is one immutable
-//! bundle, and `repos/<repo_id>/refs/heads/main` is the tip. The ref is a single
-//! PUT whose body is the commit SHA plus a newline, so its ETag is the MD5 of
-//! that body. Creating the ref sends `If-None-Match: *`. Moving it sends
-//! `If-Match` for the previous body.
+//! Every key lives under `repos/<repo_id>/` and is written once, with
+//! `If-None-Match: *`: `log/<seq>` entries and `checkpoint/<seq>` bundles. The
+//! legacy layout (`refs/heads/main` holding the tip SHA, `objects/<sha>` holding a
+//! full-history bundle) is only read, to migrate a book.
 //!
 //! When `CADRI_MEMORIES_ACCESS_ROLE_ARN` is set, each repo operation assumes that
 //! role with a session policy limited to `repos/<repo_id>/*`. Otherwise the
 //! process credentials are used (localhost, FakeS3, or until the role is wired).
 //!
 //! Checksums use `WhenRequired`. This SDK has no `WhenNever`. `PutObject` does
-//! not require a checksum, so the body stays the bytes we send and a single-part
-//! ETag stays the quoted MD5 of that body. That quoted form is what `If-Match` sends.
+//! not require a checksum, so the body stays the bytes we send.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -27,7 +25,7 @@ use md5::{Digest, Md5};
 
 mod fake;
 
-pub use fake::{FakeS3, RefFault};
+pub use fake::{FakeS3, LogFault};
 
 /// Region string for FakeS3 / in-process test clients only.
 ///
@@ -54,7 +52,6 @@ struct ScopedClient {
 
 #[derive(Debug)]
 pub(crate) enum S3Fail {
-    Conflict,
     Message(String),
 }
 
@@ -161,40 +158,6 @@ impl S3Books {
         }
     }
 
-    pub(crate) fn put_bundle(&self, repo_id: &str, sha: &str, bytes: &[u8]) -> Result<(), S3Fail> {
-        let client = self.client_for(repo_id)?;
-        let key = obj_key(repo_id, sha);
-        let body = bytes.to_vec();
-        match self.put(&client, &key, &body, PutPrecondition::Create)? {
-            PutOutcome::Stored => Ok(()),
-            PutOutcome::Exists => match self.get(&client, &key)? {
-                Some(existing) if existing == body => Ok(()),
-                Some(_) => Err(S3Fail::Message(format!(
-                    "memory object {key} already holds different bytes"
-                ))),
-                None => Err(S3Fail::Conflict),
-            },
-        }
-    }
-
-    pub(crate) fn cas_ref(
-        &self,
-        repo_id: &str,
-        expected: Option<&str>,
-        new_sha: &str,
-    ) -> Result<(), S3Fail> {
-        let client = self.client_for(repo_id)?;
-        let body = ref_body(new_sha);
-        let precondition = match expected {
-            None => PutPrecondition::Create,
-            Some(sha) => PutPrecondition::Match(etag(&ref_body(sha))),
-        };
-        match self.put(&client, &ref_key(repo_id), &body, precondition)? {
-            PutOutcome::Stored => Ok(()),
-            PutOutcome::Exists => Err(S3Fail::Conflict),
-        }
-    }
-
     pub(crate) fn get_key(&self, repo_id: &str, key: &str) -> Result<Option<Vec<u8>>, S3Fail> {
         let client = self.client_for(repo_id)?;
         self.get(&client, &repo_key(repo_id, key))
@@ -208,12 +171,7 @@ impl S3Books {
         bytes: &[u8],
     ) -> Result<bool, S3Fail> {
         let client = self.client_for(repo_id)?;
-        match self.put(
-            &client,
-            &repo_key(repo_id, key),
-            bytes,
-            PutPrecondition::Create,
-        )? {
+        match self.put(&client, &repo_key(repo_id, key), bytes)? {
             PutOutcome::Stored => Ok(true),
             PutOutcome::Exists => Ok(false),
         }
@@ -314,32 +272,24 @@ impl S3Books {
         })?
     }
 
-    fn put(
-        &self,
-        client: &Client,
-        key: &str,
-        body: &[u8],
-        precondition: PutPrecondition,
-    ) -> Result<PutOutcome, S3Fail> {
+    /// Create-if-absent.
+    fn put(&self, client: &Client, key: &str, body: &[u8]) -> Result<PutOutcome, S3Fail> {
         let bucket = self.bucket.clone();
         let key = key.to_string();
         let body = body.to_vec();
         let client = client.clone();
         self.drive(async move {
-            // S3 answers a lost precondition with 412. A 409 means another
-            // conditional write was in flight; the upload is retried, and a
-            // later 412 is the lost compare-and-swap.
+            // S3 answers a taken key with 412. A 409 means another conditional
+            // write was in flight; the upload is retried, and a later 412 means
+            // the other write won.
             let mut delay = std::time::Duration::from_millis(25);
             for attempt in 0..6 {
-                let mut request = client
+                let request = client
                     .put_object()
                     .bucket(bucket.clone())
                     .key(key.clone())
-                    .body(ByteStream::from(body.clone()));
-                request = match &precondition {
-                    PutPrecondition::Create => request.if_none_match("*"),
-                    PutPrecondition::Match(tag) => request.if_match(tag),
-                };
+                    .body(ByteStream::from(body.clone()))
+                    .if_none_match("*");
                 match request.send().await {
                     Ok(_) => return Ok(PutOutcome::Stored),
                     Err(err) if is_precondition(&err) => return Ok(PutOutcome::Exists),
@@ -380,11 +330,6 @@ impl Drop for S3Books {
             std::thread::spawn(move || drop(runtime));
         }
     }
-}
-
-enum PutPrecondition {
-    Create,
-    Match(String),
 }
 
 enum PutOutcome {
@@ -471,10 +416,6 @@ fn ref_key(repo_id: &str) -> String {
 
 fn obj_key(repo_id: &str, sha: &str) -> String {
     format!("repos/{repo_id}/objects/{sha}")
-}
-
-fn ref_body(sha: &str) -> Vec<u8> {
-    format!("{sha}\n").into_bytes()
 }
 
 pub(super) fn etag(bytes: &[u8]) -> String {
@@ -595,9 +536,8 @@ mod tests {
         fake.conflict_once();
         let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
         let repo = "abcdef0123456789abcdef0123456789";
-        let sha = "a".repeat(40);
-        books.put_bundle(repo, &sha, b"bundle").unwrap();
-        assert_eq!(books.get_object(repo, &sha).unwrap(), b"bundle");
+        assert!(books.create_key(repo, "log/1", b"entry").unwrap());
+        assert_eq!(books.get_key(repo, "log/1").unwrap().unwrap(), b"entry");
     }
 
     #[test]
@@ -634,7 +574,7 @@ mod tests {
     /// Manual check against a real bucket or LocalStack. Not part of `cargo test`.
     #[test]
     #[ignore = "set CADRI_MEMORIES_BUCKET and AWS credentials; CADRI_MEMORIES_S3_ENDPOINT optional"]
-    fn real_bucket_compare_and_swap() {
+    fn real_bucket_create_if_absent() {
         let bucket = std::env::var("CADRI_MEMORIES_BUCKET").expect("CADRI_MEMORIES_BUCKET");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -642,20 +582,17 @@ mod tests {
             .unwrap();
         let books = runtime.block_on(S3Books::from_env(bucket)).unwrap();
         let repo = "0123456789abcdef0123456789abcdef";
-        let first = "a".repeat(40);
-        let second = "b".repeat(40);
-        books.put_bundle(repo, &first, b"bundle").unwrap();
-        books.cas_ref(repo, None, &first).unwrap();
-        assert!(matches!(
-            books.cas_ref(repo, None, &second),
-            Err(S3Fail::Conflict)
-        ));
-        books.cas_ref(repo, Some(&first), &second).unwrap();
-        assert_eq!(
-            books.read_ref(repo).unwrap().as_deref(),
-            Some(second.as_str())
+        let key = format!(
+            "test/{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
-        assert_eq!(books.get_object(repo, &first).unwrap(), b"bundle");
+        assert!(books.create_key(repo, &key, b"first").unwrap());
+        assert!(!books.create_key(repo, &key, b"second").unwrap());
+        assert_eq!(books.get_key(repo, &key).unwrap().unwrap(), b"first");
+        assert!(books.list_keys(repo, "test/", None).unwrap().contains(&key));
     }
 
     fn put(

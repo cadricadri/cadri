@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use crate::memory::s3::S3Books;
 use crate::memory::types::{Author, Change};
 
-use super::error::Fail;
 use super::protocol::pkt;
 use super::service::{Backend, MemoryService};
 
@@ -42,32 +41,6 @@ fn write(path: &str, content: &str) -> Change {
 fn service_header_is_the_classic_pkt_line() {
     let header = pkt("# service=git-upload-pack\n");
     assert_eq!(header, b"001e# service=git-upload-pack\n");
-}
-
-#[test]
-fn bundle_put_without_cas_leaves_the_ref_unchanged() {
-    let root = temp();
-    let service = MemoryService::open_local(&root, None, false);
-    let repo = "org_test_repo_0";
-    service
-        .put_bundle(repo, &"a".repeat(40), b"bundle")
-        .unwrap();
-    assert_eq!(service.read_ref(repo).unwrap(), None);
-    service.cas_ref(repo, None, &"a".repeat(40)).unwrap();
-    assert_eq!(service.read_ref(repo).unwrap().unwrap(), "a".repeat(40));
-    assert!(matches!(
-        service.cas_ref(repo, None, &"b".repeat(40)),
-        Err(Fail::Conflict)
-    ));
-    service
-        .cas_ref(repo, Some(&"a".repeat(40)), &"b".repeat(40))
-        .unwrap();
-    assert!(matches!(
-        service.cas_ref(repo, Some(&"a".repeat(40)), &"c".repeat(40)),
-        Err(Fail::Conflict)
-    ));
-    assert_eq!(service.read_ref(repo).unwrap().unwrap(), "b".repeat(40));
-    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
@@ -193,171 +166,66 @@ fn two_caches_share_one_ref_and_both_changes_land() {
 }
 
 #[test]
-fn stale_mount_does_not_hide_the_published_tip() {
+fn a_stale_mount_does_not_hide_the_legacy_tip_and_fills_in_a_missing_bundle() {
     let root = temp();
+    let history = legacy_history(
+        &root.join("legacy"),
+        &[&[("note.md", "one")], &[("note.md", "two")]],
+    );
+    let (stale, current) = (&history[0], &history[1]);
+    let repo = "org_cache_repo_0";
     let mount = root.join("mount");
-    fs::create_dir_all(&mount).unwrap();
+    legacy_layout(&root.join("data/store"), repo, current, true);
+    legacy_layout(&mount, repo, stale, true);
     let service = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
-    let repo = "org_cache_repo_0";
-    let (user, label) = author();
-    service
-        .commit(repo, user, label, "first", &[write("note.md", "one")])
-        .unwrap();
-    let store_dir = root.join("data/store");
-    copy_dir(&store_dir, &mount);
-    service
-        .commit(repo, user, label, "second", &[write("note.md", "two")])
-        .unwrap();
-    let git_dir = root.join("data/repos").join(format!("{repo}.git"));
-    fs::remove_dir_all(&git_dir).unwrap();
-    let restarted = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
-    let fresh = restarted.read_store(repo).unwrap();
-    assert_eq!(fresh.files[0].content, "two");
+    assert_eq!(service.read_store(repo).unwrap().files[0].content, "two");
 
-    copy_dir(&store_dir, &mount);
-    let object = store_dir.join("repos").join(repo).join("objects");
-    for entry in fs::read_dir(&object).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            fs::remove_file(path).unwrap();
-        }
-    }
-    fs::remove_dir_all(&git_dir).ok();
-    let restarted = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
+    // The store has the legacy ref but lost the bundle; the mount has both.
+    legacy_layout(&root.join("other/store"), repo, current, false);
+    legacy_layout(&mount, repo, current, true);
+    let restarted = MemoryService::open_local(root.join("other"), Some(mount), false);
     let from_mount = restarted.read_store(repo).unwrap();
     assert_eq!(from_mount.files[0].content, "two");
-    let _ = fs::remove_dir_all(root);
-}
-
-fn copy_dir(from: &Path, to: &Path) {
-    let _ = fs::remove_dir_all(to);
-    fs::create_dir_all(to).unwrap();
-    for entry in walkdir_files(from) {
-        let rel = entry.strip_prefix(from).unwrap();
-        let dest = to.join(rel);
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::copy(&entry, dest).unwrap();
-    }
-}
-
-fn walkdir_files(dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    files
-}
-
-#[test]
-fn s3_cas_then_a_second_cache_reads_the_tip() {
-    let fake = crate::memory::s3::FakeS3::start();
-    let client = S3Books::test_client(&fake.endpoint);
-    let root = temp();
-    let repo = "org_test_repo_0";
-    let sha_a = "a".repeat(40);
-    let sha_b = "b".repeat(40);
-    let left = MemoryService::open_s3(
-        root.join("left"),
-        None,
-        false,
-        S3Books::from_client("memories", client.clone()),
-    );
-    left.put_bundle(repo, &sha_a, b"bundle-a").unwrap();
-    assert_eq!(left.read_ref(repo).unwrap(), None);
-    left.cas_ref(repo, None, &sha_a).unwrap();
-    assert!(matches!(
-        left.cas_ref(repo, None, &sha_b),
-        Err(Fail::Conflict)
-    ));
-    left.cas_ref(repo, Some(&sha_a), &sha_b).unwrap();
-    assert!(matches!(
-        left.cas_ref(repo, Some(&sha_a), &"c".repeat(40)),
-        Err(Fail::Conflict)
-    ));
-    let right = MemoryService::open_s3(
-        root.join("right"),
-        None,
-        false,
-        S3Books::from_client("memories", client),
-    );
-    assert_eq!(right.read_ref(repo).unwrap().unwrap(), sha_b);
+    assert_eq!(restarted.read_log(repo).unwrap().len(), 2);
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn s3_commit_is_read_by_another_cache_and_ignores_a_stale_mount() {
+fn s3_legacy_book_ignores_a_stale_mount_and_falls_back_to_it_for_a_missing_bundle() {
     let fake = crate::memory::s3::FakeS3::start();
-    let client = S3Books::test_client(&fake.endpoint);
     let root = temp();
+    let history = legacy_history(
+        &root.join("legacy"),
+        &[&[("note.md", "one")], &[("note.md", "two")]],
+    );
+    let (stale, current) = (&history[0], &history[1]);
     let mount = root.join("mount");
-    fs::create_dir_all(&mount).unwrap();
+    let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
     let repo = "org_cache_repo_0";
-    let (user, label) = author();
-    let writer = MemoryService::open_s3(
-        root.join("writer"),
-        Some(mount.clone()),
-        false,
-        S3Books::from_client("memories", client.clone()),
-    );
-    writer
-        .commit(repo, user, label, "first", &[write("note.md", "one")])
-        .unwrap();
-    let first = writer.read_ref(repo).unwrap().unwrap();
-    let bundle = writer.load_bundle(repo, &first).unwrap();
-    let mount_repo = mount.join("repos").join(repo);
-    fs::create_dir_all(mount_repo.join("objects")).unwrap();
-    fs::create_dir_all(mount_repo.join("refs/heads")).unwrap();
-    fs::write(mount_repo.join("refs/heads/main"), format!("{first}\n")).unwrap();
-    fs::write(mount_repo.join("objects").join(&first), &bundle).unwrap();
+    legacy_s3(&books, repo, current, true);
+    legacy_layout(&mount, repo, stale, true);
+    let reader = MemoryService::open_s3(root.join("reader"), Some(mount.clone()), false, books);
+    assert_eq!(reader.read_store(repo).unwrap().files[0].content, "two");
 
-    writer
-        .commit(repo, user, label, "second", &[write("note.md", "two")])
-        .unwrap();
-    let second = writer.read_ref(repo).unwrap().unwrap();
-    assert_ne!(first, second);
-
-    let reader = MemoryService::open_s3(
-        root.join("reader"),
-        Some(mount.clone()),
-        false,
-        S3Books::from_client("memories", client),
-    );
-    let fresh = reader.read_store(repo).unwrap();
-    assert_eq!(fresh.files[0].content, "two");
-
-    let second_bundle = reader.load_bundle(repo, &second).unwrap();
-    fs::write(mount_repo.join("refs/heads/main"), format!("{second}\n")).unwrap();
-    fs::write(mount_repo.join("objects").join(&second), &second_bundle).unwrap();
-    fake.remove(&format!("repos/{repo}/objects/{second}"));
-    fs::remove_dir_all(root.join("reader/repos")).ok();
-    let restarted = MemoryService::open_s3(
-        root.join("reader"),
-        Some(mount.clone()),
-        false,
-        S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
-    );
-    let from_mount = restarted.read_store(repo).unwrap();
-    assert_eq!(from_mount.files[0].content, "two");
+    let other = "org_other_repo_0";
+    let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
+    legacy_s3(&books, other, current, false);
+    legacy_layout(&mount, other, current, true);
+    let restarted = MemoryService::open_s3(root.join("restarted"), Some(mount), false, books);
+    assert_eq!(restarted.read_store(other).unwrap().files[0].content, "two");
+    assert!(fake
+        .keys()
+        .contains(&format!("repos/{other}/checkpoint/00000000000000000000")));
     let _ = fs::remove_dir_all(root);
 }
 
 #[test]
-fn ui_commit_returns_conflict_after_eight_lost_swaps() {
+fn ui_commit_returns_conflict_after_eight_lost_log_creates() {
     let root = temp();
     let service = MemoryService::open_local(&root, None, false);
     let repo = "org_test_repo_0";
     let (user, label) = author();
-    service.fail_next_cas(8);
+    service.fail_next_log_create(8);
     let err = service
         .commit(
             repo,
@@ -429,13 +297,7 @@ fn one_commit_produces_the_same_bundle_twice() {
         .unwrap();
     let sha = service.read_log(repo).unwrap()[0].id.clone();
     let git_dir = root.join("repos").join(format!("{repo}.git"));
-    let stored = fs::read(
-        root.join("store/repos")
-            .join(repo)
-            .join("objects")
-            .join(&sha),
-    )
-    .unwrap();
+    let stored = fs::read(log_file(&root.join("store"), repo, 1)).unwrap();
     let first = rebuild_bundle(&git_dir, &sha);
     let second = rebuild_bundle(&git_dir, &sha);
     assert_eq!(stored, first);
@@ -444,15 +306,10 @@ fn one_commit_produces_the_same_bundle_twice() {
 }
 
 #[test]
-fn s3_client_quotes_the_etag_and_skips_checksums() {
+fn s3_log_creates_skip_checksums() {
     let fake = crate::memory::s3::FakeS3::start();
     let root = temp();
-    let service = MemoryService::open_s3(
-        &root,
-        None,
-        false,
-        S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
-    );
+    let service = counted_s3_service(&root, &fake);
     let repo = "org_cache_repo_0";
     let (user, label) = author();
     service
@@ -461,11 +318,7 @@ fn s3_client_quotes_the_etag_and_skips_checksums() {
     service
         .commit(repo, user, label, "second", &[write("note.md", "two")])
         .unwrap();
-    let tag = fake.last_ref_match().expect("ref update sent If-Match");
-    assert!(
-        tag.starts_with('"') && tag.ends_with('"') && tag.len() == 34,
-        "{tag}"
-    );
+    assert_eq!(service.read_tip(repo).unwrap().1, 2);
     assert!(!fake.saw_checksum());
     let _ = fs::remove_dir_all(root);
 }
@@ -963,5 +816,421 @@ fn a_push_of_three_commits_validates_with_a_constant_number_of_git_processes() {
     }
     let store = service.read_store(repo).unwrap();
     assert_eq!(store.files.len(), 1003);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn log_file(store: &Path, repo: &str, seq: u64) -> PathBuf {
+    store
+        .join("repos")
+        .join(repo)
+        .join(super::durable::log_key(seq))
+}
+
+fn log_header(store: &Path, repo: &str, seq: u64) -> super::bundle::BundleHeader {
+    super::bundle::parse_bundle_header(&fs::read(log_file(store, repo, seq)).unwrap()).unwrap()
+}
+
+/// One state of a book written by the engine before the log format: the tip and
+/// the full-history bundle of `refs/cadri/stage` stored under `objects/<tip>`.
+struct Legacy {
+    tip: String,
+    bundle: Vec<u8>,
+}
+
+/// Commits each step in a scratch repo, the way the old engine did, and returns
+/// the legacy layout after every step.
+fn legacy_history(dir: &Path, steps: &[&[(&str, &str)]]) -> Vec<Legacy> {
+    fs::create_dir_all(dir).unwrap();
+    let run = |args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["-c", "user.name=Ada", "-c", "user.email=ada@cadri.local"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    run(&["init", "-q", "-b", "main"]);
+    let mut states = Vec::new();
+    for (index, files) in steps.iter().enumerate() {
+        for (path, content) in files.iter() {
+            let target = dir.join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::write(target, content).unwrap();
+        }
+        run(&["add", "-A"]);
+        let message = format!(
+            "legacy {index}\n\nCadri-Author-Kind: human\nCadri-Author-Id: ada\nCadri-Author-Label: Ada\n"
+        );
+        run(&["commit", "-q", "-m", &message]);
+        let tip = run(&["rev-parse", "HEAD"]);
+        run(&["update-ref", "refs/cadri/stage", &tip]);
+        let path = dir.join(".git").join(format!("{tip}.bundle"));
+        run(&[
+            "bundle",
+            "create",
+            "-q",
+            &path.to_string_lossy(),
+            "refs/cadri/stage",
+        ]);
+        run(&["update-ref", "-d", "refs/cadri/stage"]);
+        states.push(Legacy {
+            tip,
+            bundle: fs::read(&path).unwrap(),
+        });
+    }
+    states
+}
+
+/// Writes the legacy keys for `repo` under a directory store (or mount) root.
+fn legacy_layout(root: &Path, repo: &str, legacy: &Legacy, with_bundle: bool) {
+    let book = root.join("repos").join(repo);
+    fs::create_dir_all(book.join("refs/heads")).unwrap();
+    fs::write(book.join("refs/heads/main"), format!("{}\n", legacy.tip)).unwrap();
+    if with_bundle {
+        fs::create_dir_all(book.join("objects")).unwrap();
+        fs::write(book.join("objects").join(&legacy.tip), &legacy.bundle).unwrap();
+    }
+}
+
+fn legacy_s3(books: &S3Books, repo: &str, legacy: &Legacy, with_bundle: bool) {
+    let tip = format!("{}\n", legacy.tip);
+    assert!(books
+        .create_key(repo, "refs/heads/main", tip.as_bytes())
+        .unwrap());
+    if with_bundle {
+        let key = format!("objects/{}", legacy.tip);
+        assert!(books.create_key(repo, &key, &legacy.bundle).unwrap());
+    }
+}
+
+fn file_pairs(store: &crate::memory::types::MemoryStore) -> Vec<(String, String)> {
+    store
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), file.content.clone()))
+        .collect()
+}
+
+#[test]
+fn the_first_write_creates_log_entry_one_without_prerequisites() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_log_repo_0";
+    let (user, label) = author();
+    service
+        .commit(repo, user, label, "first", &[write("a.md", "A")])
+        .unwrap();
+    let tip = service.read_log(repo).unwrap()[0].id.clone();
+    let header = log_header(&root.join("store"), repo, 1);
+    assert!(header.prerequisites.is_empty());
+    assert_eq!(header.refs, [(tip.clone(), "refs/cadri/stage".to_string())]);
+    assert_eq!(service.read_tip(repo).unwrap(), (Some(tip), 1));
+    let size = fs::metadata(log_file(&root.join("store"), repo, 1))
+        .unwrap()
+        .len();
+    assert_eq!(service.writer_state(repo), (1, 0, size));
+    let book = root.join("store/repos").join(repo);
+    assert!(!book.join("refs").exists());
+    assert!(!book.join("objects").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn the_second_write_creates_log_entry_two_whose_prerequisite_is_the_first_tip() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_log_repo_0";
+    let (user, label) = author();
+    service
+        .commit(repo, user, label, "first", &[write("a.md", "A")])
+        .unwrap();
+    service
+        .commit(repo, user, label, "second", &[write("b.md", "B")])
+        .unwrap();
+    let log = service.read_log(repo).unwrap();
+    let (second, first) = (&log[0].id, &log[1].id);
+    let header = log_header(&root.join("store"), repo, 2);
+    assert_eq!(header.prerequisites, std::slice::from_ref(first));
+    assert_eq!(
+        header.refs,
+        [(second.clone(), "refs/cadri/stage".to_string())]
+    );
+    assert_eq!(service.read_tip(repo).unwrap().1, 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_one_line_edit_on_a_1000_file_book_stores_less_than_16_kib() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_size_repo_0";
+    let (user, label) = author();
+    let body: String = (0..40)
+        .map(|line| format!("line {line} of a note\n"))
+        .collect();
+    let files: Vec<Change> = (0..1000)
+        .map(|index| write(&format!("notes/{}/{index}.md", index % 20), &body))
+        .collect();
+    service.commit(repo, user, label, "seed", &files).unwrap();
+    let edited = body.replacen("line 7 of a note", "line 7 was edited", 1);
+    service
+        .commit(
+            repo,
+            user,
+            label,
+            "one line",
+            &[write("notes/3/3.md", &edited)],
+        )
+        .unwrap();
+    let size = fs::metadata(log_file(&root.join("store"), repo, 2))
+        .unwrap()
+        .len();
+    println!("bench log_entry_one_line_edit_1000_files_bytes={size}");
+    assert!(size < 16 * 1024, "a one-line edit stored {size} bytes");
+    let _ = fs::remove_dir_all(root);
+}
+
+fn assert_restart_loads_the_same_book(first: &MemoryService, fresh: &MemoryService, repo: &str) {
+    let (user, label) = author();
+    first
+        .commit(
+            repo,
+            user,
+            label,
+            "seed",
+            &[
+                write("a.md", "A"),
+                write("b.md", "B"),
+                write("dir/.keep", ""),
+            ],
+        )
+        .unwrap();
+    first
+        .commit(
+            repo,
+            user,
+            label,
+            "move",
+            &[
+                Change::Rename {
+                    from: "a.md".into(),
+                    to: "dir/a.md".into(),
+                },
+                write("b.md", "B2"),
+            ],
+        )
+        .unwrap();
+    first
+        .commit(repo, user, label, "third", &[write("c.md", "C")])
+        .unwrap();
+    let before = first.read_store(repo).unwrap();
+    let loaded = fresh.read_store(repo).unwrap();
+    assert_eq!(file_pairs(&loaded), file_pairs(&before));
+    assert_eq!(loaded.directories, before.directories);
+    assert_eq!(fresh.read_tip(repo).unwrap(), first.read_tip(repo).unwrap());
+    assert_eq!(fresh.read_tip(repo).unwrap().1, 3);
+    let ids = |service: &MemoryService| -> Vec<String> {
+        service
+            .read_log(repo)
+            .unwrap()
+            .into_iter()
+            .map(|commit| commit.id)
+            .collect()
+    };
+    assert_eq!(ids(fresh), ids(first));
+    assert_eq!(fresh.writer_state(repo).0, 3);
+    // The restarted service keeps appending where the first one stopped.
+    fresh
+        .commit(repo, user, label, "after restart", &[write("d.md", "D")])
+        .unwrap();
+    assert_eq!(fresh.read_tip(repo).unwrap().1, 4);
+}
+
+#[test]
+fn a_restarted_service_loads_the_same_tip_and_files() {
+    let root = temp();
+    let repo = "org_restart_repo_0";
+    let first = MemoryService::open_local(root.join("a"), None, false);
+    let fresh = MemoryService::open_at(
+        root.join("b/repos"),
+        root.join("a/store"),
+        root.join("b/scratch"),
+    );
+    assert_restart_loads_the_same_book(&first, &fresh, repo);
+
+    let fake = crate::memory::s3::FakeS3::start();
+    let first = counted_s3_service(&root.join("s3-a"), &fake);
+    let fresh = counted_s3_service(&root.join("s3-b"), &fake);
+    assert_restart_loads_the_same_book(&first, &fresh, repo);
+    let _ = fs::remove_dir_all(root);
+}
+
+fn assert_legacy_migrates(
+    service: &dyn Fn() -> MemoryService,
+    stored: &dyn Fn(&str) -> Option<Vec<u8>>,
+    history: &[Legacy],
+    repo: &str,
+) {
+    let legacy = history.last().unwrap();
+    let first = service();
+    let files = first.read_store(repo).unwrap();
+    assert_eq!(
+        file_pairs(&files),
+        [
+            ("a.md".to_string(), "A2".to_string()),
+            ("b.md".to_string(), "B".to_string()),
+        ]
+    );
+    let log = first.read_log(repo).unwrap();
+    let ids: Vec<&str> = log.iter().map(|commit| commit.id.as_str()).collect();
+    assert_eq!(ids, [legacy.tip.as_str(), history[0].tip.as_str()]);
+    assert_eq!(log[1].message, "legacy 0");
+    assert_eq!(first.read_tip(repo).unwrap(), (Some(legacy.tip.clone()), 0));
+    assert_eq!(first.writer_state(repo), (0, 0, 0));
+    assert_eq!(
+        stored("checkpoint/00000000000000000000").as_deref(),
+        Some(legacy.bundle.as_slice())
+    );
+
+    let (user, label) = author();
+    first
+        .commit(repo, user, label, "after migration", &[write("c.md", "C")])
+        .unwrap();
+    let entry = stored("log/00000000000000000001").unwrap();
+    let header = super::bundle::parse_bundle_header(&entry).unwrap();
+    assert_eq!(header.prerequisites, std::slice::from_ref(&legacy.tip));
+    assert_eq!(first.writer_state(repo).0, 1);
+
+    let restarted = service();
+    let files = restarted.read_store(repo).unwrap();
+    assert_eq!(files.files.len(), 3);
+    assert_eq!(restarted.read_log(repo).unwrap().len(), 3);
+    assert_eq!(
+        restarted.read_tip(repo).unwrap(),
+        first.read_tip(repo).unwrap()
+    );
+    assert_eq!(restarted.writer_state(repo), (1, 0, entry.len() as u64));
+    // Legacy keys are left as they were.
+    assert_eq!(
+        stored("refs/heads/main"),
+        Some(format!("{}\n", legacy.tip).into_bytes())
+    );
+    assert_eq!(
+        stored(&format!("objects/{}", legacy.tip)),
+        Some(legacy.bundle.clone())
+    );
+}
+
+#[test]
+fn a_legacy_book_migrates_to_checkpoint_zero_and_keeps_its_history() {
+    let root = temp();
+    let history = legacy_history(
+        &root.join("legacy"),
+        &[&[("a.md", "A"), ("b.md", "B")], &[("a.md", "A2")]],
+    );
+    let repo = "org_legacy_repo_0";
+    let store = root.join("store");
+    legacy_layout(&store, repo, history.last().unwrap(), true);
+    let next = std::cell::Cell::new(0);
+    let service = || {
+        next.set(next.get() + 1);
+        let name = format!("server-{}", next.get());
+        MemoryService::open_at(
+            root.join(&name).join("repos"),
+            store.clone(),
+            root.join(&name).join("scratch"),
+        )
+    };
+    let stored = |key: &str| fs::read(store.join("repos").join(repo).join(key)).ok();
+    assert_legacy_migrates(&service, &stored, &history, repo);
+
+    let fake = crate::memory::s3::FakeS3::start();
+    let books = S3Books::from_client("memories", S3Books::test_client(&fake.endpoint));
+    legacy_s3(&books, repo, history.last().unwrap(), true);
+    let service = || {
+        next.set(next.get() + 1);
+        counted_s3_service(&root.join(format!("s3-{}", next.get())), &fake)
+    };
+    let stored = |key: &str| books.get_key(repo, key).unwrap();
+    assert_legacy_migrates(&service, &stored, &history, repo);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_lost_log_create_catches_up_and_the_ui_commit_retries() {
+    let root = temp();
+    let store = root.join("store");
+    let server = |name: &str| {
+        MemoryService::open_at(
+            root.join(name).join("repos"),
+            store.clone(),
+            root.join(name).join("scratch"),
+        )
+    };
+    let (first, second) = (server("first"), server("second"));
+    let repo = "org_lost_repo_0";
+    let (user, label) = author();
+    first
+        .commit(repo, user, label, "seed", &[write("seed.md", "S")])
+        .unwrap();
+    assert_eq!(second.read_store(repo).unwrap().files.len(), 1);
+    first
+        .commit(repo, user, label, "first", &[write("a.md", "A")])
+        .unwrap();
+    // `second` still believes log entry 2 is free.
+    let landed = second
+        .commit(repo, user, label, "second", &[write("b.md", "B")])
+        .unwrap();
+    let paths: Vec<&str> = landed.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.md", "b.md", "seed.md"]);
+    assert_eq!(second.read_tip(repo).unwrap().1, 3);
+    assert_eq!(second.writer_state(repo).0, 3);
+    let log = second.read_log(repo).unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[0].message, "second");
+    let header = log_header(&store, repo, 3);
+    assert_eq!(header.prerequisites, [log[1].id.clone()]);
+    let third = server("third");
+    assert_eq!(
+        file_pairs(&third.read_store(repo).unwrap()),
+        file_pairs(&landed)
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_log_gap_is_reported_not_repaired() {
+    let root = temp();
+    let service = MemoryService::open_local(root.join("a"), None, false);
+    let repo = "org_gap_repo_0";
+    let (user, label) = author();
+    for (index, name) in ["a.md", "b.md", "c.md"].iter().enumerate() {
+        service
+            .commit(
+                repo,
+                user,
+                label,
+                &format!("write {index}"),
+                &[write(name, "x")],
+            )
+            .unwrap();
+    }
+    let store = root.join("a/store");
+    fs::remove_file(log_file(&store, repo, 2)).unwrap();
+    let fresh = MemoryService::open_at(root.join("b/repos"), store.clone(), root.join("b/scratch"));
+    let err = fresh.read_store(repo).unwrap_err();
+    assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.message, "memory log gap after 1");
+    // Nothing was rewritten to paper over the gap.
+    assert!(!log_file(&store, repo, 2).exists());
+    assert!(log_file(&store, repo, 3).exists());
     let _ = fs::remove_dir_all(root);
 }
