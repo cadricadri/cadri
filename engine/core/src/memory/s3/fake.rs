@@ -130,10 +130,15 @@ async fn fake_route(
     use axum::response::Response;
 
     let path = request.uri().path().trim_start_matches('/');
-    let Some((_, key)) = path.split_once('/') else {
-        return xml(StatusCode::NOT_FOUND, "NoSuchKey");
+    let query = parse_query(request.uri().query().unwrap_or(""));
+    let listing = request.method().as_str() == "GET"
+        && query.get("list-type").map(String::as_str) == Some("2")
+        && !path.trim_end_matches('/').contains('/');
+    let key = match path.split_once('/') {
+        Some((_, key)) => key.to_string(),
+        None if listing => String::new(),
+        None => return xml(StatusCode::NOT_FOUND, "NoSuchKey"),
     };
-    let key = key.to_string();
     let latency = {
         let mut state = state.lock().unwrap();
         match request.method().as_str() {
@@ -145,6 +150,9 @@ async fn fake_route(
     };
     if latency > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(latency)).await;
+    }
+    if listing {
+        return list_objects(&state, &query);
     }
     match request.method().as_str() {
         "GET" => {
@@ -222,6 +230,101 @@ async fn fake_route(
         }
         _ => xml(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed"),
     }
+}
+
+fn parse_query(raw: &str) -> std::collections::HashMap<String, String> {
+    raw.split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (percent_decode(name), percent_decode(value))
+        })
+        .collect()
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'%' && at + 2 < bytes.len())
+            .then(|| std::str::from_utf8(&bytes[at + 1..at + 3]).ok())
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(if bytes[at] == b'+' { b' ' } else { bytes[at] });
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `ListObjectsV2`. The continuation token is the last key of the previous page.
+fn list_objects(
+    state: &std::sync::Mutex<FakeState>,
+    query: &std::collections::HashMap<String, String>,
+) -> axum::response::Response {
+    use axum::body::Body;
+    use axum::http::{header, StatusCode};
+    use axum::response::Response;
+
+    let prefix = query.get("prefix").map(String::as_str).unwrap_or("");
+    let after = query
+        .get("continuation-token")
+        .or_else(|| query.get("start-after"))
+        .cloned();
+    let max = query
+        .get("max-keys")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1000)
+        .max(1);
+    let mut matching: Vec<(String, usize)> = state
+        .lock()
+        .unwrap()
+        .objects
+        .iter()
+        .filter(|(key, _)| key.starts_with(prefix))
+        .filter(|(key, _)| after.as_deref().is_none_or(|after| key.as_str() > after))
+        .map(|(key, bytes)| (key.clone(), bytes.len()))
+        .collect();
+    matching.sort();
+    let truncated = matching.len() > max;
+    matching.truncate(max);
+    let mut body = String::from(r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>"#);
+    body.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(prefix)));
+    body.push_str(&format!("<KeyCount>{}</KeyCount>", matching.len()));
+    body.push_str(&format!("<MaxKeys>{max}</MaxKeys>"));
+    body.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+    for (key, size) in &matching {
+        body.push_str(&format!(
+            "<Contents><Key>{}</Key><Size>{size}</Size></Contents>",
+            xml_escape(key)
+        ));
+    }
+    if let (true, Some((last, _))) = (truncated, matching.last()) {
+        body.push_str(&format!(
+            "<NextContinuationToken>{}</NextContinuationToken>",
+            xml_escape(last)
+        ));
+    }
+    body.push_str("</ListBucketResult>");
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/xml")
+        .body(Body::from(body))
+        .unwrap()
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn header_str(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
