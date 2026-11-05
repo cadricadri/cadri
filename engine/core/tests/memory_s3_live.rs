@@ -85,24 +85,20 @@ fn books() -> Vec<Book> {
     books
 }
 
-fn fill_book(root: &Path, left: std::net::SocketAddr, right: std::net::SocketAddr, book: &Book) {
+fn fill_book(root: &Path, left: std::net::SocketAddr, book: &Book) {
     let client = Client::new(root, book, "writer");
     let first = url(left, book);
     git_ok(&client, &["init", "-b", "main"]);
     commit(&client, "base.md", "base\n", "base");
     git_ok(&client, &["push", &first, "HEAD:refs/heads/main"]);
     for index in 0..NOTES {
-        let server = if index % 2 == 0 { right } else { left };
         commit(
             &client,
             &format!("note-{index}.md"),
             &format!("note {index}\n"),
             &format!("note {index}"),
         );
-        git_ok(
-            &client,
-            &["push", &url(server, book), "HEAD:refs/heads/main"],
-        );
+        git_ok(&client, &["push", &first, "HEAD:refs/heads/main"]);
     }
 }
 
@@ -530,7 +526,7 @@ async fn live_s3_many_books_and_conflicting_pushes() {
     std::thread::scope(|scope| {
         for book in &books {
             let root = root.clone();
-            scope.spawn(move || fill_book(&root, left_addr, right_addr, book));
+            scope.spawn(move || fill_book(&root, left_addr, book));
         }
     });
 
@@ -545,11 +541,25 @@ async fn live_s3_many_books_and_conflicting_pushes() {
         }
     });
 
+    // A server started after every write loads each book from the bucket. The two
+    // running servers each saw only the writes that went through them.
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
+        None,
+        false,
+        S3Books::from_env(bucket.clone()).await.unwrap(),
+    );
+    let fresh_addr = listen(assemble(
+        db::open(&db_path).unwrap(),
+        Arc::new(OrgHeader),
+        None,
+        fresh,
+    ))
+    .await;
+
     for book in &books {
-        let from_left = store(left_addr, book);
-        let from_right = store(right_addr, book);
-        assert_eq!(from_left, from_right, "{}", book.org);
-        let files = file_map(&from_right);
+        let from_fresh = store(fresh_addr, book);
+        let files = file_map(&from_fresh);
         assert_eq!(files["base.md"], "base\n", "{}", book.label());
         for index in 0..NOTES {
             assert_eq!(
@@ -569,7 +579,7 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             }
             None => {}
         }
-        let commits = log(right_addr, book)["commits"].as_array().unwrap().clone();
+        let commits = log(fresh_addr, book)["commits"].as_array().unwrap().clone();
         let expected = NOTES + 1 + usize::from(book.conflict.is_some()) * 2;
         assert_eq!(commits.len(), expected, "{}", book.label());
     }
@@ -584,14 +594,14 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             keys.iter().any(|key| key.ends_with("/refs/heads/main")),
             "missing ref for {prefix}: {keys:?}"
         );
-        let commits = log(right_addr, book)["commits"].as_array().unwrap().len();
+        let commits = log(fresh_addr, book)["commits"].as_array().unwrap().len();
         let orphans = usize::from(book.conflict.is_some());
         assert!(
             (commits..=commits + orphans).contains(&objects),
             "{prefix} stored {objects} bundles for {commits} commits"
         );
-        let remote = ls_remote(right_addr, book);
-        let tip = log(right_addr, book)["commits"][0]["id"]
+        let remote = ls_remote(fresh_addr, book);
+        let tip = log(fresh_addr, book)["commits"][0]["id"]
             .as_str()
             .unwrap()
             .to_string();

@@ -279,6 +279,7 @@ impl MemoryStore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         MemoryStore {
             files: Vec::new(),

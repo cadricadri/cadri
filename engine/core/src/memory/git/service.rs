@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -20,8 +20,9 @@ use super::protocol::{
     advertise_receive, advertise_upload, index_pack, inspect, ready, report, split_pack,
     unpack_fail, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
 };
+use super::snapshot::{snapshot_from_repo, Snapshot};
 use super::store::{cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path};
-use super::view::{blame_file, read_commits, view_tree};
+use super::view::{blame_file, read_commits};
 
 type FileBlames = HashMap<String, Vec<BlameEntry>>;
 
@@ -36,9 +37,7 @@ struct Inner {
     scratch: PathBuf,
     mount: Option<PathBuf>,
     jail: bool,
-    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    /// Tree snapshot keyed by the local tip. Blame and history are not in here.
-    cache: Mutex<HashMap<String, (String, MemoryStore)>>,
+    books: Mutex<HashMap<String, Arc<Book>>>,
     logs: Mutex<HashMap<String, (String, Vec<MemoryCommit>)>>,
     blames: Mutex<HashMap<String, (String, FileBlames)>>,
     /// Test-only rendezvous so two servers reach the compare-and-swap together.
@@ -46,6 +45,24 @@ struct Inner {
     /// Test-only. The next this many compare-and-swaps fail, so a UI commit can
     /// be shown exhausting its retries.
     cas_failures: Mutex<u32>,
+}
+
+/// One book in this process. Writers hold `writer`; readers only clone the snapshot
+/// `Arc`, so a slow write never blocks a read.
+struct Book {
+    writer: Mutex<WriterState>,
+    snapshot: RwLock<Option<Arc<Snapshot>>>,
+}
+
+struct WriterState;
+
+impl Book {
+    fn current(&self) -> Option<Arc<Snapshot>> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
 }
 
 #[derive(Clone)]
@@ -95,8 +112,7 @@ impl MemoryService {
                 scratch,
                 mount,
                 jail,
-                locks: Mutex::new(HashMap::new()),
-                cache: Mutex::new(HashMap::new()),
+                books: Mutex::new(HashMap::new()),
                 logs: Mutex::new(HashMap::new()),
                 blames: Mutex::new(HashMap::new()),
                 gate: Mutex::new(None),
@@ -121,11 +137,12 @@ impl MemoryService {
         *self.inner.gate.lock().expect("publish gate") = Some(gate);
     }
 
-    /// Tree for the memories page. Does not take the book lock, so a push in
-    /// progress cannot stall it. If the tip moved and a writer holds the lock,
-    /// the previous local tree is returned.
+    /// Tree for the memories page, from memory. Never takes the writer lock once
+    /// the book is loaded.
     pub(crate) fn read_store(&self, repo_id: &str) -> Result<MemoryStore, ApiError> {
-        self.read_tree(repo_id).map_err(into_api)
+        self.snapshot(repo_id)
+            .map(|snapshot| snapshot.to_store())
+            .map_err(into_api)
     }
 
     pub(crate) fn read_log(&self, repo_id: &str) -> Result<Vec<MemoryCommit>, ApiError> {
@@ -142,13 +159,13 @@ impl MemoryService {
 
     /// Test helper: hold the write lock. Readers must not wait on this.
     #[cfg(test)]
-    pub(crate) fn hold_repo(
+    pub(crate) fn hold_writer(
         &self,
         repo_id: &str,
         how_long: Duration,
         entered: &std::sync::atomic::AtomicBool,
     ) {
-        self.with_repo(repo_id, |_repo| {
+        self.with_writer(repo_id, |_repo, _book, _writer| {
             entered.store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(how_long);
             Ok(())
@@ -165,8 +182,14 @@ impl MemoryService {
         changes: &[Change],
     ) -> Result<MemoryStore, ApiError> {
         for _ in 0..8 {
-            match self.with_repo(repo_id, |repo| {
-                self.commit_once(repo, repo_id, user_id, label, message, changes)
+            match self.with_writer(repo_id, |repo, book, _writer| {
+                match self.commit_once(repo, repo_id, book, user_id, label, message, changes) {
+                    Err(Fail::Conflict) => {
+                        self.refresh(repo, repo_id, book)?;
+                        Err(Fail::Conflict)
+                    }
+                    other => other,
+                }
             }) {
                 Ok(store) => return Ok(store),
                 Err(Fail::Conflict) => continue,
@@ -185,61 +208,142 @@ impl MemoryService {
         body: &[u8],
         user_id: &str,
     ) -> Result<GitHttp, ApiError> {
-        self.with_repo(repo_id, |repo| {
-            self.git_once(repo, repo_id, path, is_post, service, body, user_id)
+        self.with_writer(repo_id, |repo, book, _writer| {
+            self.git_once(repo, repo_id, book, path, is_post, service, body, user_id)
         })
         .map_err(into_api)
     }
 
-    fn with_repo<T>(
-        &self,
-        repo_id: &str,
-        f: impl FnOnce(&Repo) -> Result<T, Fail>,
-    ) -> Result<T, Fail> {
+    fn book(&self, repo_id: &str) -> Result<Arc<Book>, Fail> {
         if !valid_repo_id(repo_id) {
             return Err(Fail::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "invalid memory repo",
             ));
         }
-        let lock = self.book_lock(repo_id)?;
-        let _guard = lock
+        let mut books = self
+            .inner
+            .books
             .lock()
-            .map_err(|_| Fail::api(StatusCode::INTERNAL_SERVER_ERROR, "memory lock poisoned"))?;
-        let git_dir = self.inner.repos.join(format!("{repo_id}.git"));
-        let scratch = self.inner.scratch.join(repo_id);
-        fs::create_dir_all(&scratch).map_err(|err| Fail::git(err.to_string()))?;
-        let repo = Repo {
-            git_dir,
-            scratch,
-            jail: self.inner.jail,
-        };
-        ensure_repo(&repo)?;
-        f(&repo)
+            .unwrap_or_else(|err| err.into_inner());
+        Ok(books
+            .entry(repo_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(Book {
+                    writer: Mutex::new(WriterState),
+                    snapshot: RwLock::new(None),
+                })
+            })
+            .clone())
     }
 
+    fn repo(&self, repo_id: &str) -> Result<Repo, Fail> {
+        let scratch = self.inner.scratch.join(repo_id);
+        fs::create_dir_all(&scratch).map_err(|err| Fail::git(err.to_string()))?;
+        Ok(Repo {
+            git_dir: self.inner.repos.join(format!("{repo_id}.git")),
+            scratch,
+            jail: self.inner.jail,
+        })
+    }
+
+    /// The book's current tip. Loads it from the durable store on first use.
+    fn snapshot(&self, repo_id: &str) -> Result<Arc<Snapshot>, Fail> {
+        let book = self.book(repo_id)?;
+        if let Some(snapshot) = book.current() {
+            return Ok(snapshot);
+        }
+        self.with_writer(repo_id, |_repo, book, _writer| {
+            book.current()
+                .ok_or_else(|| Fail::git("memory snapshot was not loaded"))
+        })
+    }
+
+    /// Runs `f` as the only writer of the book, with its snapshot loaded.
+    fn with_writer<T>(
+        &self,
+        repo_id: &str,
+        f: impl FnOnce(&Repo, &Book, &mut WriterState) -> Result<T, Fail>,
+    ) -> Result<T, Fail> {
+        let book = self.book(repo_id)?;
+        let mut writer = book.writer.lock().unwrap_or_else(|err| err.into_inner());
+        let repo = self.repo(repo_id)?;
+        ensure_repo(&repo)?;
+        if book.current().is_none() {
+            self.refresh(&repo, repo_id, &book)?;
+        }
+        f(&repo, &book, &mut writer)
+    }
+
+    /// Catches the local repo up with the durable store and rebuilds the snapshot.
+    fn refresh(&self, repo: &Repo, repo_id: &str, book: &Book) -> Result<(), Fail> {
+        self.sync(repo, repo_id)?;
+        let tip = local_head(repo)?;
+        let previous = book.current();
+        let seq = previous.as_ref().map_or(0, |snapshot| snapshot.seq);
+        let snapshot = snapshot_from_repo(repo, tip.as_deref(), seq, previous.as_deref())?;
+        self.install(repo_id, book, snapshot);
+        Ok(())
+    }
+
+    fn install(&self, repo_id: &str, book: &Book, snapshot: Snapshot) {
+        *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = Some(Arc::new(snapshot));
+        if let Ok(mut logs) = self.inner.logs.lock() {
+            logs.remove(repo_id);
+        }
+        if let Ok(mut blames) = self.inner.blames.lock() {
+            blames.remove(repo_id);
+        }
+    }
+
+    /// The tip was published, so the snapshot must follow. If it cannot be built the
+    /// book is marked unloaded and reloads from the durable store next time.
+    fn install_published(
+        &self,
+        repo: &Repo,
+        repo_id: &str,
+        book: &Book,
+        previous: &Snapshot,
+        tip: &str,
+    ) -> Result<Arc<Snapshot>, Fail> {
+        match snapshot_from_repo(repo, Some(tip), previous.seq, Some(previous)) {
+            Ok(snapshot) => {
+                self.install(repo_id, book, snapshot);
+                book.current()
+                    .ok_or_else(|| Fail::git("memory snapshot was not installed"))
+            }
+            Err(err) => {
+                *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = None;
+                Err(err)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // one commit: book, author, message, and changes
     fn commit_once(
         &self,
         repo: &Repo,
         repo_id: &str,
+        book: &Book,
         user_id: &str,
         label: &str,
         message: &str,
         changes: &[Change],
     ) -> Result<MemoryStore, Fail> {
-        self.sync(repo, repo_id)?;
+        let snapshot = loaded(book)?;
         let message = clean_message(message)?;
         let mut files = current_files(repo)?;
         let before = files.clone();
         apply_changes(&mut files, changes)?;
         if files == before {
-            return self.cached_tree(repo, repo_id);
+            return Ok(snapshot.to_store());
         }
         let tree = write_tree(repo, &files)?;
-        let parent = local_head(repo)?;
-        let sha = commit_tree(repo, &tree, parent.as_deref(), &message, user_id, label)?;
-        self.publish(repo, repo_id, parent.as_deref(), &sha)?;
-        self.cached_tree(repo, repo_id)
+        let parent = snapshot.tip.as_deref();
+        let sha = commit_tree(repo, &tree, parent, &message, user_id, label)?;
+        self.publish(repo, repo_id, parent, &sha)?;
+        let updated = self.install_published(repo, repo_id, book, &snapshot, &sha)?;
+        Ok(updated.to_store())
     }
 
     #[allow(clippy::too_many_arguments)] // path, verb, service, and body are one git HTTP call
@@ -247,13 +351,14 @@ impl MemoryService {
         &self,
         repo: &Repo,
         repo_id: &str,
+        book: &Book,
         path: &str,
         is_post: bool,
         service: Option<&str>,
         body: &[u8],
         user_id: &str,
     ) -> Result<GitHttp, Fail> {
-        self.sync(repo, repo_id)?;
+        let snapshot = loaded(book)?;
         match (path, is_post, service) {
             ("info/refs", false, Some("git-upload-pack")) => Ok(GitHttp::Ready {
                 content_type: UPLOAD_AD,
@@ -261,7 +366,7 @@ impl MemoryService {
             }),
             ("info/refs", false, Some("git-receive-pack")) => Ok(GitHttp::Ready {
                 content_type: RECEIVE_AD,
-                body: advertise_receive(local_head(repo)?.as_deref()),
+                body: advertise_receive(snapshot.tip.as_deref()),
             }),
             ("info/refs", false, _) => {
                 Err(Fail::api(StatusCode::BAD_REQUEST, "invalid git service"))
@@ -278,7 +383,9 @@ impl MemoryService {
                     body,
                 })
             }
-            ("git-receive-pack", true, _) => self.receive(repo, repo_id, body, user_id),
+            ("git-receive-pack", true, _) => {
+                self.receive(repo, repo_id, book, &snapshot, body, user_id)
+            }
             _ => Err(Fail::api(StatusCode::NOT_FOUND, "not found")),
         }
     }
@@ -287,6 +394,8 @@ impl MemoryService {
         &self,
         repo: &Repo,
         repo_id: &str,
+        book: &Book,
+        snapshot: &Snapshot,
         body: &[u8],
         user_id: &str,
     ) -> Result<GitHttp, Fail> {
@@ -310,7 +419,7 @@ impl MemoryService {
         if !is_hex(&command.new, 40) {
             return Ok(ready(report(Err("invalid commit"))));
         }
-        let head = local_head(repo)?;
+        let head = snapshot.tip.clone();
         if head.as_deref() == Some(command.new.as_str()) {
             return Ok(ready(report(Ok(()))));
         }
@@ -342,11 +451,23 @@ impl MemoryService {
             return Err(err);
         }
         match self.publish(repo, repo_id, old, &command.new) {
-            Ok(()) => Ok(ready(report(Ok(())))),
+            Ok(()) => {
+                self.install_published(repo, repo_id, book, snapshot, &command.new)?;
+                Ok(ready(report(Ok(()))))
+            }
             // Conventional phrasing so clients that match `non-fast-forward`
             // (including the Letta memory client) rebase and retry. A lost
             // compare-and-swap is that case: main moved, and this tip did not.
-            Err(Fail::Conflict) => Ok(ready(report(Err("non-fast-forward")))),
+            Err(Fail::Conflict) => {
+                self.refresh(repo, repo_id, book)?;
+                // A write whose response was lost may already have landed.
+                if book.current().and_then(|now| now.tip.clone()).as_deref()
+                    == Some(command.new.as_str())
+                {
+                    return Ok(ready(report(Ok(()))));
+                }
+                Ok(ready(report(Err("non-fast-forward"))))
+            }
             Err(err) => Err(err),
         }
     }
@@ -387,7 +508,6 @@ impl MemoryService {
         }
         git_ok(repo, &["update-ref", "refs/heads/main", sha], None, &[])?;
         clear_stage(repo);
-        self.drop_view_cache(repo_id);
         Ok(())
     }
 
@@ -426,73 +546,9 @@ impl MemoryService {
         Ok(())
     }
 
-    fn book_lock(&self, repo_id: &str) -> Result<Arc<Mutex<()>>, Fail> {
-        let mut locks =
-            self.inner.locks.lock().map_err(|_| {
-                Fail::api(StatusCode::INTERNAL_SERVER_ERROR, "memory lock poisoned")
-            })?;
-        Ok(locks
-            .entry(repo_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone())
-    }
-
-    /// Runs `f` only when the book lock is free. `Ok(None)` means a writer holds it.
-    fn with_book_now<T>(
-        &self,
-        repo_id: &str,
-        f: impl FnOnce() -> Result<T, Fail>,
-    ) -> Result<Option<T>, Fail> {
-        let lock = self.book_lock(repo_id)?;
-        let outcome = match lock.try_lock() {
-            Ok(_guard) => f().map(Some),
-            Err(TryLockError::WouldBlock) => Ok(None),
-            Err(TryLockError::Poisoned(_)) => Err(Fail::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "memory lock poisoned",
-            )),
-        };
-        outcome
-    }
-
-    fn prepare(&self, repo_id: &str) -> Result<Option<Repo>, Fail> {
-        if !valid_repo_id(repo_id) {
-            return Err(Fail::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid memory repo",
-            ));
-        }
-        let git_dir = self.inner.repos.join(format!("{repo_id}.git"));
-        let scratch = self.inner.scratch.join(repo_id);
-        fs::create_dir_all(&scratch).map_err(|err| Fail::git(err.to_string()))?;
-        let repo = Repo {
-            git_dir,
-            scratch,
-            jail: self.inner.jail,
-        };
-        if repo.git_dir.join("HEAD").is_file() {
-            return Ok(Some(repo));
-        }
-        match self.with_book_now(repo_id, || ensure_repo(&repo))? {
-            Some(()) => Ok(Some(repo)),
-            None => Ok(None),
-        }
-    }
-
-    fn read_tree(&self, repo_id: &str) -> Result<MemoryStore, Fail> {
-        let Some(repo) = self.prepare(repo_id)? else {
-            return Ok(MemoryStore::empty());
-        };
-        let head = self.sync_for_read(&repo, repo_id)?;
-        self.cached_tree_at(&repo, repo_id, head.as_deref().unwrap_or(""))
-    }
-
     fn read_history(&self, repo_id: &str) -> Result<Vec<MemoryCommit>, Fail> {
-        let Some(repo) = self.prepare(repo_id)? else {
-            return Ok(Vec::new());
-        };
-        let head = self.sync_for_read(&repo, repo_id)?;
-        let Some(key) = head else {
+        let snapshot = self.snapshot(repo_id)?;
+        let Some(key) = snapshot.tip.clone() else {
             return Ok(Vec::new());
         };
         if let Ok(cache) = self.inner.logs.lock() {
@@ -502,7 +558,7 @@ impl MemoryService {
                 }
             }
         }
-        let commits = read_commits(&repo)?;
+        let commits = read_commits(&self.repo(repo_id)?)?;
         if let Ok(mut cache) = self.inner.logs.lock() {
             cache.insert(repo_id.to_string(), (key, commits.clone()));
         }
@@ -513,11 +569,8 @@ impl MemoryService {
         if !crate::memory::types::memory_path_ok(path) {
             return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
         }
-        let Some(repo) = self.prepare(repo_id)? else {
-            return Err(Fail::api(StatusCode::NOT_FOUND, "memory file not found"));
-        };
-        let head = self.sync_for_read(&repo, repo_id)?;
-        let Some(key) = head else {
+        let snapshot = self.snapshot(repo_id)?;
+        let Some(key) = snapshot.tip.clone() else {
             return Err(Fail::api(StatusCode::NOT_FOUND, "memory file not found"));
         };
         if let Ok(cache) = self.inner.blames.lock() {
@@ -529,7 +582,7 @@ impl MemoryService {
                 }
             }
         }
-        let blame = blame_file(&repo, path)?;
+        let blame = blame_file(&self.repo(repo_id)?, path)?;
         if let Ok(mut cache) = self.inner.blames.lock() {
             let entry = cache
                 .entry(repo_id.to_string())
@@ -540,54 +593,6 @@ impl MemoryService {
             entry.1.insert(path.to_string(), blame.clone());
         }
         Ok(blame)
-    }
-
-    /// Sync the local tip when no writer is busy. Returns the local head to display.
-    fn sync_for_read(&self, repo: &Repo, repo_id: &str) -> Result<Option<String>, Fail> {
-        let auth = self.read_ref(repo_id)?;
-        let local = local_head(repo)?;
-        if auth == local {
-            return Ok(local);
-        }
-        match self.with_book_now(repo_id, || self.sync(repo, repo_id))? {
-            Some(()) => local_head(repo),
-            None => Ok(local),
-        }
-    }
-
-    fn cached_tree(&self, repo: &Repo, repo_id: &str) -> Result<MemoryStore, Fail> {
-        let key = local_head(repo)?.unwrap_or_default();
-        self.cached_tree_at(repo, repo_id, &key)
-    }
-
-    fn cached_tree_at(&self, repo: &Repo, repo_id: &str, key: &str) -> Result<MemoryStore, Fail> {
-        if let Ok(cache) = self.inner.cache.lock() {
-            if let Some((sha, store)) = cache.get(repo_id) {
-                if sha == key {
-                    return Ok(store.clone());
-                }
-            }
-        }
-        if key.is_empty() {
-            return Ok(MemoryStore::empty());
-        }
-        let store = view_tree(repo)?;
-        if let Ok(mut cache) = self.inner.cache.lock() {
-            cache.insert(repo_id.to_string(), (key.to_string(), store.clone()));
-        }
-        Ok(store)
-    }
-
-    fn drop_view_cache(&self, repo_id: &str) {
-        if let Ok(mut cache) = self.inner.cache.lock() {
-            cache.remove(repo_id);
-        }
-        if let Ok(mut logs) = self.inner.logs.lock() {
-            logs.remove(repo_id);
-        }
-        if let Ok(mut blames) = self.inner.blames.lock() {
-            blames.remove(repo_id);
-        }
     }
 
     pub(super) fn read_ref(&self, repo_id: &str) -> Result<Option<String>, Fail> {
@@ -666,6 +671,11 @@ impl MemoryService {
             gate.note_conflict();
         }
     }
+}
+
+fn loaded(book: &Book) -> Result<Arc<Snapshot>, Fail> {
+    book.current()
+        .ok_or_else(|| Fail::git("memory snapshot was not loaded"))
 }
 
 /// One-shot meeting point used by the two-server race tests.

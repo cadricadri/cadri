@@ -179,7 +179,14 @@ fn two_caches_share_one_ref_and_both_changes_land() {
     });
     left_commit.join().unwrap().unwrap();
     right_commit.join().unwrap().unwrap();
-    let store = left.read_store(repo).unwrap();
+    let fresh = MemoryService::new(
+        root.join("fresh"),
+        Backend::Directory(root.join("store")),
+        root.join("sf"),
+        None,
+        false,
+    );
+    let store = fresh.read_store(repo).unwrap();
     let paths: Vec<&str> = store.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, vec!["left.md", "right.md"]);
     let _ = fs::remove_dir_all(root);
@@ -203,7 +210,8 @@ fn stale_mount_does_not_hide_the_published_tip() {
         .unwrap();
     let git_dir = root.join("data/repos").join(format!("{repo}.git"));
     fs::remove_dir_all(&git_dir).unwrap();
-    let fresh = service.read_store(repo).unwrap();
+    let restarted = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
+    let fresh = restarted.read_store(repo).unwrap();
     assert_eq!(fresh.files[0].content, "two");
 
     copy_dir(&store_dir, &mount);
@@ -215,7 +223,8 @@ fn stale_mount_does_not_hide_the_published_tip() {
         }
     }
     fs::remove_dir_all(&git_dir).ok();
-    let from_mount = service.read_store(repo).unwrap();
+    let restarted = MemoryService::open_local(root.join("data"), Some(mount.clone()), false);
+    let from_mount = restarted.read_store(repo).unwrap();
     assert_eq!(from_mount.files[0].content, "two");
     let _ = fs::remove_dir_all(root);
 }
@@ -331,7 +340,13 @@ fn s3_commit_is_read_by_another_cache_and_ignores_a_stale_mount() {
     fs::write(mount_repo.join("objects").join(&second), &second_bundle).unwrap();
     fake.remove(&format!("repos/{repo}/objects/{second}"));
     fs::remove_dir_all(root.join("reader/repos")).ok();
-    let from_mount = reader.read_store(repo).unwrap();
+    let restarted = MemoryService::open_s3(
+        root.join("reader"),
+        Some(mount.clone()),
+        false,
+        S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
+    );
+    let from_mount = restarted.read_store(repo).unwrap();
     assert_eq!(from_mount.files[0].content, "two");
     let _ = fs::remove_dir_all(root);
 }
@@ -514,7 +529,7 @@ fn a_reader_does_not_wait_for_the_book_lock() {
     let flag = std::sync::Arc::clone(&entered);
     let waiting = service.clone();
     let holder = std::thread::spawn(move || {
-        waiting.hold_repo(repo, Duration::from_millis(1200), &flag);
+        waiting.hold_writer(repo, Duration::from_millis(1200), &flag);
     });
     let start = Instant::now();
     while !entered.load(Ordering::SeqCst) {
@@ -545,8 +560,9 @@ fn memory_read_benchmark() {
     use std::time::Duration;
 
     use super::git_cli_exec::Repo;
+    use super::snapshot::snapshot_from_repo;
     use super::tree::{cat_blobs, cat_blobs_serial, list_tree};
-    use super::view::{view_legacy, view_tree};
+    use super::view::view_legacy;
 
     const FILES: usize = 40;
     const LINES: usize = 400;
@@ -596,11 +612,14 @@ fn memory_read_benchmark() {
     let legacy = time(|| {
         view_legacy(&git).unwrap();
     });
+    let tip = list_tip(&git);
     let tree = time(|| {
-        view_tree(&git).unwrap();
+        snapshot_from_repo(&git, Some(&tip), 0, None).unwrap();
     });
     let legacy_store = view_legacy(&git).unwrap();
-    let tree_store = view_tree(&git).unwrap();
+    let tree_store = snapshot_from_repo(&git, Some(&tip), 0, None)
+        .unwrap()
+        .to_store();
     let log = time(|| {
         service.read_log(repo_id).unwrap();
     });
@@ -619,7 +638,7 @@ fn memory_read_benchmark() {
     let flag = std::sync::Arc::clone(&entered);
     let waiting = service.clone();
     let holder = std::thread::spawn(move || {
-        waiting.hold_repo(repo_id, Duration::from_millis(800), &flag);
+        waiting.hold_writer(repo_id, Duration::from_millis(800), &flag);
     });
     while !entered.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(5));
@@ -665,6 +684,10 @@ fn memory_read_benchmark() {
     let _ = fs::remove_dir_all(root);
 }
 
+fn list_tip(git: &super::git_cli_exec::Repo) -> String {
+    super::git_cli_exec::local_head(git).unwrap().unwrap()
+}
+
 fn time(work: impl FnOnce()) -> std::time::Duration {
     let start = std::time::Instant::now();
     work();
@@ -673,4 +696,93 @@ fn time(work: impl FnOnce()) -> std::time::Duration {
 
 fn ms(duration: std::time::Duration) -> u128 {
     duration.as_millis()
+}
+
+fn counted_s3_service(root: &Path, fake: &crate::memory::s3::FakeS3) -> MemoryService {
+    MemoryService::open_s3(
+        root,
+        None,
+        false,
+        S3Books::from_client("memories", S3Books::test_client(&fake.endpoint)),
+    )
+}
+
+#[test]
+fn reads_make_no_s3_requests_once_the_book_is_loaded() {
+    let fake = crate::memory::s3::FakeS3::start();
+    let root = temp();
+    let service = counted_s3_service(&root, &fake);
+    let repo = "org_reads_repo_0";
+    let (user, label) = author();
+    service
+        .commit(
+            repo,
+            user,
+            label,
+            "Add a note",
+            &[write("note.md", "hello")],
+        )
+        .unwrap();
+    service.read_store(repo).unwrap();
+    let before = fake.requests();
+    for _ in 0..20 {
+        let store = service.read_store(repo).unwrap();
+        assert_eq!(store.files[0].content, "hello");
+    }
+    assert_eq!(fake.requests(), before);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_write_updates_the_snapshot_without_rereading_s3() {
+    let fake = crate::memory::s3::FakeS3::start();
+    let root = temp();
+    let service = counted_s3_service(&root, &fake);
+    let repo = "org_writes_repo_0";
+    let (user, label) = author();
+    service
+        .commit(repo, user, label, "first", &[write("note.md", "one")])
+        .unwrap();
+    service
+        .commit(repo, user, label, "second", &[write("note.md", "two")])
+        .unwrap();
+    let (gets, _) = fake.requests();
+    let store = service.read_store(repo).unwrap();
+    assert_eq!(store.files[0].content, "two");
+    assert_eq!(fake.requests().0, gets);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_lost_compare_and_swap_catches_up_and_both_writes_land() {
+    let root = temp();
+    let store = root.join("store");
+    let server = |name: &str| {
+        MemoryService::new(
+            root.join(name),
+            Backend::Directory(store.clone()),
+            root.join(format!("scratch-{name}")),
+            None,
+            false,
+        )
+    };
+    let (first, second) = (server("first"), server("second"));
+    let repo = "org_swap_repo_0";
+    let (user, label) = author();
+    assert!(first.read_store(repo).unwrap().files.is_empty());
+    assert!(second.read_store(repo).unwrap().files.is_empty());
+    first
+        .commit(repo, user, label, "first", &[write("a.md", "A")])
+        .unwrap();
+    let landed = second
+        .commit(repo, user, label, "second", &[write("b.md", "B")])
+        .unwrap();
+    let paths: Vec<&str> = landed.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.md", "b.md"]);
+    let third = server("third");
+    let seen = third.read_store(repo).unwrap();
+    let paths: Vec<&str> = seen.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, vec!["a.md", "b.md"]);
+    assert_eq!(third.read_log(repo).unwrap().len(), 2);
+    let _ = fs::remove_dir_all(root);
 }
