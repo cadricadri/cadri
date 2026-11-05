@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Local copy of the GitHub Actions checks that do not need Docker or AWS.
+# pre-commit runs `fmt` (cargo fmt). pre-push runs the full script.
+# Docker image builds stay in CI: they need a daemon and are repeated when
+# cadri-cloud pushes the images that staging actually runs.
+set -eu
+
+mode=${1:-all}
+if [ "$mode" != all ] && [ "$mode" != fmt ]; then
+  echo "usage: scripts/check [fmt|all]" >&2
+  exit 2
+fi
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "Rust is required. Install it from https://rustup.rs" >&2
+  exit 1
+fi
+if ! cargo fmt --version >/dev/null 2>&1 || ! cargo clippy --version >/dev/null 2>&1; then
+  echo "Install rustfmt and clippy: rustup component add rustfmt clippy" >&2
+  exit 1
+fi
+
+cd "$root/engine"
+echo "cargo fmt"
+cargo fmt --all --check
+if [ "$mode" = fmt ]; then
+  exit 0
+fi
+
+echo "cargo clippy"
+cargo clippy --workspace --all-targets -- -D warnings
+echo "cargo test"
+cargo test --workspace
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Node.js is required for the web UI build." >&2
+  exit 1
+fi
+echo "webui"
+cd "$root/webui"
+npm ci
+npm run build
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is required for the plugin tests." >&2
+  exit 1
+fi
+echo "plugin tests"
+cd "$root"
+python3 -m unittest discover -s plugin/tests -v

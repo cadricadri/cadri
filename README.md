@@ -52,13 +52,20 @@ From the repository root. Each command starts the engine and the web UI, then pr
 
 Stop the Docker setup with `docker compose -f docker/docker-compose.yml down`.
 
-## Rust tests
+## Local checks
 
-`./scripts/test-rust` builds the engine workspace and runs its tests. `git push` runs that same script and stops if it fails. A fresh clone needs the hook path once:
+GitHub Actions runs `cargo fmt`, `cargo clippy -D warnings`, `cargo test`, the web UI build, and the plugin tests before it will deploy. The same checks run on this machine:
+
+- `git commit` runs `cargo fmt --all --check`.
+- `git push` runs `./scripts/check`: fmt, clippy, engine tests, `npm ci && npm run build` in `webui`, and the plugin unit tests.
+
+Docker image builds stay in CI. They need a daemon, and the hosted deploy builds the images that staging runs. A fresh clone needs the hook path once:
 
 ```sh
 git config core.hooksPath .githooks
 ```
+
+`./scripts/test-rust` still runs only the engine tests.
 
 ## Deployment
 

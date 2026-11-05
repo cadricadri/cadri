@@ -25,7 +25,7 @@ use super::view::view;
 
 pub(super) enum Backend {
     Directory(PathBuf),
-    S3(S3Books),
+    S3(Box<S3Books>),
 }
 
 struct Inner {
@@ -69,7 +69,7 @@ impl MemoryService {
         let root = root.into();
         Self::new(
             root.join("repos"),
-            Backend::S3(books),
+            Backend::S3(Box::new(books)),
             root.join("scratch"),
             mount,
             jail,
@@ -216,6 +216,7 @@ impl MemoryService {
         self.cached_view(repo, repo_id)
     }
 
+    #[allow(clippy::too_many_arguments)] // path, verb, service, and body are one git HTTP call
     fn git_once(
         &self,
         repo: &Repo,
