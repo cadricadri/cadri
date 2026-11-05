@@ -211,12 +211,12 @@ fn s3_legacy_book_migrates_and_a_missing_bundle_fails_with_a_clear_error() {
 }
 
 #[test]
-fn ui_commit_returns_conflict_after_eight_lost_log_creates() {
+fn ui_commit_returns_conflict_when_its_retry_also_loses_the_log_create() {
     let root = temp();
     let service = MemoryService::open_local(&root, false);
     let repo = "org_test_repo_0";
     let (user, label) = author();
-    service.fail_next_log_create(8);
+    service.fail_next_log_create(2);
     let err = service
         .commit(
             repo,
@@ -236,6 +236,17 @@ fn ui_commit_returns_conflict_after_eight_lost_log_creates() {
         .join(format!("{repo}.git"))
         .join("refs/cadri/stage");
     assert!(!stage.exists());
+    service.fail_next_log_create(1);
+    let store = service
+        .commit(
+            repo,
+            user,
+            label,
+            "Add a note",
+            &[write("note.md", "hello")],
+        )
+        .unwrap();
+    assert_eq!(store.files.len(), 1);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1310,5 +1321,282 @@ fn a_log_gap_is_reported_not_repaired() {
     // Nothing was rewritten to paper over the gap.
     assert!(!log_file(&store, repo, 2).exists());
     assert!(log_file(&store, repo, 3).exists());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn edit_request(message: &str, changes: Vec<Change>) -> crate::memory::types::EditRequest {
+    let (user, label) = author();
+    crate::memory::types::EditRequest {
+        user_id: user.to_string(),
+        label: label.to_string(),
+        message: message.to_string(),
+        changes,
+        base: None,
+        agent: None,
+    }
+}
+
+fn tip_of(service: &MemoryService, repo: &str) -> String {
+    service.read_tip(repo).unwrap().0.unwrap()
+}
+
+#[test]
+fn twenty_threads_of_five_edits_all_land_in_fewer_log_entries_than_commits() {
+    let fake = crate::memory::s3::FakeS3::start();
+    fake.set_latency(std::time::Duration::from_millis(20));
+    let root = temp();
+    let service = counted_s3_service(&root, &fake);
+    let repo = "org_group_repo_0";
+    service.read_store(repo).unwrap();
+    let handles: Vec<_> = (0..20)
+        .map(|thread| {
+            let service = service.clone();
+            std::thread::spawn(move || {
+                for edit in 0..5 {
+                    let mut request = edit_request(
+                        &format!("thread {thread} edit {edit}"),
+                        vec![write(&format!("t{thread}/e{edit}.md"), "x\n")],
+                    );
+                    if thread % 2 == 1 {
+                        request.agent = Some(format!("agent-{thread}"));
+                    }
+                    let outcome = service.edit(repo, request).unwrap();
+                    assert!(outcome.commit.is_some());
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let log = service.read_log(repo).unwrap();
+    assert_eq!(log.len(), 100);
+    for commit in &log {
+        let thread: usize = commit.message["thread ".len()..]
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected = if thread % 2 == 1 {
+            Author::Robot {
+                id: format!("agent-{thread}"),
+            }
+        } else {
+            Author::Human {
+                user_id: "ada".to_string(),
+                label: "Ada".to_string(),
+            }
+        };
+        assert_eq!(commit.author, expected, "{}", commit.message);
+    }
+    assert_eq!(service.read_store(repo).unwrap().files.len(), 100);
+    let entries = service.read_tip(repo).unwrap().1;
+    assert!((1..100).contains(&entries), "{entries} log entries");
+    let fresh = counted_s3_service(&temp(), &fake);
+    assert_eq!(
+        fresh.read_tip(repo).unwrap(),
+        service.read_tip(repo).unwrap()
+    );
+    assert_eq!(fresh.read_store(repo).unwrap().files.len(), 100);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_edit_with_a_stale_base_touching_a_changed_file_is_a_conflict() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_base0_repo_0";
+    service
+        .edit(
+            repo,
+            edit_request("seed", vec![write("a.md", "1"), write("b.md", "1")]),
+        )
+        .unwrap();
+    let base = tip_of(&service, repo);
+    service
+        .edit(repo, edit_request("teammate", vec![write("a.md", "2")]))
+        .unwrap();
+    let tip = tip_of(&service, repo);
+    let mut stale = edit_request(
+        "mine",
+        vec![
+            write("a.md", "3"),
+            Change::Rename {
+                from: "b.md".to_string(),
+                to: "c.md".to_string(),
+            },
+        ],
+    );
+    stale.base = Some(base);
+    let err = service.edit(repo, stale).err().unwrap();
+    assert_eq!(err.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(err.message, "conflict");
+    assert_eq!(err.paths, Some(vec!["a.md".to_string()]));
+    assert_eq!(tip_of(&service, repo), tip);
+
+    let mut unknown = edit_request("mine", vec![write("d.md", "4")]);
+    unknown.base = Some("1".repeat(40));
+    let err = service.edit(repo, unknown).err().unwrap();
+    assert_eq!(err.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(err.message, "unknown base");
+    assert_eq!(err.paths, None);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_edit_with_a_stale_base_touching_other_files_lands() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_base1_repo_0";
+    service
+        .edit(
+            repo,
+            edit_request("seed", vec![write("a.md", "1"), write("b.md", "1")]),
+        )
+        .unwrap();
+    let base = tip_of(&service, repo);
+    service
+        .edit(repo, edit_request("teammate", vec![write("a.md", "2")]))
+        .unwrap();
+    let mut stale = edit_request("mine", vec![write("b.md", "3")]);
+    stale.base = Some(base);
+    let outcome = service.edit(repo, stale).unwrap();
+    let commit = outcome.commit.clone().unwrap();
+    assert_eq!(tip_of(&service, repo), commit);
+    let tree = outcome.tree();
+    assert_eq!(tree.commit.as_deref(), Some(commit.as_str()));
+    assert_eq!(tree.tree.tip.as_deref(), Some(commit.as_str()));
+    assert_eq!(
+        file_pairs(&service.read_store(repo).unwrap()),
+        [
+            ("a.md".to_string(), "2".to_string()),
+            ("b.md".to_string(), "3".to_string())
+        ]
+    );
+    let mut current = edit_request("again", vec![write("a.md", "4")]);
+    current.base = Some(commit);
+    service.edit(repo, current).unwrap();
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edits_without_a_base_are_last_writer_wins() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_base2_repo_0";
+    service
+        .edit(repo, edit_request("first", vec![write("a.md", "1")]))
+        .unwrap();
+    service
+        .edit(repo, edit_request("second", vec![write("a.md", "2")]))
+        .unwrap();
+    assert_eq!(service.read_store(repo).unwrap().files[0].content, "2");
+    let noop = service
+        .edit(repo, edit_request("same", vec![write("a.md", "2")]))
+        .unwrap();
+    assert_eq!(noop.commit, None);
+    assert_eq!(service.read_log(repo).unwrap().len(), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_agent_edit_is_authored_as_a_robot() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_robot0_repo_0";
+    let mut request = edit_request("agent note", vec![write("a.md", "1")]);
+    request.agent = Some("claude-code-7f3a".to_string());
+    let commit = service.edit(repo, request).unwrap().commit.unwrap();
+    let log = service.read_log(repo).unwrap();
+    assert_eq!(
+        log[0].author,
+        Author::Robot {
+            id: "claude-code-7f3a".to_string()
+        }
+    );
+    assert_eq!(log[0].message, "agent note");
+    let git = super::git_cli_exec::Repo {
+        git_dir: root.join("repos").join(format!("{repo}.git")),
+        scratch: root.join("scratch").join(repo),
+        jail: false,
+    };
+    let raw = super::git_cli_exec::git_text(
+        &git,
+        &["log", "-1", "--format=%an <%ae>%n%B", &commit],
+        None,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        raw,
+        "claude-code-7f3a <claude-code-7f3a@agents.cadri.local>\nagent note\n\n\
+         Cadri-Author-Kind: robot\nCadri-Author-Id: claude-code-7f3a\nCadri-Author-Label: Ada"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_invalid_agent_id_is_rejected() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_robot1_repo_0";
+    let long = "a".repeat(65);
+    for agent in ["", "has space", "new\nline", "slash/agent", long.as_str()] {
+        let mut request = edit_request("agent note", vec![write("a.md", "1")]);
+        request.agent = Some(agent.to_string());
+        let err = service.edit(repo, request).err().unwrap();
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST, "{agent:?}");
+        assert_eq!(err.message, "invalid agent");
+    }
+    let mut request = edit_request("agent note", vec![write("a.md", "1")]);
+    request.agent = Some("a".repeat(64));
+    service.edit(repo, request).unwrap();
+    assert_eq!(service.read_log(repo).unwrap().len(), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn one_bad_edit_in_a_batch_does_not_fail_the_others() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, None, false);
+    let repo = "org_batch0_repo_0";
+    service.read_store(repo).unwrap();
+    // Hold the writer so every edit below queues up and runs as one batch.
+    let entered = std::sync::atomic::AtomicBool::new(false);
+    let results = std::thread::scope(|scope| {
+        let holder = scope
+            .spawn(|| service.hold_writer(repo, std::time::Duration::from_millis(500), &entered));
+        while !entered.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let edits: Vec<_> = ["a.md", "../escape.md", "b.md"]
+            .into_iter()
+            .map(|path| {
+                let service = &service;
+                scope.spawn(move || service.edit(repo, edit_request(path, vec![write(path, "x")])))
+            })
+            .collect();
+        holder.join().unwrap();
+        edits
+            .into_iter()
+            .map(|edit| edit.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let err = results[1].as_ref().err().unwrap();
+    assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(err.message, "invalid memory path");
+    assert!(results[0].as_ref().unwrap().commit.is_some());
+    assert!(results[2].as_ref().unwrap().commit.is_some());
+    let paths: Vec<String> = service
+        .read_store(repo)
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
+    assert_eq!(paths, ["a.md", "b.md"]);
+    assert_eq!(service.read_log(repo).unwrap().len(), 2);
+    assert_eq!(service.read_tip(repo).unwrap().1, 1);
     let _ = fs::remove_dir_all(root);
 }

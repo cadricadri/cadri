@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
 use crate::memory::{
-    self, BlameEntry, Change, GitHttp, MemoryCommit, MemoryService, MemoryStore, MemoryTree,
+    self, BlameEntry, Change, EditRequest, GitHttp, MemoryCommit, MemoryService, MemoryStore,
 };
 use crate::ApiError;
 
@@ -323,6 +323,10 @@ struct CommitRequest {
     message: String,
     #[serde(default)]
     changes: Vec<Change>,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 fn memory_book(
@@ -512,23 +516,22 @@ async fn post_memories(
     let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
     let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
     let service = state.memories.clone();
-    let actor = identity.user_id.clone();
-    let label = identity
-        .email
-        .clone()
-        .unwrap_or_else(|| identity.user_id.clone());
+    let edit = EditRequest {
+        user_id: identity.user_id.clone(),
+        label: identity
+            .email
+            .clone()
+            .unwrap_or_else(|| identity.user_id.clone()),
+        message: request.message,
+        changes: request.changes,
+        base: request.base,
+        agent: request.agent,
+    };
+    let outcome = blocking(move || service.edit(&repo_id, edit)).await?;
     if query.view.as_deref() == Some("tree") {
-        let tree: MemoryTree = blocking(move || {
-            service.commit_tree_view(&repo_id, &actor, &label, &request.message, &request.changes)
-        })
-        .await?;
-        return Ok(Json(tree).into_response());
+        return Ok(Json(outcome.tree()).into_response());
     }
-    let store = blocking(move || {
-        service.commit(&repo_id, &actor, &label, &request.message, &request.changes)
-    })
-    .await?;
-    Ok(Json(store).into_response())
+    Ok(Json(outcome.store()).into_response())
 }
 
 async fn git_http(

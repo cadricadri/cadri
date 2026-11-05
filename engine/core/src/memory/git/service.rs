@@ -8,12 +8,15 @@ use std::time::Duration;
 use axum::http::StatusCode;
 
 use crate::memory::s3::S3Books;
-use crate::memory::types::{BlameEntry, Change, MemoryCommit, MemoryStore, MemoryTree};
+use crate::memory::types::{
+    BlameEntry, Change, CommittedTree, EditRequest, MemoryCommit, MemoryStore, MemoryTree,
+};
 use crate::ApiError;
 
 use super::bundle::parse_bundle_header;
 use super::commit::{
-    apply_changes, build_tree, clean_message, commit_tree, current_sources, Source,
+    apply_changes, check_content, clean_message, commit_tree, current_sources, valid_agent,
+    CommitAuthor, Source, TreeBuilder,
 };
 use super::durable::{checkpoint_key, log_key, seq_of, Created, DirDurable, Durable};
 use super::error::{into_api, s3_fail, Fail};
@@ -37,6 +40,9 @@ pub(super) enum Backend {
 /// Log entries downloaded at once while loading a book.
 const LOG_FETCHES: usize = 8;
 
+/// How long an edit waits for the writer that took it from the queue to answer.
+const EDIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct Inner {
     repos: PathBuf,
     /// Legacy layout, read only to migrate a book.
@@ -59,6 +65,36 @@ struct Inner {
 struct Book {
     writer: Mutex<WriterState>,
     snapshot: RwLock<Option<Arc<Snapshot>>>,
+    /// Edits waiting for the writer. Whoever holds `writer` next commits them all.
+    queue: Mutex<Vec<Pending>>,
+}
+
+struct Pending {
+    request: EditRequest,
+    reply: mpsc::SyncSender<Result<EditOutcome, ApiError>>,
+}
+
+/// One edit's answer: its own commit (`None` for a no-op) and the book after the
+/// batch it was committed in.
+pub(crate) struct EditOutcome {
+    pub commit: Option<String>,
+    snapshot: Arc<Snapshot>,
+}
+
+impl EditOutcome {
+    pub(crate) fn store(&self) -> MemoryStore {
+        self.snapshot.to_store()
+    }
+
+    pub(crate) fn tree(&self) -> CommittedTree {
+        CommittedTree {
+            tree: MemoryTree {
+                open: None,
+                ..self.snapshot.to_tree(None)
+            },
+            commit: self.commit.clone(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -222,6 +258,8 @@ impl MemoryService {
         .unwrap()
     }
 
+    /// Test helper: a human edit without a base, answered as the legacy store.
+    #[cfg(test)]
     pub(crate) fn commit(
         &self,
         repo_id: &str,
@@ -230,50 +268,141 @@ impl MemoryService {
         message: &str,
         changes: &[Change],
     ) -> Result<MemoryStore, ApiError> {
-        self.commit_book(repo_id, user_id, label, message, changes)
-            .map(|snapshot| snapshot.to_store())
+        self.edit(
+            repo_id,
+            EditRequest {
+                user_id: user_id.to_string(),
+                label: label.to_string(),
+                message: message.to_string(),
+                changes: changes.to_vec(),
+                base: None,
+                agent: None,
+            },
+        )
+        .map(|outcome| outcome.store())
     }
 
-    /// Same as `commit`, answered as the new tree.
-    pub(crate) fn commit_tree_view(
+    /// Applies `request` on top of whatever the tip is when its turn comes.
+    /// Concurrent edits are committed together, one commit each, in one log entry.
+    pub(crate) fn edit(
         &self,
         repo_id: &str,
-        user_id: &str,
-        label: &str,
-        message: &str,
-        changes: &[Change],
-    ) -> Result<MemoryTree, ApiError> {
-        self.commit_book(repo_id, user_id, label, message, changes)
-            .map(|snapshot| MemoryTree {
-                open: None,
-                ..snapshot.to_tree(None)
-            })
+        request: EditRequest,
+    ) -> Result<EditOutcome, ApiError> {
+        if request
+            .agent
+            .as_deref()
+            .is_some_and(|agent| !valid_agent(agent))
+        {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid agent"));
+        }
+        self.submit(repo_id, request)
     }
 
-    fn commit_book(
+    fn submit(&self, repo_id: &str, request: EditRequest) -> Result<EditOutcome, ApiError> {
+        let book = self.book(repo_id).map_err(into_api)?;
+        let (tx, rx) = mpsc::sync_channel(1);
+        book.queue
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push(Pending { request, reply: tx });
+        {
+            let mut state = book.writer.lock().unwrap_or_else(|err| err.into_inner());
+            // A previous holder may have committed this request already.
+            if let Ok(result) = rx.try_recv() {
+                return result;
+            }
+            let batch =
+                std::mem::take(&mut *book.queue.lock().unwrap_or_else(|err| err.into_inner()));
+            self.commit_batch(repo_id, &book, &mut state, batch);
+        }
+        rx.recv_timeout(EDIT_TIMEOUT).unwrap_or_else(|_| {
+            Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "memory write timed out",
+            ))
+        })
+    }
+
+    /// Sends exactly one reply per pending edit.
+    fn commit_batch(
         &self,
         repo_id: &str,
-        user_id: &str,
-        label: &str,
-        message: &str,
-        changes: &[Change],
-    ) -> Result<Arc<Snapshot>, ApiError> {
-        for _ in 0..8 {
-            match self.with_writer(repo_id, |repo, book, writer| {
-                // A lost log create has already caught the book up, so a retry
-                // starts from the other writer's tip.
-                self.commit_once(
-                    repo, repo_id, book, writer, user_id, label, message, changes,
-                )?;
-                // The writer lock is still held, so this is the snapshot just installed.
-                loaded(book)
-            }) {
-                Ok(store) => return Ok(store),
-                Err(Fail::Conflict) => continue,
-                Err(Fail::Api(err)) => return Err(err),
+        book: &Book,
+        state: &mut WriterState,
+        batch: Vec<Pending>,
+    ) {
+        if batch.is_empty() {
+            return;
+        }
+        let (requests, replies): (Vec<EditRequest>, Vec<_>) = batch
+            .into_iter()
+            .map(|pending| (pending.request, pending.reply))
+            .unzip();
+        let results = self.run_batch(repo_id, book, state, &requests);
+        for (reply, result) in replies.into_iter().zip(results) {
+            let _ = reply.send(result);
+        }
+    }
+
+    /// One commit per edit on top of the running tip, published as one log entry.
+    /// A lost log create catches up and rebuilds the whole batch once.
+    fn run_batch(
+        &self,
+        repo_id: &str,
+        book: &Book,
+        state: &mut WriterState,
+        requests: &[EditRequest],
+    ) -> Vec<Result<EditOutcome, ApiError>> {
+        let all = |err: Fail| {
+            let err = into_api(err);
+            requests.iter().map(|_| Err(err.clone())).collect()
+        };
+        let repo = match self.repo(repo_id) {
+            Ok(repo) => repo,
+            Err(err) => return all(err),
+        };
+        if book.current().is_none() {
+            if let Err(err) = self.hydrate(&repo, repo_id, book, state) {
+                return all(err);
             }
         }
-        Err(ApiError::new(StatusCode::CONFLICT, "memory book changed"))
+        let mut made = Vec::new();
+        for _ in 0..2 {
+            let start = match loaded(book) {
+                Ok(start) => start,
+                Err(err) => return all(err),
+            };
+            let next;
+            (next, made) = build_batch(&repo, &start, requests);
+            let Some(next) = next else {
+                return answer(made, &start);
+            };
+            let tip = next.tip.clone().unwrap_or_default();
+            match self.publish(&repo, repo_id, book, state, start.tip.as_deref(), &tip) {
+                Ok(()) => {
+                    self.install(
+                        repo_id,
+                        book,
+                        Snapshot {
+                            seq: state.seq,
+                            ..next
+                        },
+                    );
+                    return match loaded(book) {
+                        Ok(installed) => answer(made, &installed),
+                        Err(err) => all(err),
+                    };
+                }
+                // `publish` caught the book up; rebuild every edit on the new tip.
+                Err(Fail::Conflict) => continue,
+                Err(Fail::Api(err)) => return fail_committed(made, err),
+            }
+        }
+        fail_committed(
+            made,
+            ApiError::new(StatusCode::CONFLICT, "memory book changed"),
+        )
     }
 
     pub(crate) fn serve_git(
@@ -347,6 +476,7 @@ impl MemoryService {
                 Arc::new(Book {
                     writer: Mutex::new(WriterState::default()),
                     snapshot: RwLock::new(None),
+                    queue: Mutex::new(Vec::new()),
                 })
             })
             .clone())
@@ -616,55 +746,6 @@ impl MemoryService {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // one commit: book, author, message, and changes
-    fn commit_once(
-        &self,
-        repo: &Repo,
-        repo_id: &str,
-        book: &Book,
-        state: &mut WriterState,
-        user_id: &str,
-        label: &str,
-        message: &str,
-        changes: &[Change],
-    ) -> Result<MemoryStore, Fail> {
-        let snapshot = loaded(book)?;
-        let message = clean_message(message)?;
-        let before = current_sources(&snapshot);
-        let mut files = before.clone();
-        apply_changes(&mut files, changes)?;
-        // Writing what a file already holds is not a change.
-        for (path, source) in files.iter_mut() {
-            if let (Source::Text(text), Some(Source::Blob(blob))) = (&*source, before.get(path)) {
-                if snapshot.blobs.get(blob).is_some_and(|old| **old == **text) {
-                    *source = Source::Blob(blob.clone());
-                }
-            }
-        }
-        if files == before {
-            return Ok(snapshot.to_store());
-        }
-        let parent = snapshot.tip.as_deref();
-        let built = build_tree(repo, parent, &before, &files)?;
-        let sha = commit_tree(repo, &built.tree, parent, &message, user_id, label)?;
-        self.publish(repo, repo_id, book, state, parent, &sha)?;
-        let next = match snapshot_after(&snapshot, &sha, &built.files, built.new_blobs) {
-            Ok(next) => Snapshot {
-                seq: state.seq,
-                ..next
-            },
-            Err(err) => {
-                self.unload(book);
-                return Err(err);
-            }
-        };
-        self.install(repo_id, book, next);
-        let updated = book
-            .current()
-            .ok_or_else(|| Fail::git("memory snapshot was not installed"))?;
-        Ok(updated.to_store())
-    }
-
     #[allow(clippy::too_many_arguments)] // path, verb, service, and body are one git HTTP call
     fn git_once(
         &self,
@@ -915,6 +996,142 @@ impl MemoryService {
         if let Some(gate) = gate {
             gate.note_conflict();
         }
+    }
+}
+
+type Made = Vec<Result<Option<String>, ApiError>>;
+
+/// Builds one commit per edit, each on top of the last. Returns the snapshot after
+/// the last commit (`None` if nothing changed) and each edit's commit or error.
+fn build_batch(
+    repo: &Repo,
+    start: &Snapshot,
+    requests: &[EditRequest],
+) -> (Option<Snapshot>, Made) {
+    let mut next: Option<Snapshot> = None;
+    let mut made = Vec::with_capacity(requests.len());
+    let mut builder = TreeBuilder::new(repo);
+    let texts = requests
+        .iter()
+        .flat_map(|request| &request.changes)
+        .filter_map(|change| match change {
+            Change::Write { path, content } if check_content(path, content).is_ok() => {
+                Some(content.as_str())
+            }
+            _ => None,
+        });
+    // Each edit hashes its own texts if this fails.
+    let _ = builder.hash_texts(texts);
+    for request in requests {
+        match apply_edit(repo, &mut builder, next.as_ref().unwrap_or(start), request) {
+            Ok(Some(snapshot)) => {
+                made.push(Ok(snapshot.tip.clone()));
+                next = Some(snapshot);
+            }
+            Ok(None) => made.push(Ok(None)),
+            Err(err) => made.push(Err(into_api(err))),
+        }
+    }
+    (next, made)
+}
+
+fn answer(made: Made, snapshot: &Arc<Snapshot>) -> Vec<Result<EditOutcome, ApiError>> {
+    made.into_iter()
+        .map(|result| {
+            result.map(|commit| EditOutcome {
+                commit,
+                snapshot: Arc::clone(snapshot),
+            })
+        })
+        .collect()
+}
+
+/// The batch was not published: edits that were rejected keep their own error,
+/// every other edit gets `err`.
+fn fail_committed(made: Made, err: ApiError) -> Vec<Result<EditOutcome, ApiError>> {
+    made.into_iter()
+        .map(|result| result.and(Err(err.clone())))
+        .collect()
+}
+
+/// The commit for one edit on top of `current`, as the snapshot after it. `None`
+/// when the edit changes nothing.
+fn apply_edit(
+    repo: &Repo,
+    builder: &mut TreeBuilder,
+    current: &Snapshot,
+    request: &EditRequest,
+) -> Result<Option<Snapshot>, Fail> {
+    let message = clean_message(&request.message)?;
+    if let Some(base) = &request.base {
+        check_base(repo, current.tip.as_deref(), base, &request.changes)?;
+    }
+    let before = current_sources(current);
+    let mut files = before.clone();
+    apply_changes(&mut files, &request.changes)?;
+    // Writing what a file already holds is not a change.
+    for (path, source) in files.iter_mut() {
+        if let (Source::Text(text), Some(Source::Blob(blob))) = (&*source, before.get(path)) {
+            if current.blobs.get(blob).is_some_and(|old| **old == **text) {
+                *source = Source::Blob(blob.clone());
+            }
+        }
+    }
+    if files == before {
+        return Ok(None);
+    }
+    let parent = current.tip.as_deref();
+    let built = builder.build(parent, &before, &files)?;
+    let author = match &request.agent {
+        Some(agent) => CommitAuthor::Robot {
+            agent,
+            label: &request.label,
+        },
+        None => CommitAuthor::Human {
+            user_id: &request.user_id,
+            label: &request.label,
+        },
+    };
+    let sha = commit_tree(repo, &built.tree, parent, &message, &author)?;
+    builder.committed(&sha);
+    snapshot_after(current, &sha, &built.files, built.new_blobs).map(Some)
+}
+
+/// An edit made against `base` may not touch a path that changed between `base`
+/// and `tip`.
+fn check_base(repo: &Repo, tip: Option<&str>, base: &str, changes: &[Change]) -> Result<(), Fail> {
+    if tip == Some(base) {
+        return Ok(());
+    }
+    let unknown = || Fail::api(StatusCode::CONFLICT, "unknown base");
+    let Some(tip) = tip else {
+        return Err(unknown());
+    };
+    if !is_hex(base, 40) || !is_ancestor(repo, base, tip)? {
+        return Err(unknown());
+    }
+    let out = git_bytes(
+        repo,
+        &["diff-tree", "-r", "--name-only", "-z", base, tip],
+        None,
+        &[],
+    )?;
+    let changed: std::collections::HashSet<&[u8]> = out
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .collect();
+    let mut paths: Vec<String> = changes
+        .iter()
+        .flat_map(Change::paths)
+        .filter(|path| changed.contains(path.as_bytes()))
+        .map(str::to_string)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        Ok(())
+    } else {
+        Err(Fail::Api(ApiError::conflict(paths)))
     }
 }
 

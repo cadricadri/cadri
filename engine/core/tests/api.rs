@@ -634,6 +634,116 @@ async fn personal_memories_are_a_separate_book() {
     assert_eq!(log["commits"][0]["message"], "Update memory");
 }
 
+async fn post_edit(app: &Router, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    let (status, _, reply) = send(
+        app,
+        post_json("/api/memories/commits?view=tree&scope=user", &body, headers),
+    )
+    .await;
+    (status, reply)
+}
+
+#[tokio::test]
+async fn an_edit_with_a_stale_base_touching_a_changed_file_is_a_conflict_over_http() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let write =
+        |path: &str, content: &str| json!({ "op": "write", "path": path, "content": content });
+    let (status, seeded) = post_edit(
+        &app,
+        json!({ "message": "seed", "changes": [write("a.md", "1"), write("b.md", "1")] }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seeded}");
+    let base = seeded["tip"].as_str().unwrap().to_string();
+    assert_eq!(seeded["commit"], seeded["tip"]);
+    let (status, moved) = post_edit(
+        &app,
+        json!({ "message": "teammate", "changes": [write("a.md", "2")], "base": base }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+
+    let (status, conflict) = post_edit(
+        &app,
+        json!({
+            "message": "stale",
+            "changes": [write("a.md", "3"), { "op": "delete", "path": "b.md" }],
+            "base": base,
+            "agent": "claude-code-7f3a"
+        }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict, json!({ "error": "conflict", "paths": ["a.md"] }));
+
+    let (status, landed) = post_edit(
+        &app,
+        json!({ "message": "other file", "changes": [write("b.md", "3")], "base": base }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{landed}");
+    assert_eq!(landed["commit"], landed["tip"]);
+    assert_ne!(landed["tip"], moved["tip"]);
+
+    let (status, noop) = post_edit(
+        &app,
+        json!({ "changes": [write("b.md", "3")], "base": landed["tip"] }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{noop}");
+    assert_eq!(noop["commit"], Value::Null);
+    assert_eq!(noop["tip"], landed["tip"]);
+
+    let (status, unknown) = post_edit(
+        &app,
+        json!({ "changes": [write("c.md", "1")], "base": "not-a-commit" }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unknown, json!({ "error": "unknown base" }));
+}
+
+#[tokio::test]
+async fn an_agent_edit_is_authored_as_a_robot_over_http() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let note = |agent: &str| {
+        json!({
+            "message": "agent note",
+            "changes": [{ "op": "write", "path": "a.md", "content": "x" }],
+            "agent": agent
+        })
+    };
+    let (status, rejected) = post_edit(&app, note("bad agent"), &ada).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid agent");
+
+    let (status, saved) = post_edit(&app, note("claude-code-7f3a"), &ada).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        log["commits"][0]["author"],
+        json!({ "kind": "robot", "id": "claude-code-7f3a" })
+    );
+    assert_eq!(log["commits"][0]["id"], saved["commit"]);
+    let (_, _, blame) = send(
+        &app,
+        get_request("/api/memories/blame?scope=user&path=a.md", &ada),
+    )
+    .await;
+    assert_eq!(blame["blame"][0]["author"]["kind"], "robot");
+    let (_, _, team) = send(&app, get_request("/api/memories", &ada)).await;
+    assert_eq!(team["files"].as_array().unwrap().len(), 0);
+}
+
 #[tokio::test]
 async fn memory_directories_round_trip_and_cannot_match_a_file() {
     let app = app(Arc::new(OrgHeaderAuth));
