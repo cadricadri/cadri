@@ -1,15 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { Me } from "../ee/workos";
 import { Page } from "../page";
 import { useSession } from "../session";
 import { applySave } from "./memories/blame";
-import { LoadError, loadMemoryBlame, loadMemoryBook, loadMemoryLog, peekMemoryBook, rememberMemoryBook } from "./memories/books";
-import { changesBetween } from "./memories/changes";
+import {
+  cachedText,
+  LoadError,
+  loadBlob,
+  loadMemoryBlame,
+  loadMemoryBook,
+  loadMemoryLog,
+  peekMemoryBook,
+  prefetchBlobs,
+  rememberMemoryBook,
+  rememberText,
+  setMemoryIdentity,
+  storeFromTree,
+} from "./memories/books";
+import { changesBetween, type MemoryChange } from "./memories/changes";
 import { CommitLog } from "./memories/CommitLog";
 import { FileTree } from "./memories/FileTree";
 import { FileView, type FileTab } from "./memories/FileView";
-import type { MemoryAuthor, MemoryStore } from "./memories/types";
+import type { LoadedFile, MemoryAuthor, MemoryFile, MemoryStore, MemoryTree } from "./memories/types";
 import { applyCreateFile, applyCreateFolder, applyMove, applyRenameFolder, planMove, type PathIssue } from "./memories/folders";
 import { applyUpload, prepareUploads } from "./memories/upload";
 
@@ -32,16 +45,23 @@ export default function Memories() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [draftDirectory, setDraftDirectory] = useState<string | null>(null);
   const request = useRef(0);
+  const blamedPaths = useRef(new Set<string>());
   const seenScope = useRef<MemoryScope>("team");
   const filePath = params.get("file");
   const tabParam = params.get("tab");
   const tab: FileTab = tabParam === "code" || tabParam === "blame" ? "code" : "preview";
   const committed = params.get("view") === "committed";
   const scope: MemoryScope = params.get("scope") === "user" ? "user" : "team";
-  const file = pickFile(store, filePath);
+  const picked = pickFile(store, filePath);
+  const file: LoadedFile | null = picked && picked.content !== null ? { ...picked, content: picked.content } : null;
+  const pending = picked && picked.content === null ? picked : null;
+  const [fileError, setFileError] = useState<string | null>(null);
+  const filePathRef = useRef<string | null>(null);
+  filePathRef.current = picked?.path ?? filePath;
 
   const load = useCallback(async () => {
     const id = ++request.current;
+    setMemoryIdentity(session.me);
     const known = peekMemoryBook(scope);
     if (known) {
       setStore(readStore(known));
@@ -50,9 +70,13 @@ export default function Memories() {
       setStatus("Loading…");
     }
     try {
-      const store = await loadMemoryBook(scope, session.headers());
+      const store = await loadMemoryBook(scope, session.headers(), filePathRef.current);
       if (id !== request.current) {
         return;
+      }
+      if (store.tip !== known?.tip) {
+        blamedPaths.current.clear();
+        historyScope.current = null;
       }
       setStore(readStore(store));
       setStatus("");
@@ -87,41 +111,74 @@ export default function Memories() {
     void load();
   }, [load, scope]);
 
-  const blamedPaths = useRef(new Set<string>());
+  const ensureBlame = useCallback(
+    (path: string) => {
+      const key = `${scope}:${path}`;
+      if (blamedPaths.current.has(key)) {
+        return;
+      }
+      blamedPaths.current.add(key);
+      void loadMemoryBlame(scope, path, session.headers())
+        .then((blame) => {
+          setStore((current) => {
+            if (!current) {
+              return current;
+            }
+            return {
+              ...current,
+              files: current.files.map((item) => (item.path === path ? { ...item, blame } : item)),
+            };
+          });
+        })
+        .catch(() => {
+          blamedPaths.current.delete(key);
+        });
+    },
+    [scope, session],
+  );
+
+  useLayoutEffect(() => {
+    if (!pending) {
+      return;
+    }
+    const text = cachedText(pending.blob);
+    if (text !== null) {
+      setStore((current) => withText(current, pending.path, pending.blob, text));
+    }
+  }, [pending]);
 
   useEffect(() => {
-    if (!file) {
+    if (!pending || cachedText(pending.blob) !== null) {
       return;
     }
-    const path = file.path;
-    const key = `${scope}:${path}`;
-    if (file.blame.length > 0 || blamedPaths.current.has(key)) {
-      return;
-    }
-    blamedPaths.current.add(key);
+    const { path, blob } = pending;
     let cancel = false;
-    void loadMemoryBlame(scope, path, session.headers())
-      .then((blame) => {
-        if (cancel) {
-          return;
+    setFileError(null);
+    loadBlob(scope, blob, session.headers())
+      .then((text) => {
+        if (!cancel) {
+          setStore((current) => withText(current, path, blob, text));
         }
-        setStore((current) => {
-          if (!current) {
-            return current;
-          }
-          return {
-            ...current,
-            files: current.files.map((item) => (item.path === path ? { ...item, blame } : item)),
-          };
-        });
       })
-      .catch(() => {
-        blamedPaths.current.delete(key);
+      .catch((error: unknown) => {
+        if (!cancel) {
+          setFileError(error instanceof Error ? `Could not load ${path}: ${error.message}` : `Could not load ${path}.`);
+        }
       });
     return () => {
       cancel = true;
     };
-  }, [file, scope, session]);
+  }, [pending, scope, session]);
+
+  const prefetchKey = store ? `${scope}:${store.tip ?? ""}` : null;
+  useEffect(() => {
+    if (!store || prefetchKey === null) {
+      return;
+    }
+    return prefetchBlobs(scope, store, filePathRef.current, session.headers());
+    // Runs once per tip: later store edits do not change which blobs exist.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefetchKey]);
 
   const historyScope = useRef<MemoryScope | null>(null);
   const ensureHistory = useCallback(() => {
@@ -223,8 +280,8 @@ export default function Memories() {
     });
   }
 
-  async function persist(previous: MemoryStore, next: MemoryStore, openPath?: string): Promise<string | null> {
-    const diff = changesBetween(previous, next);
+  async function persist(previous: MemoryStore, next_: MemoryStore, openPath?: string): Promise<string | null> {
+    const diff = changesBetween(previous, next_);
     if (!diff) {
       return null;
     }
@@ -246,7 +303,10 @@ export default function Memories() {
         const payload = (await response.json().catch(() => null)) as { error?: string } | null;
         throw new Error(payload?.error ?? `${response.status} ${response.statusText}`);
       }
-      const next = readStore((await response.json()) as MemoryStore);
+      const written = new Map(
+        diff.changes.flatMap((change: MemoryChange) => (change.op === "write" ? [[change.path, change.content] as const] : [])),
+      );
+      const next = mergeSaved((await response.json()) as MemoryTree, next_, written);
       blamedPaths.current.clear();
       historyScope.current = null;
       rememberMemoryBook(scope, next);
@@ -463,7 +523,7 @@ export default function Memories() {
               {draftDirectory !== null ? (
                 <FileView
                   key={`draft:${scope}:${draftDirectory}`}
-                  file={{ path: draftDirectory, content: "", blame: [] }}
+                  file={{ path: draftDirectory, blob: "", content: "", blame: [] }}
                   createIn={draftDirectory}
                   commits={store.commits}
                   paths={store.files.map((item) => item.path)}
@@ -475,6 +535,10 @@ export default function Memories() {
                   onDiscard={() => setDraftDirectory(null)}
                   onSave={(content, message, nextPath) => void createFile(content, message, nextPath)}
                 />
+              ) : pending ? (
+                <p className="status" role="status">
+                  {fileError ?? "Loading…"}
+                </p>
               ) : file ? (
                 <FileView
                   key={`${scope}:${file.path}`}
@@ -486,6 +550,7 @@ export default function Memories() {
                   onTab={showTab}
                   onEditingChange={setEditing}
                   onNeedHistory={ensureHistory}
+                  onNeedBlame={() => ensureBlame(file.path)}
                   onSave={(content, message, nextPath) => void save(content, message, nextPath)}
                 />
               ) : (
@@ -501,10 +566,45 @@ export default function Memories() {
 }
 
 function commitsUrl(scope: MemoryScope): string {
-  return scope === "user" ? "/api/memories/commits?scope=user" : "/api/memories/commits";
+  return scope === "user" ? "/api/memories/commits?view=tree&scope=user" : "/api/memories/commits?view=tree";
 }
 
-function pickFile(store: MemoryStore | null, requested: string | null) {
+function withText(store: MemoryStore | null, path: string, blob: string, text: string): MemoryStore | null {
+  if (!store) {
+    return store;
+  }
+  return {
+    ...store,
+    files: store.files.map((item) => (item.path === path && item.blob === blob ? { ...item, content: text } : item)),
+  };
+}
+
+/** Applies the server's tree after a save, keeping the text and blame the page already has. */
+function mergeSaved(tree: MemoryTree, local: MemoryStore, written: Map<string, string>): MemoryStore {
+  for (const entry of tree.files) {
+    const sent = written.get(entry.path);
+    if (sent !== undefined) {
+      rememberText(entry.blob, sent);
+    }
+  }
+  for (const file of local.files) {
+    if (file.blob !== "" && file.content !== null) {
+      rememberText(file.blob, file.content);
+    }
+  }
+  const merged = storeFromTree(tree, null);
+  const before = new Map(local.files.map((file) => [file.path, file]));
+  return {
+    ...merged,
+    files: merged.files.map((file) => {
+      const old = before.get(file.path);
+      return old && old.blob === file.blob ? { ...file, blame: old.blame } : file;
+    }),
+    commits: local.commits,
+  };
+}
+
+function pickFile(store: MemoryStore | null, requested: string | null): MemoryFile | null {
   if (!store) {
     return null;
   }
