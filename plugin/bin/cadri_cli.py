@@ -16,7 +16,7 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
 
-from shared import cadri_auth  # noqa: E402
+from shared import cadri_auth, memory  # noqa: E402
 from shared.discover import detected_harnesses, discover_all  # noqa: E402
 from shared.discover.opencode import export_session_json  # noqa: E402
 from shared.discover.types import SessionRef  # noqa: E402
@@ -312,6 +312,42 @@ def cmd_discover(_: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_memory(args: argparse.Namespace) -> int:
+    action = args.memory_command
+    try:
+        if action == "watch":
+            if args.detach:
+                memory.detach_watcher(Path(__file__).resolve())
+                return 0
+            return memory.watch(args.url)
+        book = memory.open_book(args.scope, args.url)
+        if action == "clone":
+            memory.ensure_clone(book)
+            if memory.sync(book, quiet=True):
+                return 1
+            print(book.path)
+            return 0
+        if action == "path":
+            memory.ensure_clone(book)
+            print(book.path)
+            return 0
+        if action == "sync":
+            return memory.sync(book, quiet=args.quiet)
+        if action == "write":
+            if args.file:
+                try:
+                    content = Path(args.file).read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise CliError(f"could not read {args.file}: {exc}") from exc
+            else:
+                content = sys.stdin.read()
+            return memory.write(book, args.path, content, args.message, args.agent)
+    except memory.MemoryFailure as exc:
+        print(f"cadri: {exc}", file=sys.stderr)
+        return exc.code
+    raise CliError(f"unknown memory command {action}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cadri", description="Cadri agent bootstrap CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -331,6 +367,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover = sub.add_parser("discover", help="List local harness sessions")
     discover.set_defaults(func=cmd_discover)
+
+    mem = sub.add_parser("memory", help="Shared clone of the team and personal memory books")
+    mem_sub = mem.add_subparsers(dest="memory_command", required=True)
+
+    def scoped(name: str, help_text: str) -> argparse.ArgumentParser:
+        child = mem_sub.add_parser(name, help=help_text)
+        child.add_argument("--scope", choices=["team", "user"], default="team")
+        child.add_argument("--url", default=None)
+        child.set_defaults(func=cmd_memory)
+        return child
+
+    scoped("clone", "Clone the book if missing, otherwise sync; print the path")
+    scoped("path", "Print the clone path (cloning first if missing)")
+    scoped("sync", "Fast-forward the clone to the server tip").add_argument("--quiet", action="store_true")
+    write = scoped("write", "Write one file through the edit API")
+    write.add_argument("path")
+    write.add_argument("--file", default=None, help="read content from this file instead of stdin")
+    write.add_argument("-m", "--message", required=True)
+    write.add_argument("--agent", default=None)
+    watch = mem_sub.add_parser("watch", help="Keep clones within a minute of the server")
+    watch.add_argument("--detach", action="store_true")
+    watch.add_argument("--url", default=None)
+    watch.set_defaults(func=cmd_memory)
 
     return parser
 
