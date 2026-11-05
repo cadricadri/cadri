@@ -2,56 +2,16 @@ use std::collections::HashMap;
 
 use axum::http::StatusCode;
 
-use crate::memory::types::{Author, BlameEntry, MemoryCommit, MemoryFile, MemoryStore};
+use crate::memory::types::{Author, BlameEntry, MemoryCommit};
+#[cfg(test)]
+use crate::memory::types::{MemoryFile, MemoryStore};
 
 use super::author::{author_from, display_message};
 use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_text, local_head, Repo};
 use super::ids::is_hex;
 use super::ids::is_keep;
-use super::tree::{cat_blobs, list_tree, parse_blame};
-
-/// Tip of the book: paths, directory markers, and file text. No blame and no history.
-/// Caller has already confirmed `HEAD` exists.
-pub(super) fn view_tree(repo: &Repo) -> Result<MemoryStore, Fail> {
-    let mut files = Vec::new();
-    let mut directories = Vec::new();
-    let mut blobs = Vec::new();
-    for (mode, sha, path) in list_tree(repo, "HEAD")? {
-        if mode != "100644" && mode != "100755" {
-            return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
-        }
-        if is_keep(&path) {
-            if let Some((directory, _)) = path.rsplit_once('/') {
-                directories.push(directory.to_string());
-            }
-            continue;
-        }
-        blobs.push((sha, path));
-    }
-    let shas: Vec<String> = blobs.iter().map(|(sha, _)| sha.clone()).collect();
-    let bodies = cat_blobs(repo, &shas)?;
-    for (sha, path) in blobs {
-        let bytes = bodies
-            .get(&sha)
-            .ok_or_else(|| Fail::git(format!("blob {sha} missing from cat-file --batch")))?;
-        let content = String::from_utf8(bytes.clone())
-            .map_err(|_| Fail::git(format!("{path} is not utf-8")))?;
-        files.push(MemoryFile {
-            path,
-            content,
-            blame: Vec::new(),
-        });
-    }
-    files.sort_by(|left, right| left.path.cmp(&right.path));
-    directories.sort();
-    directories.dedup();
-    Ok(MemoryStore {
-        files,
-        directories,
-        commits: Vec::new(),
-    })
-}
+use super::tree::{list_tree, parse_blame};
 
 pub(super) fn blame_file(repo: &Repo, path: &str) -> Result<Vec<BlameEntry>, Fail> {
     if is_keep(path) {

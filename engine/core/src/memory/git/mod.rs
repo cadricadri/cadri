@@ -12,6 +12,7 @@ mod git_cli_exec;
 mod ids;
 mod protocol;
 mod service;
+mod snapshot;
 mod store;
 mod tree;
 mod view;

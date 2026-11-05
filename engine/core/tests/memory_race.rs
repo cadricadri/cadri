@@ -32,8 +32,13 @@ async fn two_directory_servers_race_a_git_push_and_the_loser_retries() {
         store.clone(),
         root.join("left/scratch"),
     );
-    let right = MemoryService::open_at(root.join("right/repos"), store, root.join("right/scratch"));
-    race_git_pushes(root, left, right, None).await;
+    let right = MemoryService::open_at(
+        root.join("right/repos"),
+        store.clone(),
+        root.join("right/scratch"),
+    );
+    let fresh = MemoryService::open_at(root.join("fresh/repos"), store, root.join("fresh/scratch"));
+    race_git_pushes(root, left, right, fresh, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -51,9 +56,15 @@ async fn two_s3_servers_race_a_git_push_and_the_loser_retries() {
         root.join("right"),
         None,
         false,
+        S3Books::from_client("memories", client.clone()),
+    );
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
+        None,
+        false,
         S3Books::from_client("memories", client),
     );
-    race_git_pushes(root, left, right, Some(&fake)).await;
+    race_git_pushes(root, left, right, fresh, Some(&fake)).await;
     assert_eq!(fake.ref_conflicts(), 1);
 }
 
@@ -66,8 +77,13 @@ async fn two_directory_servers_race_a_ui_commit_and_both_land() {
         store.clone(),
         root.join("left/scratch"),
     );
-    let right = MemoryService::open_at(root.join("right/repos"), store, root.join("right/scratch"));
-    race_ui_commits(root, left, right, None).await;
+    let right = MemoryService::open_at(
+        root.join("right/repos"),
+        store.clone(),
+        root.join("right/scratch"),
+    );
+    let fresh = MemoryService::open_at(root.join("fresh/repos"), store, root.join("fresh/scratch"));
+    race_ui_commits(root, left, right, fresh, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -85,9 +101,15 @@ async fn two_s3_servers_race_a_ui_commit_and_both_land() {
         root.join("right"),
         None,
         false,
+        S3Books::from_client("memories", client.clone()),
+    );
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
+        None,
+        false,
         S3Books::from_client("memories", client),
     );
-    race_ui_commits(root, left, right, Some(&fake)).await;
+    race_ui_commits(root, left, right, fresh, Some(&fake)).await;
     assert_eq!(fake.ref_conflicts(), 1);
 }
 
@@ -156,6 +178,7 @@ async fn race_git_pushes(
     root: PathBuf,
     left: MemoryService,
     right: MemoryService,
+    fresh: MemoryService,
     fake: Option<&FakeS3>,
 ) {
     let gate = PublishGate::new();
@@ -236,8 +259,15 @@ async fn race_git_pushes(
     ));
     let tip = rev_parse(&loser_dir, &config, "HEAD");
 
-    let body = get_json(&right_addr, "/api/memories");
-    let log = get_json(&right_addr, "/api/memories/log");
+    let fresh_addr = listen(assemble(
+        db::open(&root.join("transcripts.db")).unwrap(),
+        Arc::new(NoAuth),
+        None,
+        fresh,
+    ))
+    .await;
+    let body = get_json(&fresh_addr, "/api/memories");
+    let log = get_json(&fresh_addr, "/api/memories/log");
     let ids: Vec<&str> = log["commits"]
         .as_array()
         .unwrap()
@@ -256,6 +286,7 @@ async fn race_ui_commits(
     root: PathBuf,
     left: MemoryService,
     right: MemoryService,
+    fresh: MemoryService,
     fake: Option<&FakeS3>,
 ) {
     let gate = PublishGate::new();
@@ -278,11 +309,19 @@ async fn race_ui_commits(
     if let Some(fake) = fake {
         assert_eq!(fake.ref_conflicts(), 1);
     }
-    let body = get_json(&right_addr, "/api/memories");
+    // A server started after both writes loads the book from the durable store.
+    let fresh_addr = listen(assemble(
+        db::open(&root.join("transcripts.db")).unwrap(),
+        Arc::new(NoAuth),
+        None,
+        fresh,
+    ))
+    .await;
+    let body = get_json(&fresh_addr, "/api/memories");
     let files = file_map(&body);
     assert_eq!(files["left.md"], "from the left server\n");
     assert_eq!(files["right.md"], "from the right server\n");
-    let log = get_json(&right_addr, "/api/memories/log");
+    let log = get_json(&fresh_addr, "/api/memories/log");
     assert_eq!(log["commits"].as_array().unwrap().len(), 2);
     let _ = fs::remove_dir_all(root);
 }
