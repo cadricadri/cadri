@@ -43,7 +43,6 @@ struct Inner {
     backend: Backend,
     durable: Box<dyn Durable>,
     scratch: PathBuf,
-    mount: Option<PathBuf>,
     jail: bool,
     books: Mutex<HashMap<String, Arc<Book>>>,
     logs: Mutex<HashMap<String, (String, Vec<MemoryCommit>)>>,
@@ -88,40 +87,27 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
-    pub fn open_local(root: impl Into<PathBuf>, mount: Option<PathBuf>, jail: bool) -> Self {
+    pub fn open_local(root: impl Into<PathBuf>, jail: bool) -> Self {
         let root = root.into();
         Self::new(
             root.join("repos"),
             Backend::Directory(root.join("store")),
             root.join("scratch"),
-            mount,
             jail,
         )
     }
 
-    pub fn open_s3(
-        root: impl Into<PathBuf>,
-        mount: Option<PathBuf>,
-        jail: bool,
-        books: S3Books,
-    ) -> Self {
+    pub fn open_s3(root: impl Into<PathBuf>, jail: bool, books: S3Books) -> Self {
         let root = root.into();
         Self::new(
             root.join("repos"),
             Backend::S3(Arc::new(books)),
             root.join("scratch"),
-            mount,
             jail,
         )
     }
 
-    pub(super) fn new(
-        repos: PathBuf,
-        backend: Backend,
-        scratch: PathBuf,
-        mount: Option<PathBuf>,
-        jail: bool,
-    ) -> Self {
+    pub(super) fn new(repos: PathBuf, backend: Backend, scratch: PathBuf, jail: bool) -> Self {
         let durable: Box<dyn Durable> = match &backend {
             Backend::Directory(store) => Box::new(DirDurable::new(store.clone())),
             Backend::S3(books) => Box::new(Arc::clone(books)),
@@ -132,7 +118,6 @@ impl MemoryService {
                 backend,
                 durable,
                 scratch,
-                mount,
                 jail,
                 books: Mutex::new(HashMap::new()),
                 logs: Mutex::new(HashMap::new()),
@@ -151,7 +136,7 @@ impl MemoryService {
 
     /// Test helper: directory store with explicit git/scratch paths.
     pub fn open_at(repos: PathBuf, store: PathBuf, scratch: PathBuf) -> Self {
-        Self::new(repos, Backend::Directory(store), scratch, None, false)
+        Self::new(repos, Backend::Directory(store), scratch, false)
     }
 
     /// Test helper: two servers wait in `publish` until `parties` arrive, then
@@ -911,27 +896,11 @@ impl MemoryService {
     }
 
     pub(super) fn load_bundle(&self, repo_id: &str, sha: &str) -> Result<Vec<u8>, Fail> {
-        if let Some(bytes) = self.mount_bundle(repo_id, sha)? {
-            return Ok(bytes);
-        }
         match &self.inner.backend {
             Backend::Directory(store) => fs::read(obj_path(store, repo_id, sha))
                 .map_err(|_| Fail::git(format!("memory bundle {sha} is missing"))),
             Backend::S3(books) => books.get_object(repo_id, sha).map_err(s3_fail),
         }
-    }
-
-    pub(super) fn mount_bundle(&self, repo_id: &str, sha: &str) -> Result<Option<Vec<u8>>, Fail> {
-        let Some(mount) = &self.inner.mount else {
-            return Ok(None);
-        };
-        if read_sha_file(&mount.join("repos").join(repo_id).join("refs/heads/main"))?.as_deref()
-            != Some(sha)
-        {
-            return Ok(None);
-        }
-        let path = mount.join("repos").join(repo_id).join("objects").join(sha);
-        Ok(fs::read(path).ok())
     }
 
     fn wait_for_peer(&self) {

@@ -76,12 +76,8 @@ impl Bench {
         let client = S3Books::test_client(&self.fake.endpoint);
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
-        let service = MemoryService::open_s3(
-            dir.clone(),
-            None,
-            false,
-            S3Books::from_client("memories", client),
-        );
+        let service =
+            MemoryService::open_s3(dir.clone(), false, S3Books::from_client("memories", client));
         let app = assemble(
             db::open(&dir.join("transcripts.db")).unwrap(),
             Arc::new(NoAuth),

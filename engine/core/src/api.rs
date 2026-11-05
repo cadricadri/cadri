@@ -39,12 +39,7 @@ struct AppState {
 pub fn router(db: Connection, auth: Arc<dyn Authenticator>, extra: Option<Router>) -> Router {
     let n = MEMORY_ROOTS.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("cadri-memories-{}-{n}", std::process::id()));
-    assemble(
-        db,
-        auth,
-        extra,
-        MemoryService::open_local(root, None, false),
-    )
+    assemble(db, auth, extra, MemoryService::open_local(root, false))
 }
 
 pub fn assemble(
@@ -123,10 +118,9 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
             .unwrap_or_else(|| Path::new("."))
             .join("memories"),
     };
-    let mount = std::env::var("CADRI_MEMORIES_MOUNT")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    if std::env::var("CADRI_MEMORIES_MOUNT").is_ok_and(|value| !value.is_empty()) {
+        eprintln!("CADRI_MEMORIES_MOUNT is no longer used");
+    }
     let memories = match std::env::var("CADRI_MEMORIES_BUCKET") {
         Ok(bucket) if !bucket.is_empty() => {
             let books = memory::S3Books::from_env(bucket)
@@ -135,9 +129,9 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
                     eprintln!("failed to configure memory bucket: {err}");
                     std::process::exit(1);
                 });
-            MemoryService::open_s3(memories_root, mount, jail_required, books)
+            MemoryService::open_s3(memories_root, jail_required, books)
         }
-        _ => MemoryService::open_local(memories_root, mount, jail_required),
+        _ => MemoryService::open_local(memories_root, jail_required),
     };
     let app = assemble(connection, auth.clone(), extra, memories);
     let scheme = if tls_cert.is_some() { "https" } else { "http" };

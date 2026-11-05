@@ -48,19 +48,16 @@ async fn two_s3_servers_race_a_git_push_and_the_loser_retries() {
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let fresh = MemoryService::open_s3(
         root.join("fresh"),
-        None,
         false,
         S3Books::from_client("memories", client),
     );
@@ -93,19 +90,16 @@ async fn two_s3_servers_race_a_ui_commit_and_both_land() {
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let fresh = MemoryService::open_s3(
         root.join("fresh"),
-        None,
         false,
         S3Books::from_client("memories", client),
     );
@@ -341,13 +335,11 @@ async fn s3_pair(root: &Path) -> (FakeS3, std::net::SocketAddr, std::net::Socket
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_client("memories", client),
     );
