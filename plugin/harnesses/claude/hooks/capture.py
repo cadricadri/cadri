@@ -99,6 +99,12 @@ def upload(base: str, payload: dict) -> None:
 
 def main() -> int:
     try:
+        from shared import memory
+
+        memory.touch_heartbeat_quietly()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
         event = read_event()
         if event is not None:
             upload(cadri_auth.server_url(), build_payload(event))
