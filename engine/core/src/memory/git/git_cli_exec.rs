@@ -183,10 +183,6 @@ pub(super) fn local_head(repo: &Repo) -> Result<Option<String>, Fail> {
     }
 }
 
-pub(super) fn object_exists(repo: &Repo, sha: &str) -> Result<bool, Fail> {
-    Ok(git_out(repo, &["cat-file", "-e", sha], None, &[])?.ok)
-}
-
 pub(super) fn is_ancestor(repo: &Repo, old: &str, new_sha: &str) -> Result<bool, Fail> {
     Ok(git_out(
         repo,

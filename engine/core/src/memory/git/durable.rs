@@ -1,10 +1,9 @@
-//! Durable store interface shared by the directory store and S3. Nothing in
-//! production calls it until the log format lands.
-#![allow(dead_code)]
+//! Durable store interface shared by the directory store and S3.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use super::error::{s3_fail, Fail};
 use crate::memory::s3::S3Books;
@@ -27,6 +26,25 @@ pub(super) trait Durable: Send + Sync {
         prefix: &str,
         start_after: Option<&str>,
     ) -> Result<Vec<String>, Fail>;
+}
+
+impl<T: Durable + ?Sized> Durable for Arc<T> {
+    fn get(&self, repo_id: &str, key: &str) -> Result<Option<Vec<u8>>, Fail> {
+        (**self).get(repo_id, key)
+    }
+
+    fn create(&self, repo_id: &str, key: &str, bytes: &[u8]) -> Result<Created, Fail> {
+        (**self).create(repo_id, key, bytes)
+    }
+
+    fn list(
+        &self,
+        repo_id: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<Vec<String>, Fail> {
+        (**self).list(repo_id, prefix, start_after)
+    }
 }
 
 pub(super) fn log_key(seq: u64) -> String {
@@ -177,7 +195,6 @@ impl Durable for S3Books {
 mod tests {
     use super::*;
     use crate::memory::s3::FakeS3;
-    use std::sync::Arc;
 
     const REPO: &str = "abcdef0123456789abcdef0123456789";
 

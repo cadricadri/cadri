@@ -25,10 +25,8 @@ impl Fail {
 }
 
 pub(super) fn s3_fail(err: S3Fail) -> Fail {
-    match err {
-        S3Fail::Conflict => Fail::Conflict,
-        S3Fail::Message(message) => Fail::git(message),
-    }
+    let S3Fail::Message(message) = err;
+    Fail::git(message)
 }
 
 pub(super) fn into_api(err: Fail) -> ApiError {

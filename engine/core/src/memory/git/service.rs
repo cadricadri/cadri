@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -10,43 +11,48 @@ use crate::memory::s3::S3Books;
 use crate::memory::types::{BlameEntry, Change, MemoryCommit, MemoryStore, MemoryTree};
 use crate::ApiError;
 
+use super::bundle::parse_bundle_header;
 use super::commit::{
     apply_changes, build_tree, clean_message, commit_tree, current_sources, Source,
 };
+use super::durable::{checkpoint_key, log_key, seq_of, Created, DirDurable, Durable};
 use super::error::{into_api, s3_fail, Fail};
-use super::git_cli_exec::{
-    ensure_repo, git_bytes, git_ok, is_ancestor, local_head, object_exists, Repo,
-};
+use super::git_cli_exec::{ensure_repo, git_bytes, git_ok, is_ancestor, local_head, Repo};
 use super::ids::{is_hex, valid_repo_id, ZERO};
 use super::protocol::{
     advertise_receive, advertise_upload, index_pack, inspect, ready, report, split_pack,
     unpack_fail, upload_args, GitHttp, RECEIVE_AD, UPLOAD_AD, UPLOAD_RESULT,
 };
 use super::snapshot::{snapshot_after, snapshot_from_repo, Snapshot};
-use super::store::{cas_ref_file, clear_stage, obj_path, put_bundle_file, read_sha_file, ref_path};
+use super::store::{clear_stage, obj_path, read_sha_file, ref_path};
 use super::view::{blame_file, read_commits};
 
 type FileBlames = HashMap<String, Vec<BlameEntry>>;
 
 pub(super) enum Backend {
     Directory(PathBuf),
-    S3(Box<S3Books>),
+    S3(Arc<S3Books>),
 }
+
+/// Log entries downloaded at once while loading a book.
+const LOG_FETCHES: usize = 8;
 
 struct Inner {
     repos: PathBuf,
+    /// Legacy layout, read only to migrate a book.
     backend: Backend,
+    durable: Box<dyn Durable>,
     scratch: PathBuf,
     mount: Option<PathBuf>,
     jail: bool,
     books: Mutex<HashMap<String, Arc<Book>>>,
     logs: Mutex<HashMap<String, (String, Vec<MemoryCommit>)>>,
     blames: Mutex<HashMap<String, (String, FileBlames)>>,
-    /// Test-only rendezvous so two servers reach the compare-and-swap together.
+    /// Test-only rendezvous so two servers reach the log create together.
     gate: Mutex<Option<Arc<PublishGate>>>,
-    /// Test-only. The next this many compare-and-swaps fail, so a UI commit can
-    /// be shown exhausting its retries.
-    cas_failures: Mutex<u32>,
+    /// Test-only. The next this many log creates find their key taken, so a UI
+    /// commit can be shown exhausting its retries.
+    log_failures: Mutex<u32>,
 }
 
 /// One book in this process. Writers hold `writer`; readers only clone the snapshot
@@ -56,7 +62,16 @@ struct Book {
     snapshot: RwLock<Option<Arc<Snapshot>>>,
 }
 
-struct WriterState;
+#[derive(Default)]
+struct WriterState {
+    /// Last log entry applied to the local repo and the snapshot.
+    seq: u64,
+    /// Inputs for deciding when to write a checkpoint; only tests read them so far.
+    #[cfg_attr(not(test), allow(dead_code))]
+    checkpoint_seq: u64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    log_bytes_since_checkpoint: u64,
+}
 
 impl Book {
     fn current(&self) -> Option<Arc<Snapshot>> {
@@ -93,7 +108,7 @@ impl MemoryService {
         let root = root.into();
         Self::new(
             root.join("repos"),
-            Backend::S3(Box::new(books)),
+            Backend::S3(Arc::new(books)),
             root.join("scratch"),
             mount,
             jail,
@@ -107,10 +122,15 @@ impl MemoryService {
         mount: Option<PathBuf>,
         jail: bool,
     ) -> Self {
+        let durable: Box<dyn Durable> = match &backend {
+            Backend::Directory(store) => Box::new(DirDurable::new(store.clone())),
+            Backend::S3(books) => Box::new(Arc::clone(books)),
+        };
         MemoryService {
             inner: Arc::new(Inner {
                 repos,
                 backend,
+                durable,
                 scratch,
                 mount,
                 jail,
@@ -118,14 +138,15 @@ impl MemoryService {
                 logs: Mutex::new(HashMap::new()),
                 blames: Mutex::new(HashMap::new()),
                 gate: Mutex::new(None),
-                cas_failures: Mutex::new(0),
+                log_failures: Mutex::new(0),
             }),
         }
     }
 
-    /// Test helper: the next `times` compare-and-swaps fail.
-    pub fn fail_next_cas(&self, times: u32) {
-        *self.inner.cas_failures.lock().expect("cas failures") = times;
+    /// Test helper: the next `times` log creates find their key taken by another
+    /// writer, without anything being stored.
+    pub fn fail_next_log_create(&self, times: u32) {
+        *self.inner.log_failures.lock().expect("log failures") = times;
     }
 
     /// Test helper: directory store with explicit git/scratch paths.
@@ -134,7 +155,7 @@ impl MemoryService {
     }
 
     /// Test helper: two servers wait in `publish` until `parties` arrive, then
-    /// exactly one compare-and-swap proceeds.
+    /// exactly one log create succeeds.
     pub fn arm_publish_gate(&self, gate: Arc<PublishGate>) {
         *self.inner.gate.lock().expect("publish gate") = Some(gate);
     }
@@ -203,6 +224,19 @@ impl MemoryService {
         .unwrap();
     }
 
+    /// Test helper: `(seq, checkpoint_seq, log_bytes_since_checkpoint)`.
+    #[cfg(test)]
+    pub(crate) fn writer_state(&self, repo_id: &str) -> (u64, u64, u64) {
+        self.with_writer(repo_id, |_repo, _book, writer| {
+            Ok((
+                writer.seq,
+                writer.checkpoint_seq,
+                writer.log_bytes_since_checkpoint,
+            ))
+        })
+        .unwrap()
+    }
+
     pub(crate) fn commit(
         &self,
         repo_id: &str,
@@ -240,16 +274,14 @@ impl MemoryService {
         changes: &[Change],
     ) -> Result<Arc<Snapshot>, ApiError> {
         for _ in 0..8 {
-            match self.with_writer(repo_id, |repo, book, _writer| {
-                match self.commit_once(repo, repo_id, book, user_id, label, message, changes) {
-                    Err(Fail::Conflict) => {
-                        self.refresh(repo, repo_id, book)?;
-                        Err(Fail::Conflict)
-                    }
-                    Err(err) => Err(err),
-                    // The writer lock is still held, so this is the snapshot just installed.
-                    Ok(_) => loaded(book),
-                }
+            match self.with_writer(repo_id, |repo, book, writer| {
+                // A lost log create has already caught the book up, so a retry
+                // starts from the other writer's tip.
+                self.commit_once(
+                    repo, repo_id, book, writer, user_id, label, message, changes,
+                )?;
+                // The writer lock is still held, so this is the snapshot just installed.
+                loaded(book)
             }) {
                 Ok(store) => return Ok(store),
                 Err(Fail::Conflict) => continue,
@@ -280,8 +312,10 @@ impl MemoryService {
                 })
                 .map_err(into_api),
             _ => self
-                .with_writer(repo_id, |repo, book, _writer| {
-                    self.git_once(repo, repo_id, book, path, is_post, service, body, user_id)
+                .with_writer(repo_id, |repo, book, writer| {
+                    self.git_once(
+                        repo, repo_id, book, writer, path, is_post, service, body, user_id,
+                    )
                 })
                 .map_err(into_api),
         }
@@ -326,7 +360,7 @@ impl MemoryService {
             .entry(repo_id.to_string())
             .or_insert_with(|| {
                 Arc::new(Book {
-                    writer: Mutex::new(WriterState),
+                    writer: Mutex::new(WriterState::default()),
                     snapshot: RwLock::new(None),
                 })
             })
@@ -364,22 +398,203 @@ impl MemoryService {
         let book = self.book(repo_id)?;
         let mut writer = book.writer.lock().unwrap_or_else(|err| err.into_inner());
         let repo = self.repo(repo_id)?;
-        ensure_repo(&repo)?;
         if book.current().is_none() {
-            self.refresh(&repo, repo_id, &book)?;
+            self.hydrate(&repo, repo_id, &book, &mut writer)?;
         }
         f(&repo, &book, &mut writer)
     }
 
-    /// Catches the local repo up with the durable store and rebuilds the snapshot.
-    fn refresh(&self, repo: &Repo, repo_id: &str, book: &Book) -> Result<(), Fail> {
-        self.sync(repo, repo_id)?;
-        let tip = local_head(repo)?;
-        let previous = book.current();
-        let seq = previous.as_ref().map_or(0, |snapshot| snapshot.seq);
-        let snapshot = snapshot_from_repo(repo, tip.as_deref(), seq, previous.as_deref())?;
+    /// Loads the book into a fresh local repo: the latest checkpoint, then every log
+    /// entry after it. A legacy book (tip ref plus full bundle) becomes checkpoint 0.
+    fn hydrate(
+        &self,
+        repo: &Repo,
+        repo_id: &str,
+        book: &Book,
+        state: &mut WriterState,
+    ) -> Result<(), Fail> {
+        if repo.git_dir.exists() {
+            fs::remove_dir_all(&repo.git_dir).map_err(|err| Fail::git(err.to_string()))?;
+        }
+        if repo.scratch.exists() {
+            fs::remove_dir_all(&repo.scratch).map_err(|err| Fail::git(err.to_string()))?;
+        }
+        fs::create_dir_all(&repo.scratch).map_err(|err| Fail::git(err.to_string()))?;
+        ensure_repo(repo)?;
+        *state = WriterState::default();
+
+        let durable = &*self.inner.durable;
+        let mut checkpoint = durable
+            .list(repo_id, "checkpoint/", None)?
+            .iter()
+            .filter_map(|key| seq_of(key))
+            .max();
+        let after = checkpoint.map(log_key);
+        let entries = durable.list(repo_id, "log/", after.as_deref())?;
+        let mut tip = None;
+        let checkpoint_bytes = match checkpoint {
+            Some(seq) => Some(durable.get(repo_id, &checkpoint_key(seq))?.ok_or_else(|| {
+                broken(format!("memory checkpoint {seq} disappeared while loading"))
+            })?),
+            None if entries.is_empty() => {
+                let migrated = self.migrate(repo_id)?;
+                if migrated.is_some() {
+                    checkpoint = Some(0);
+                }
+                migrated
+            }
+            None => None,
+        };
+        if let (Some(seq), Some(bytes)) = (checkpoint, checkpoint_bytes) {
+            let name = format!("checkpoint-{seq:020}");
+            tip = Some(apply_bundle(repo, &bytes, &name, None)?);
+        }
+        let base = checkpoint.unwrap_or(0);
+        let (seq, tip, bytes) = self.apply_log(repo, repo_id, &entries, base, tip)?;
+        let snapshot = snapshot_from_repo(repo, tip.as_deref(), seq, None)?;
+        *state = WriterState {
+            seq,
+            checkpoint_seq: base,
+            log_bytes_since_checkpoint: bytes,
+        };
         self.install(repo_id, book, snapshot);
         Ok(())
+    }
+
+    /// The legacy book's full bundle, stored as checkpoint 0. `None` when the book
+    /// has no legacy tip either, which is a new, empty book.
+    fn migrate(&self, repo_id: &str) -> Result<Option<Vec<u8>>, Fail> {
+        let Some(tip) = self.read_ref(repo_id)? else {
+            return Ok(None);
+        };
+        let legacy = self.load_bundle(repo_id, &tip)?;
+        let key = checkpoint_key(0);
+        let bytes = match self.inner.durable.create(repo_id, &key, &legacy)? {
+            Created::Stored => legacy,
+            // Another process migrated first; its checkpoint is the one later log
+            // entries build on.
+            Created::Exists => self
+                .inner
+                .durable
+                .get(repo_id, &key)?
+                .ok_or_else(|| broken("memory checkpoint 0 disappeared while migrating"))?,
+        };
+        let header = parse_bundle_header(&bytes)?;
+        if !matches!(header.refs.as_slice(), [(sha, _)] if *sha == tip) {
+            return Err(broken(format!(
+                "memory checkpoint 0 does not hold the legacy tip {tip}"
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Applies log entries `keys` (seq `base + 1`, `base + 2`, ...) in order on top of
+    /// `tip`. Returns the last seq, the new tip, and the bytes applied.
+    fn apply_log(
+        &self,
+        repo: &Repo,
+        repo_id: &str,
+        keys: &[String],
+        base: u64,
+        mut tip: Option<String>,
+    ) -> Result<(u64, Option<String>, u64), Fail> {
+        let keys: Vec<&String> = keys.iter().filter(|key| seq_of(key).is_some()).collect();
+        for (index, key) in keys.iter().enumerate() {
+            let want = base + 1 + index as u64;
+            if seq_of(key) != Some(want) {
+                return Err(broken(format!("memory log gap after {}", want - 1)));
+            }
+        }
+        if keys.is_empty() {
+            return Ok((base, tip, 0));
+        }
+        let durable = &*self.inner.durable;
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel::<(usize, Result<Vec<u8>, Fail>)>();
+        let mut seq = base;
+        let mut total = 0u64;
+        std::thread::scope(|scope| {
+            for _ in 0..keys.len().min(LOG_FETCHES) {
+                let tx = tx.clone();
+                let (keys, next, stop) = (&keys, &next, &stop);
+                scope.spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(key) = keys.get(index) else {
+                            break;
+                        };
+                        let got = durable.get(repo_id, key).and_then(|bytes| {
+                            bytes.ok_or_else(|| {
+                                broken(format!("memory {key} disappeared while loading"))
+                            })
+                        });
+                        if tx.send((index, got)).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            let mut arrived = BTreeMap::new();
+            let result = (|| {
+                while (seq - base) < keys.len() as u64 {
+                    let (index, got) = rx
+                        .recv()
+                        .map_err(|_| Fail::git("memory log download stopped"))?;
+                    arrived.insert(index, got);
+                    while let Some(got) = arrived.remove(&((seq - base) as usize)) {
+                        let bytes = got?;
+                        let name = format!("log-{:020}", seq + 1);
+                        tip = Some(apply_bundle(repo, &bytes, &name, tip.as_deref())?);
+                        seq += 1;
+                        total += bytes.len() as u64;
+                    }
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                stop.store(true, Ordering::Relaxed);
+            }
+            result
+        })?;
+        Ok((seq, tip, total))
+    }
+
+    /// Another writer appended to the log. Applies its entries and installs the
+    /// resulting snapshot. On failure the book is unloaded so the next use reloads it.
+    fn catch_up(
+        &self,
+        repo: &Repo,
+        repo_id: &str,
+        book: &Book,
+        state: &mut WriterState,
+    ) -> Result<(), Fail> {
+        let result = (|| {
+            let previous = loaded(book)?;
+            let keys = self
+                .inner
+                .durable
+                .list(repo_id, "log/", Some(&log_key(state.seq)))?;
+            let (seq, tip, bytes) =
+                self.apply_log(repo, repo_id, &keys, state.seq, previous.tip.clone())?;
+            if seq == state.seq {
+                return Ok(());
+            }
+            let snapshot = snapshot_from_repo(repo, tip.as_deref(), seq, Some(&previous))?;
+            state.seq = seq;
+            state.log_bytes_since_checkpoint += bytes;
+            self.install(repo_id, book, snapshot);
+            Ok(())
+        })();
+        if result.is_err() {
+            self.unload(book);
+        }
+        result
+    }
+
+    fn unload(&self, book: &Book) {
+        *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = None;
     }
 
     fn install(&self, repo_id: &str, book: &Book, snapshot: Snapshot) {
@@ -399,17 +614,18 @@ impl MemoryService {
         repo: &Repo,
         repo_id: &str,
         book: &Book,
+        state: &WriterState,
         previous: &Snapshot,
         tip: &str,
     ) -> Result<Arc<Snapshot>, Fail> {
-        match snapshot_from_repo(repo, Some(tip), previous.seq, Some(previous)) {
+        match snapshot_from_repo(repo, Some(tip), state.seq, Some(previous)) {
             Ok(snapshot) => {
                 self.install(repo_id, book, snapshot);
                 book.current()
                     .ok_or_else(|| Fail::git("memory snapshot was not installed"))
             }
             Err(err) => {
-                *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = None;
+                self.unload(book);
                 Err(err)
             }
         }
@@ -421,6 +637,7 @@ impl MemoryService {
         repo: &Repo,
         repo_id: &str,
         book: &Book,
+        state: &mut WriterState,
         user_id: &str,
         label: &str,
         message: &str,
@@ -445,11 +662,14 @@ impl MemoryService {
         let parent = snapshot.tip.as_deref();
         let built = build_tree(repo, parent, &before, &files)?;
         let sha = commit_tree(repo, &built.tree, parent, &message, user_id, label)?;
-        self.publish(repo, repo_id, parent, &sha)?;
+        self.publish(repo, repo_id, book, state, parent, &sha)?;
         let next = match snapshot_after(&snapshot, &sha, &built.files, built.new_blobs) {
-            Ok(next) => next,
+            Ok(next) => Snapshot {
+                seq: state.seq,
+                ..next
+            },
             Err(err) => {
-                *book.snapshot.write().unwrap_or_else(|err| err.into_inner()) = None;
+                self.unload(book);
                 return Err(err);
             }
         };
@@ -466,6 +686,7 @@ impl MemoryService {
         repo: &Repo,
         repo_id: &str,
         book: &Book,
+        state: &mut WriterState,
         path: &str,
         is_post: bool,
         service: Option<&str>,
@@ -478,17 +699,19 @@ impl MemoryService {
                 Err(Fail::api(StatusCode::BAD_REQUEST, "invalid git service"))
             }
             ("git-receive-pack", true, _) => {
-                self.receive(repo, repo_id, book, &snapshot, body, user_id)
+                self.receive(repo, repo_id, book, state, &snapshot, body, user_id)
             }
             _ => Err(Fail::api(StatusCode::NOT_FOUND, "not found")),
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // one push: book, writer, and the request
     fn receive(
         &self,
         repo: &Repo,
         repo_id: &str,
         book: &Book,
+        state: &mut WriterState,
         snapshot: &Snapshot,
         body: &[u8],
         user_id: &str,
@@ -544,17 +767,15 @@ impl MemoryService {
             }
             return Err(err);
         }
-        match self.publish(repo, repo_id, old, &command.new) {
+        match self.publish(repo, repo_id, book, state, old, &command.new) {
             Ok(()) => {
-                self.install_published(repo, repo_id, book, snapshot, &command.new)?;
+                self.install_published(repo, repo_id, book, state, snapshot, &command.new)?;
                 Ok(ready(report(Ok(()))))
             }
             // Conventional phrasing so clients that match `non-fast-forward`
-            // (including the Letta memory client) rebase and retry. A lost
-            // compare-and-swap is that case: main moved, and this tip did not.
+            // (including the Letta memory client) rebase and retry. A lost log
+            // create is that case: main moved, and this tip did not.
             Err(Fail::Conflict) => {
-                self.refresh(repo, repo_id, book)?;
-                // A write whose response was lost may already have landed.
                 if book.current().and_then(|now| now.tip.clone()).as_deref()
                     == Some(command.new.as_str())
                 {
@@ -566,78 +787,71 @@ impl MemoryService {
         }
     }
 
+    /// Makes `sha` (a descendant of `old`) durable as log entry `seq + 1`, then moves
+    /// `main`. If another writer took that entry, catches up and returns
+    /// `Fail::Conflict`.
     fn publish(
         &self,
         repo: &Repo,
         repo_id: &str,
+        book: &Book,
+        state: &mut WriterState,
         old: Option<&str>,
         sha: &str,
     ) -> Result<(), Fail> {
-        git_ok(repo, &["update-ref", "refs/cadri/stage", sha], None, &[])?;
-        let bundle_path = repo.scratch.join(format!("{sha}.bundle"));
-        let _ = fs::remove_file(&bundle_path);
-        git_ok(
-            repo,
-            &[
-                "bundle",
-                "create",
-                &bundle_path.to_string_lossy(),
-                "refs/cadri/stage",
-            ],
-            None,
-            &[],
-        )?;
-        let bytes = fs::read(&bundle_path).map_err(|err| {
-            clear_stage(repo);
-            Fail::git(err.to_string())
-        })?;
-        if let Err(err) = self.put_bundle(repo_id, sha, &bytes) {
-            clear_stage(repo);
-            return Err(err);
-        }
+        let bytes = match log_bundle(repo, old, sha) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                clear_stage(repo);
+                return Err(err);
+            }
+        };
+        let key = log_key(state.seq + 1);
         self.wait_for_peer();
-        if let Err(err) = self.cas_ref(repo_id, old, sha) {
-            clear_stage(repo);
+        let ours = if self.take_log_failure() {
+            false
+        } else {
+            match self.inner.durable.create(repo_id, &key, &bytes) {
+                Ok(Created::Stored) => true,
+                // A retry whose earlier attempt was stored before its response was lost.
+                Ok(Created::Exists) => self.log_entry_holds(repo_id, &key, sha)?,
+                Err(err) => {
+                    clear_stage(repo);
+                    return Err(err);
+                }
+            }
+        };
+        clear_stage(repo);
+        if !ours {
+            self.note_conflict();
+            self.catch_up(repo, repo_id, book, state)?;
+            return Err(Fail::Conflict);
+        }
+        state.seq += 1;
+        state.log_bytes_since_checkpoint += bytes.len() as u64;
+        if let Err(err) = git_ok(repo, &["update-ref", "refs/heads/main", sha], None, &[]) {
+            self.unload(book);
             return Err(err);
         }
-        git_ok(repo, &["update-ref", "refs/heads/main", sha], None, &[])?;
-        clear_stage(repo);
         Ok(())
     }
 
-    fn sync(&self, repo: &Repo, repo_id: &str) -> Result<(), Fail> {
-        let auth = self.read_ref(repo_id)?;
-        let local = local_head(repo)?;
-        if auth == local {
-            return Ok(());
-        }
-        let Some(sha) = auth else {
-            if local.is_some() {
-                git_ok(repo, &["update-ref", "-d", "refs/heads/main"], None, &[])?;
-            }
-            return Ok(());
+    fn log_entry_holds(&self, repo_id: &str, key: &str, sha: &str) -> Result<bool, Fail> {
+        let Some(bytes) = self.inner.durable.get(repo_id, key)? else {
+            return Ok(false);
         };
-        if object_exists(repo, &sha)? {
-            git_ok(repo, &["update-ref", "refs/heads/main", &sha], None, &[])?;
-            return Ok(());
+        let header = parse_bundle_header(&bytes)?;
+        Ok(matches!(header.refs.as_slice(), [(tip, _)] if tip == sha))
+    }
+
+    fn take_log_failure(&self) -> bool {
+        let mut left = self.inner.log_failures.lock().expect("log failures");
+        if *left > 0 {
+            *left -= 1;
+            true
+        } else {
+            false
         }
-        let bytes = self.load_bundle(repo_id, &sha)?;
-        let bundle_path = repo.scratch.join(format!("{sha}.bundle"));
-        fs::write(&bundle_path, bytes).map_err(|err| Fail::git(err.to_string()))?;
-        git_ok(
-            repo,
-            &[
-                "fetch",
-                &bundle_path.to_string_lossy(),
-                "+refs/cadri/stage:refs/heads/main",
-            ],
-            None,
-            &[],
-        )?;
-        if local_head(repo)?.as_deref() != Some(sha.as_str()) {
-            return Err(Fail::git(format!("bundle for {sha} did not move main")));
-        }
-        Ok(())
     }
 
     fn read_history(&self, repo_id: &str) -> Result<Vec<MemoryCommit>, Fail> {
@@ -720,38 +934,6 @@ impl MemoryService {
         Ok(fs::read(path).ok())
     }
 
-    pub(super) fn put_bundle(&self, repo_id: &str, sha: &str, bytes: &[u8]) -> Result<(), Fail> {
-        match &self.inner.backend {
-            Backend::Directory(store) => put_bundle_file(&obj_path(store, repo_id, sha), bytes),
-            Backend::S3(books) => books.put_bundle(repo_id, sha, bytes).map_err(s3_fail),
-        }
-    }
-
-    pub(super) fn cas_ref(
-        &self,
-        repo_id: &str,
-        expected: Option<&str>,
-        new_sha: &str,
-    ) -> Result<(), Fail> {
-        {
-            let mut left = self.inner.cas_failures.lock().expect("cas failures");
-            if *left > 0 {
-                *left -= 1;
-                drop(left);
-                self.note_conflict();
-                return Err(Fail::Conflict);
-            }
-        }
-        let result = match &self.inner.backend {
-            Backend::Directory(store) => cas_ref_file(&ref_path(store, repo_id), expected, new_sha),
-            Backend::S3(books) => books.cas_ref(repo_id, expected, new_sha).map_err(s3_fail),
-        };
-        if matches!(result, Err(Fail::Conflict)) {
-            self.note_conflict();
-        }
-        result
-    }
-
     fn wait_for_peer(&self) {
         let gate = self.inner.gate.lock().expect("publish gate").clone();
         if let Some(gate) = gate {
@@ -770,6 +952,73 @@ impl MemoryService {
 fn loaded(book: &Book) -> Result<Arc<Snapshot>, Fail> {
     book.current()
         .ok_or_else(|| Fail::git("memory snapshot was not loaded"))
+}
+
+/// A durable store that cannot be loaded as written. Reported, never repaired.
+fn broken(message: impl Into<String>) -> Fail {
+    let message = message.into();
+    eprintln!("memory store: {message}");
+    Fail::api(StatusCode::INTERNAL_SERVER_ERROR, message)
+}
+
+/// The objects added since `old`, as a bundle whose one ref, `refs/cadri/stage`,
+/// is `sha`. Leaves the stage ref set.
+fn log_bundle(repo: &Repo, old: Option<&str>, sha: &str) -> Result<Vec<u8>, Fail> {
+    git_ok(repo, &["update-ref", "refs/cadri/stage", sha], None, &[])?;
+    let path = repo.scratch.join(format!("{sha}.bundle"));
+    let _ = fs::remove_file(&path);
+    let path_arg = path.to_string_lossy();
+    let exclude = old.map(|old| format!("^{old}"));
+    let mut args = vec!["bundle", "create", &path_arg, "refs/cadri/stage"];
+    if let Some(exclude) = &exclude {
+        args.push(exclude);
+    }
+    let created = git_ok(repo, &args, None, &[]);
+    let bytes = created.and_then(|()| fs::read(&path).map_err(|err| Fail::git(err.to_string())));
+    let _ = fs::remove_file(&path);
+    bytes
+}
+
+/// Fetches one bundle into `main`. Its prerequisites must be met by `tip` (none
+/// for an empty book), and afterwards `main` must be its single ref. Returns the
+/// new tip.
+fn apply_bundle(repo: &Repo, bytes: &[u8], name: &str, tip: Option<&str>) -> Result<String, Fail> {
+    let header = parse_bundle_header(bytes)?;
+    let [(sha, refname)] = header.refs.as_slice() else {
+        return Err(broken(format!("memory {name} must hold exactly one ref")));
+    };
+    // A merge pushed on top of `tip` can also list older commits as boundaries;
+    // `tip` itself is always one of them.
+    let follows = match tip {
+        None => header.prerequisites.is_empty(),
+        Some(tip) => header.prerequisites.iter().any(|needed| needed == tip),
+    };
+    if !follows {
+        return Err(broken(format!(
+            "memory {name} does not follow tip {}",
+            tip.unwrap_or("(empty)")
+        )));
+    }
+    let path = repo.scratch.join(format!("{name}.bundle"));
+    fs::write(&path, bytes).map_err(|err| Fail::git(err.to_string()))?;
+    let fetched = git_ok(
+        repo,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-write-fetch-head",
+            &path.to_string_lossy(),
+            &format!("+{refname}:refs/heads/main"),
+        ],
+        None,
+        &[],
+    );
+    let _ = fs::remove_file(&path);
+    fetched?;
+    if local_head(repo)?.as_deref() != Some(sha.as_str()) {
+        return Err(broken(format!("memory {name} did not move main to {sha}")));
+    }
+    Ok(sha.clone())
 }
 
 /// One-shot meeting point used by the two-server race tests.

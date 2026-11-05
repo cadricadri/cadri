@@ -2,34 +2,32 @@
 
 use super::etag;
 
-/// What the next `refs/heads/main` PUT should do. Object PUTs are unaffected,
-/// which is the crash window between the bundle write and the ref swap.
-pub enum RefFault {
-    /// The ref is left unchanged and the caller sees a failed PUT.
+/// What the next PUT of a `log/` key should do: the crash windows on either side
+/// of the commit point.
+pub enum LogFault {
+    /// Nothing is stored and the caller sees a failed PUT.
     Refuse,
-    /// The ref is stored, then the caller sees a failed PUT.
+    /// The entry is stored, then the caller sees a failed PUT.
     StoreThenFail,
 }
 
 struct FakeState {
     objects: std::collections::HashMap<String, Vec<u8>>,
-    fault: Option<RefFault>,
-    /// The next object PUT fails and stores nothing.
+    fault: Option<LogFault>,
+    /// The next PUT fails and stores nothing.
     object_fault: bool,
-    /// `If-Match` / `If-None-Match` rejections of the ref only.
-    ref_conflicts: usize,
+    /// `If-Match` / `If-None-Match` rejections of `log/` keys only.
+    log_conflicts: usize,
     /// The next conditional PUT returns 409 and stores nothing.
     conflicts_left: u32,
-    /// The `If-Match` value from the latest ref update, when the client sent one.
-    last_ref_match: Option<String>,
     saw_checksum: bool,
     latency_ms: u64,
     gets: usize,
     puts: usize,
 }
 
-/// Local S3 stand-in. It ignores signatures and speaks the two calls the
-/// publisher uses: GET, and PUT with `If-None-Match` / `If-Match`.
+/// Local S3 stand-in. It ignores signatures and speaks the calls the durable
+/// store uses: GET, `ListObjectsV2`, and PUT with `If-None-Match` (or `If-Match`).
 ///
 /// `aws_smithy_mocks` replays a scripted status for each call. A race needs the
 /// second PUT's result to depend on the bytes the first PUT stored, so this
@@ -47,9 +45,8 @@ impl FakeS3 {
             objects: std::collections::HashMap::new(),
             fault: None,
             object_fault: false,
-            ref_conflicts: 0,
+            log_conflicts: 0,
             conflicts_left: 0,
-            last_ref_match: None,
             saw_checksum: false,
             latency_ms: 0,
             gets: 0,
@@ -81,7 +78,7 @@ impl FakeS3 {
         self.state.lock().unwrap().objects.remove(key);
     }
 
-    pub fn fail_next_ref_put(&self, fault: RefFault) {
+    pub fn fail_next_log_put(&self, fault: LogFault) {
         self.state.lock().unwrap().fault = Some(fault);
     }
 
@@ -93,16 +90,12 @@ impl FakeS3 {
         self.state.lock().unwrap().conflicts_left = 1;
     }
 
-    pub fn last_ref_match(&self) -> Option<String> {
-        self.state.lock().unwrap().last_ref_match.clone()
-    }
-
     pub fn saw_checksum(&self) -> bool {
         self.state.lock().unwrap().saw_checksum
     }
 
-    pub fn ref_conflicts(&self) -> usize {
-        self.state.lock().unwrap().ref_conflicts
+    pub fn log_conflicts(&self) -> usize {
+        self.state.lock().unwrap().log_conflicts
     }
 
     /// Delays every request by `per_request` before it is handled.
@@ -185,16 +178,11 @@ async fn fake_route(
                 .to_vec();
             let mut state = state.lock().unwrap();
             let current = state.objects.get(&key).cloned();
-            let is_ref = key.ends_with("refs/heads/main");
-            if is_ref {
-                if if_match.is_some() {
-                    state.last_ref_match = if_match.clone();
-                }
-                if checksum {
-                    state.saw_checksum = true;
-                }
+            let is_log = key.contains("/log/");
+            if checksum {
+                state.saw_checksum = true;
             }
-            if !is_ref && state.object_fault {
+            if state.object_fault {
                 state.object_fault = false;
                 return xml(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
             }
@@ -208,18 +196,18 @@ async fn fake_route(
             } || (if_none.as_deref().is_some_and(|value| value.trim() == "*")
                 && current.is_some());
             if reject {
-                if is_ref {
-                    state.ref_conflicts += 1;
+                if is_log {
+                    state.log_conflicts += 1;
                 }
                 return xml(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
             }
-            let fault = if is_ref { state.fault.take() } else { None };
-            if matches!(fault, Some(RefFault::Refuse)) {
+            let fault = if is_log { state.fault.take() } else { None };
+            if matches!(fault, Some(LogFault::Refuse)) {
                 return xml(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
             }
             let tag = etag(&bytes);
             state.objects.insert(key, bytes);
-            if matches!(fault, Some(RefFault::StoreThenFail)) {
+            if matches!(fault, Some(LogFault::StoreThenFail)) {
                 return xml(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
             }
             Response::builder()
