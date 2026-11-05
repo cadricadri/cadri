@@ -55,10 +55,12 @@ export function applyCreateFile(
   }
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   return {
+    tip: store.tip,
     files: [
       ...store.files,
       {
         path,
+        blob: "",
         content,
         blame: content.split("\n").map(() => ({ author, commit_id: commitId })),
       },
@@ -83,6 +85,7 @@ export function applyCreateFolder(store: MemoryStore, path: string, author: Memo
   }
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   return {
+    tip: store.tip,
     files: store.files,
     directories: [...store.directories, path],
     commits: [
@@ -115,6 +118,7 @@ export function applyRenameFolder(
   const moved = store.files.filter((file) => file.path.startsWith(`${from}/`)).map((file) => rewrite(file.path));
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   return {
+    tip: store.tip,
     files: store.files.map((file) => ({ ...file, path: rewrite(file.path) })),
     directories: Array.from(new Set([...store.directories.map(rewrite), to])),
     commits: [
@@ -168,6 +172,7 @@ export function applyMove(store: MemoryStore, from: string, to: string, author: 
     const moved = store.files.filter((file) => file.path.startsWith(`${from}/`)).map((file) => rewrite(file.path));
     const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
     return {
+      tip: store.tip,
       files: store.files.map((file) => ({ ...file, path: rewrite(file.path) })),
       directories: Array.from(new Set([...store.directories.map(rewrite), to])),
       commits: [
@@ -192,6 +197,7 @@ export function applyMove(store: MemoryStore, from: string, to: string, author: 
   const rewrite = (path: string) => (path === from ? to : path);
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   return {
+    tip: store.tip,
     files: store.files.map((item) => (item.path === from ? { ...item, path: to } : item)),
     directories: store.directories,
     commits: [

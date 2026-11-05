@@ -78,10 +78,12 @@ export function applyUpload(
   }
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   return {
+    tip: store.tip,
     files: [
       ...store.files,
       ...drafts.map((draft) => ({
         path: draft.path,
+        blob: "",
         content: draft.content,
         blame: draft.content.split("\n").map(() => ({ author, commit_id: commitId })),
       })),

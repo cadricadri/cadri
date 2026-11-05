@@ -29,12 +29,12 @@ export function changesBetween(
   }
   for (const path of added) {
     if (!used.has(path)) {
-      changes.push({ op: "write", path, content: after.get(path) ?? "" });
+      changes.push(write(path, after.get(path) ?? ""));
     }
   }
   for (const path of before.keys()) {
     if (after.has(path) && before.get(path) !== after.get(path)) {
-      changes.push({ op: "write", path, content: after.get(path) ?? "" });
+      changes.push(write(path, after.get(path) ?? ""));
     }
   }
   if (changes.length === 0) {
@@ -46,10 +46,17 @@ export function changesBetween(
 function virtualFiles(store: MemoryStore): Map<string, string> {
   const files = new Map<string, string>();
   for (const file of store.files) {
-    files.set(file.path, file.content);
+    files.set(file.path, file.content ?? `\u0000blob:${file.blob}`);
   }
   for (const directory of store.directories ?? []) {
     files.set(`${directory}/.keep`, "");
   }
   return files;
+}
+
+function write(path: string, content: string): MemoryChange {
+  if (content.startsWith("\u0000blob:")) {
+    throw new Error(`Cannot write ${path}: its text was never loaded.`);
+  }
+  return { op: "write", path, content };
 }
