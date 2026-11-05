@@ -195,6 +195,77 @@ impl S3Books {
         }
     }
 
+    pub(crate) fn get_key(&self, repo_id: &str, key: &str) -> Result<Option<Vec<u8>>, S3Fail> {
+        let client = self.client_for(repo_id)?;
+        self.get(&client, &repo_key(repo_id, key))
+    }
+
+    /// Never overwrites: `true` when stored, `false` when the key already exists.
+    pub(crate) fn create_key(
+        &self,
+        repo_id: &str,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<bool, S3Fail> {
+        let client = self.client_for(repo_id)?;
+        match self.put(
+            &client,
+            &repo_key(repo_id, key),
+            bytes,
+            PutPrecondition::Create,
+        )? {
+            PutOutcome::Stored => Ok(true),
+            PutOutcome::Exists => Ok(false),
+        }
+    }
+
+    /// Keys under `prefix`, relative to `repos/<repo_id>/`, ascending, all pages.
+    pub(crate) fn list_keys(
+        &self,
+        repo_id: &str,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> Result<Vec<String>, S3Fail> {
+        let client = self.client_for(repo_id)?;
+        let bucket = self.bucket.clone();
+        let root = repo_key(repo_id, "");
+        let prefix = format!("{root}{prefix}");
+        let start_after = start_after.map(|key| format!("{root}{key}"));
+        self.drive(async move {
+            let mut keys = Vec::new();
+            let mut token: Option<String> = None;
+            loop {
+                let mut request = client
+                    .list_objects_v2()
+                    .bucket(bucket.clone())
+                    .prefix(prefix.clone());
+                if let Some(after) = &start_after {
+                    request = request.start_after(after);
+                }
+                if let Some(token) = &token {
+                    request = request.continuation_token(token);
+                }
+                let page = request
+                    .send()
+                    .await
+                    .map_err(|err| S3Fail::Message(format!("s3 list failed: {err:?}")))?;
+                for object in page.contents() {
+                    if let Some(key) = object.key() {
+                        keys.push(key.strip_prefix(&root).unwrap_or(key).to_string());
+                    }
+                }
+                match page.next_continuation_token() {
+                    Some(next) if page.is_truncated().unwrap_or(false) => {
+                        token = Some(next.to_string())
+                    }
+                    _ => break,
+                }
+            }
+            keys.sort();
+            Ok(keys)
+        })?
+    }
+
     fn client_for(&self, repo_id: &str) -> Result<Client, S3Fail> {
         let Some(role_arn) = &self.access_role_arn else {
             return Ok(self.client.clone());
@@ -388,6 +459,10 @@ fn role_session_name(repo_id: &str) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     format!("cadri-{hex}")
+}
+
+fn repo_key(repo_id: &str, key: &str) -> String {
+    format!("repos/{repo_id}/{key}")
 }
 
 fn ref_key(repo_id: &str) -> String {
