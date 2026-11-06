@@ -18,7 +18,7 @@ PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN))
 
 from shared import cadri_auth, install  # noqa: E402
-from shared.discover import codex  # noqa: E402
+from shared.discover import codex, opencode  # noqa: E402
 
 
 class InstallTestCase(PluginTestCase):
@@ -207,9 +207,18 @@ class OpenCodeInstallTests(InstallTestCase):
         db.parent.mkdir(parents=True)
         connection = sqlite3.connect(db)
         with connection:
-            connection.execute("CREATE TABLE session (id TEXT, time_updated INTEGER)")
-            connection.execute("CREATE TABLE message (id TEXT, sessionID TEXT, data TEXT)")
-            connection.execute("INSERT INTO message VALUES ('m1', 'ses_1', '{\"role\":\"user\"}')")
+            # OpenCode 1.19's layout, including the session_message table it leaves empty.
+            connection.execute("CREATE TABLE session (id TEXT, title TEXT, time_updated INTEGER)")
+            connection.execute(
+                "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+            )
+            connection.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
+            connection.execute(
+                "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)"
+            )
+            connection.execute("INSERT INTO session VALUES ('ses_1', 'ping', 1)")
+            connection.execute("INSERT INTO message VALUES ('m1', 'ses_1', 1, '{\"role\":\"user\"}')")
+            connection.execute("INSERT INTO part VALUES ('p1', 'm1', 'ses_1', 1, '{\"type\":\"text\",\"text\":\"ping\"}')")
         connection.close()
         result = subprocess.run(
             command,
@@ -222,7 +231,28 @@ class OpenCodeInstallTests(InstallTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         [upload] = self.uploads()
         self.assertEqual(upload["body"]["harness"], "opencode")
-        self.assertEqual(json.loads(upload["body"]["content"])["messages"], [{"role": "user"}])
+        content = json.loads(upload["body"]["content"])
+        self.assertEqual(content["info"]["title"], "ping")
+        self.assertEqual(
+            content["messages"],
+            [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "ping"}]}],
+        )
+
+    def test_exports_opencode_2_sessions(self):
+        db = self.home / "opencode.db"
+        connection = sqlite3.connect(db)
+        with connection:
+            connection.execute("CREATE TABLE session_v2 (id TEXT, title TEXT, time_updated INTEGER)")
+            connection.execute(
+                "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
+            )
+            connection.execute("INSERT INTO session_v2 VALUES ('ses_2', 'pong', 1)")
+            connection.execute("INSERT INTO session_message VALUES ('b', 'ses_2', 'assistant', 2, '{\"text\":\"pong\"}')")
+            connection.execute("INSERT INTO session_message VALUES ('a', 'ses_2', 'user', 1, '{\"text\":\"ping\"}')")
+        connection.close()
+        content = json.loads(opencode.export_session_json(db, "ses_2"))
+        self.assertEqual(content["info"]["title"], "pong")
+        self.assertEqual(content["messages"], [{"text": "ping"}, {"text": "pong"}])
 
     def test_refuses_to_overwrite_a_plugin_it_did_not_write(self):
         path = self.home / ".config/opencode/plugins/cadri.ts"

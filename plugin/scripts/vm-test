@@ -95,31 +95,47 @@ if [[ "${1:-}" == "--local" ]]; then
   install_env="CADRI_PLUGIN_TGZ=http://$host:$FILE_PORT/cadri-plugin.tar.gz"
 fi
 
+popup_step=""
+# The installer's window shows up as its own process; dismiss it so a later step can trip it again.
+popup_after() {
+  sleep 3
+  if vm 'ps -axo comm | grep -q "[I]nstall Command Line Developer Tools"'; then
+    echo "!! the Command Line Tools installer opened after: $1"
+    popup_step="${popup_step:-$1}"
+    vm 'killall "Install Command Line Developer Tools" 2>/dev/null || true'
+  fi
+}
+
 say "Raw machine check"
 vm 'sw_vers -productVersion; xcode-select -p >/dev/null 2>&1 && echo "Command Line Tools: installed (not a raw Mac)" || echo "Command Line Tools: missing (good)"'
+popup_after "boot"
 
 say "Installing OpenCode (a real agent that runs free models without signing in)"
-vm 'curl -fsSL https://opencode.ai/install | bash >/dev/null 2>&1; ls ~/.opencode/bin/opencode'
+vm 'curl -fsSL https://opencode.ai/install | bash >/dev/null 2>&1; ~/.opencode/bin/opencode --version'
+popup_after "installing OpenCode"
 
 say "curl -fsSL $install_url | bash"
 vm "curl -fsSL '$install_url' | env $install_env bash"
+popup_after "install.sh"
 
 say "cadri init against the stand-in server"
 vm "PATH=\$HOME/.opencode/bin:\$PATH ~/.local/bin/cadri init --local --url http://$host:$CADRI_PORT"
+popup_after "cadri init"
 
 say "A real OpenCode session"
 vm 'export PATH=$HOME/.opencode/bin:$PATH; model=$(opencode models 2>/dev/null | grep -m1 -- "-free$"); echo "model $model"; cd /tmp && opencode run --model "$model" "Reply with the single word pong." 2>&1 | tail -1'
+popup_after "the OpenCode session"
 sleep 8
+popup_after "the capture hooks"
 
 say "Results"
-popups="$(vm 'pgrep -fl "Install Command Line Developer Tools" || true')"
 failed=0
 check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; failed=1; fi; }
-check "no Command Line Tools prompt was triggered" '[[ -z "$popups" ]]'
+check "no Command Line Tools prompt${popup_step:+ (opened after $popup_step)}" '[[ -z "$popup_step" ]]'
 check "cadri runs" 'vm "~/.local/bin/cadri --version" >/dev/null'
 check "OpenCode plugin installed" 'vm "test -f ~/.config/opencode/plugins/cadri.ts"'
 check "skills installed" 'vm "test -f ~/.agents/skills/cadri-memory-seed/SKILL.md"'
-check "OpenCode session uploaded by the plugin" 'grep -q "upload opencode .* session.execution" "$work/uploads.log"'
+check "OpenCode transcript uploaded by the plugin" 'awk "\$2 == \"opencode\" && \$5 > 500" "$work/uploads.log" | grep -q .'
 echo
 cat "$work/uploads.log"
 echo
