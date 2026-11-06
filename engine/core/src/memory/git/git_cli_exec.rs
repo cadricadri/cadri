@@ -13,6 +13,12 @@ use std::process::{Command, Stdio};
 use super::error::Fail;
 use super::ids::is_hex;
 
+#[cfg(test)]
+thread_local! {
+    /// Git processes started by this thread, for tests that bound the count.
+    pub(super) static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) struct Repo {
     pub(super) git_dir: PathBuf,
     pub(super) scratch: PathBuf,
@@ -67,6 +73,8 @@ pub(super) fn git_out(
     stdin: Option<&[u8]>,
     env: &[(&str, &str)],
 ) -> Result<GitOutput, Fail> {
+    #[cfg(test)]
+    SPAWNS.with(|count| count.set(count.get() + 1));
     let mut command = if repo.jail {
         let exe = std::env::current_exe().map_err(|err| Fail::git(err.to_string()))?;
         let mut command = Command::new(exe);
@@ -173,10 +181,6 @@ pub(super) fn local_head(repo: &Repo) -> Result<Option<String>, Fail> {
         }
         _ => Ok(None),
     }
-}
-
-pub(super) fn object_exists(repo: &Repo, sha: &str) -> Result<bool, Fail> {
-    Ok(git_out(repo, &["cat-file", "-e", sha], None, &[])?.ok)
 }
 
 pub(super) fn is_ancestor(repo: &Repo, old: &str, new_sha: &str) -> Result<bool, Fail> {

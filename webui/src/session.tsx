@@ -18,6 +18,7 @@ import {
   type AuthMode,
 } from "./auth";
 import type { InviteResult, Me, OrgResult } from "./ee/workos";
+import { clearMemoryCaches, primeMemoryBook, setMemoryIdentity } from "./pages/memories/books";
 
 type WorkosModule = typeof import("./ee/workos");
 
@@ -50,9 +51,9 @@ function markInstallSkipped(): void {
   }
 }
 
-function warmMemoryBooks(headers: Record<string, string>): void {
-  void fetch("/api/memories?scope=team", { headers });
-  void fetch("/api/memories?scope=user", { headers });
+function warmMemoryBooks(headers: Record<string, string>, me: Me | null): void {
+  setMemoryIdentity(me);
+  primeMemoryBook("team", headers);
 }
 
 export type Session = {
@@ -124,7 +125,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         return;
       }
       const me = result.kind === "ok" ? result.me : null;
-      warmMemoryBooks(authHeaders("workos"));
+      warmMemoryBooks(authHeaders("workos"), me);
       if (!installSkipped()) {
         setGate({ kind: "install", mode: "workos", me });
         return;
@@ -164,7 +165,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       return "Could not sign out.";
     }
     try {
-      location.assign(await api.signOut());
+      const target = await api.signOut();
+      clearMemoryCaches();
+      location.assign(target);
       return null;
     } catch (error) {
       return error instanceof Error ? `Could not sign out: ${error.message}` : "Could not sign out.";
@@ -229,7 +232,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             setGate({ kind: "redirecting" });
             api.signIn();
           } else if (result.kind === "ok") {
-            warmMemoryBooks(authHeaders("workos"));
+            warmMemoryBooks(authHeaders("workos"), result.me);
             setGate({ kind: "install", mode: "workos", me: result.me });
           }
           return result;

@@ -6,12 +6,15 @@
 //! path for both local and hosted — not a test-only helper.
 
 mod author;
+mod bundle;
 mod commit;
+mod durable;
 mod error;
 mod git_cli_exec;
 mod ids;
 mod protocol;
 mod service;
+mod snapshot;
 mod store;
 mod tree;
 mod view;

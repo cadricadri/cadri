@@ -89,7 +89,7 @@ export function applySave(
   const trimmed = message.trim();
   const sameContent = file?.content === content;
   const samePath = nextPath === path;
-  if (!file || trimmed.length === 0 || (sameContent && samePath)) {
+  if (!file || file.content === null || trimmed.length === 0 || (sameContent && samePath)) {
     return store;
   }
   if (
@@ -104,7 +104,10 @@ export function applySave(
   const commitId = `c_${crypto.randomUUID().slice(0, 8)}`;
   const blame = sameContent ? file.blame : reattribute(file.blame, file.content, content, author, commitId);
   return {
-    files: store.files.map((item) => (item.path === path ? { ...item, path: nextPath, content, blame } : item)),
+    tip: store.tip,
+    files: store.files.map((item) =>
+      item.path === path ? { ...item, path: nextPath, content, blame, blob: sameContent ? item.blob : "" } : item,
+    ),
     directories: store.directories,
     commits: [
       {

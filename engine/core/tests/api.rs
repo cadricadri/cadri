@@ -338,14 +338,14 @@ async fn memories_start_empty_and_stay_inside_the_org() {
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["files"][0]["path"], "README.md");
     assert_eq!(saved["files"][0]["content"], "hello");
-    assert_eq!(saved["files"][0]["blame"][0]["author"]["user_id"], "ada");
-    assert_eq!(saved["commits"][0]["message"], "Add a note");
-    assert_eq!(
-        saved["files"][0]["blame"][0]["commit_id"],
-        saved["commits"][0]["id"]
-    );
+    assert!(saved["commits"].as_array().unwrap().is_empty());
+    let (_, _, blamed) = send(&app, get_request("/api/memories/blame?path=README.md", &a)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log", &a)).await;
+    assert_eq!(blamed["blame"][0]["author"]["user_id"], "ada");
+    assert_eq!(log["commits"][0]["message"], "Add a note");
+    assert_eq!(blamed["blame"][0]["commit_id"], log["commits"][0]["id"]);
 
-    let (_, _, again) = send(&app, get_request("/api/memories", &a)).await;
+    let (_, _, again) = send(&app, get_request("/api/memories/log", &a)).await;
     assert_eq!(again["commits"][0]["message"], "Add a note");
     let (_, _, other) = send(&app, get_request("/api/memories", &b)).await;
     assert_eq!(other["files"].as_array().unwrap().len(), 0);
@@ -366,6 +366,187 @@ async fn memories_start_empty_and_stay_inside_the_org() {
     assert_eq!(rejected["error"], "invalid memory path");
     let (_, _, kept) = send(&app, get_request("/api/memories", &a)).await;
     assert_eq!(kept["files"][0]["content"], "hello");
+}
+
+async fn commit_files(app: &Router, query: &str, files: &[(&str, &str)]) -> Value {
+    let changes: Vec<Value> = files
+        .iter()
+        .map(|(path, content)| json!({ "op": "write", "path": path, "content": content }))
+        .collect();
+    let (status, _, body) = send(
+        app,
+        post_json(
+            &format!("/api/memories/commits{query}"),
+            &json!({ "message": "write", "changes": changes }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+
+#[tokio::test]
+async fn the_tree_lists_blob_ids_and_opens_one_file() {
+    let app = app(Arc::new(NoAuth));
+    let (status, headers, empty) = send(&app, get_request("/api/memories/tree", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(empty["tip"], Value::Null);
+    assert!(empty.get("open").is_none());
+    assert_eq!(headers[header::ETAG], "\"empty\"");
+
+    commit_files(
+        &app,
+        "",
+        &[
+            ("b.md", "bee\n"),
+            ("README.md", "# hi\n"),
+            ("a/c.md", "see\n"),
+        ],
+    )
+    .await;
+    let (_, headers, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    let paths: Vec<&str> = tree["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["README.md", "a/c.md", "b.md"]);
+    assert_eq!(tree["files"][2]["size"], 4);
+    assert_eq!(tree["files"][2]["blob"].as_str().unwrap().len(), 40);
+    assert_eq!(tree["open"]["path"], "README.md");
+    assert_eq!(tree["open"]["content"], "# hi\n");
+    assert_eq!(tree["open"]["blob"], tree["files"][0]["blob"]);
+    let tip = tree["tip"].as_str().unwrap();
+    assert_eq!(headers[header::ETAG], format!("\"{tip}\"").as_str());
+    assert_eq!(headers[header::CACHE_CONTROL], "private, no-cache");
+
+    let (_, _, other) = send(&app, get_request("/api/memories/tree?open=b.md", &[])).await;
+    assert_eq!(other["open"]["path"], "b.md");
+    assert_eq!(other["open"]["content"], "bee\n");
+    let (_, _, missing) = send(&app, get_request("/api/memories/tree?open=nope.md", &[])).await;
+    assert_eq!(missing["open"]["path"], "README.md");
+}
+
+#[tokio::test]
+async fn the_tree_without_a_readme_opens_the_first_file() {
+    let app = app(Arc::new(NoAuth));
+    commit_files(&app, "", &[("z.md", "zed\n"), ("m.md", "em\n")]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    assert_eq!(tree["open"]["path"], "m.md");
+}
+
+#[tokio::test]
+async fn the_tree_and_tip_answer_304_for_a_matching_etag() {
+    let app = app(Arc::new(NoAuth));
+    commit_files(&app, "", &[("a.md", "a\n")]).await;
+    for path in ["/api/memories/tree", "/api/memories/tip"] {
+        let (_, headers, _) = send(&app, get_request(path, &[])).await;
+        let etag = headers[header::ETAG].to_str().unwrap().to_string();
+        let (status, headers, body) =
+            send(&app, get_request(path, &[("if-none-match", etag.as_str())])).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED, "{path}");
+        assert_eq!(body, Value::Null);
+        assert_eq!(headers[header::ETAG].to_str().unwrap(), etag);
+        let (status, _, _) = send(&app, get_request(path, &[("if-none-match", "\"old\"")])).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn a_blob_returns_exact_text_and_is_cacheable_forever() {
+    let app = app(Arc::new(NoAuth));
+    let text = "line one\n\n  caf\u{e9} \u{1f600}\nno newline";
+    commit_files(&app, "", &[("a.md", text)]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &[])).await;
+    let sha = tree["files"][0]["blob"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(get_request(&format!("/api/memories/blob/{sha}"), &[]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::CONTENT_TYPE], "text/plain; charset=utf-8");
+    assert_eq!(
+        headers[header::CACHE_CONTROL],
+        "private, max-age=31536000, immutable"
+    );
+    assert_eq!(headers[header::ETAG], format!("\"{sha}\"").as_str());
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), text.as_bytes());
+}
+
+#[tokio::test]
+async fn a_blob_outside_this_book_or_malformed_is_rejected() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let a = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let b = [("x-test-org", "org-b"), ("x-test-user", "ada")];
+    commit_files_as(&app, &a, &[("a.md", "only in a\n")]).await;
+    let (_, _, tree) = send(&app, get_request("/api/memories/tree", &a)).await;
+    let sha = tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let path = format!("/api/memories/blob/{sha}");
+    let (status, _) = send_text(&app, get_request(&path, &a)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, get_request(&path, &b)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let absent = "0".repeat(40);
+    let (status, _, _) = send(
+        &app,
+        get_request(&format!("/api/memories/blob/{absent}"), &a),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for bad in ["abc", &sha.to_uppercase(), &format!("{}g", &sha[..39])] {
+        let (status, _, _) =
+            send(&app, get_request(&format!("/api/memories/blob/{bad}"), &a)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+}
+
+async fn commit_files_as(app: &Router, headers: &[(&str, &str)], files: &[(&str, &str)]) {
+    let changes: Vec<Value> = files
+        .iter()
+        .map(|(path, content)| json!({ "op": "write", "path": path, "content": content }))
+        .collect();
+    let (status, _, body) = send(
+        app,
+        post_json(
+            "/api/memories/commits",
+            &json!({ "message": "write", "changes": changes }),
+            headers,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn the_tip_changes_after_a_commit_and_a_tree_view_commit_returns_the_tree() {
+    let app = app(Arc::new(NoAuth));
+    let (_, headers, first) = send(&app, get_request("/api/memories/tip", &[])).await;
+    assert_eq!(first["tip"], Value::Null);
+    assert_eq!(first["seq"], 0);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-cache");
+
+    commit_files(&app, "", &[("a.md", "one\n")]).await;
+    let (_, _, second) = send(&app, get_request("/api/memories/tip", &[])).await;
+    let tip = second["tip"].as_str().unwrap().to_string();
+
+    let tree = commit_files(&app, "?view=tree", &[("a.md", "two\n")]).await;
+    assert!(tree.get("commits").is_none());
+    assert_eq!(tree["files"][0]["path"], "a.md");
+    assert_eq!(tree["files"][0]["size"], 4);
+    assert!(tree.get("open").is_none());
+    assert_ne!(tree["tip"].as_str().unwrap(), tip);
+    let (_, _, third) = send(&app, get_request("/api/memories/tip", &[])).await;
+    assert_eq!(third["tip"], tree["tip"]);
+
+    let legacy = commit_files(&app, "", &[("b.md", "x\n")]).await;
+    assert_eq!(legacy["files"][1]["content"], "x\n");
 }
 
 #[tokio::test]
@@ -449,7 +630,118 @@ async fn personal_memories_are_a_separate_book() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(defaulted["files"][0]["content"], "x");
-    assert_eq!(defaulted["commits"][0]["message"], "Update memory");
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    assert_eq!(log["commits"][0]["message"], "Update memory");
+}
+
+async fn post_edit(app: &Router, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+    let (status, _, reply) = send(
+        app,
+        post_json("/api/memories/commits?view=tree&scope=user", &body, headers),
+    )
+    .await;
+    (status, reply)
+}
+
+#[tokio::test]
+async fn an_edit_with_a_stale_base_touching_a_changed_file_is_a_conflict_over_http() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let write =
+        |path: &str, content: &str| json!({ "op": "write", "path": path, "content": content });
+    let (status, seeded) = post_edit(
+        &app,
+        json!({ "message": "seed", "changes": [write("a.md", "1"), write("b.md", "1")] }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{seeded}");
+    let base = seeded["tip"].as_str().unwrap().to_string();
+    assert_eq!(seeded["commit"], seeded["tip"]);
+    let (status, moved) = post_edit(
+        &app,
+        json!({ "message": "teammate", "changes": [write("a.md", "2")], "base": base }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+
+    let (status, conflict) = post_edit(
+        &app,
+        json!({
+            "message": "stale",
+            "changes": [write("a.md", "3"), { "op": "delete", "path": "b.md" }],
+            "base": base,
+            "agent": "claude-code-7f3a"
+        }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict, json!({ "error": "conflict", "paths": ["a.md"] }));
+
+    let (status, landed) = post_edit(
+        &app,
+        json!({ "message": "other file", "changes": [write("b.md", "3")], "base": base }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{landed}");
+    assert_eq!(landed["commit"], landed["tip"]);
+    assert_ne!(landed["tip"], moved["tip"]);
+
+    let (status, noop) = post_edit(
+        &app,
+        json!({ "changes": [write("b.md", "3")], "base": landed["tip"] }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{noop}");
+    assert_eq!(noop["commit"], Value::Null);
+    assert_eq!(noop["tip"], landed["tip"]);
+
+    let (status, unknown) = post_edit(
+        &app,
+        json!({ "changes": [write("c.md", "1")], "base": "not-a-commit" }),
+        &ada,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unknown, json!({ "error": "unknown base" }));
+}
+
+#[tokio::test]
+async fn an_agent_edit_is_authored_as_a_robot_over_http() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let note = |agent: &str| {
+        json!({
+            "message": "agent note",
+            "changes": [{ "op": "write", "path": "a.md", "content": "x" }],
+            "agent": agent
+        })
+    };
+    let (status, rejected) = post_edit(&app, note("bad agent"), &ada).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(rejected["error"], "invalid agent");
+
+    let (status, saved) = post_edit(&app, note("claude-code-7f3a"), &ada).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    assert_eq!(log["commits"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        log["commits"][0]["author"],
+        json!({ "kind": "robot", "id": "claude-code-7f3a" })
+    );
+    assert_eq!(log["commits"][0]["id"], saved["commit"]);
+    let (_, _, blame) = send(
+        &app,
+        get_request("/api/memories/blame?scope=user&path=a.md", &ada),
+    )
+    .await;
+    assert_eq!(blame["blame"][0]["author"]["kind"], "robot");
+    let (_, _, team) = send(&app, get_request("/api/memories", &ada)).await;
+    assert_eq!(team["files"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -535,15 +827,10 @@ async fn git_push_keeps_client_shas_and_rejects_a_bad_tree() {
         &config,
         &["push", &url, "HEAD:refs/heads/main"],
     ));
-    let (_, _, body) = send(
-        &app,
-        get_request(
-            "/api/memories",
-            &[("x-test-org", "org-a"), ("x-test-user", "ada")],
-        ),
-    )
-    .await;
-    assert_eq!(body["commits"][0]["id"], sha);
+    let headers = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let (_, _, body) = send(&app, get_request("/api/memories", &headers)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log", &headers)).await;
+    assert_eq!(log["commits"][0]["id"], sha);
     assert_eq!(body["files"][0]["content"], "hello\n");
 
     let other = root.join("other");
@@ -638,7 +925,7 @@ async fn git_push_keeps_client_shas_and_rejects_a_bad_tree() {
     let (_, _, store) = send(
         &app,
         get_request(
-            "/api/memories",
+            "/api/memories/log",
             &[("x-test-org", "org-a"), ("x-test-user", "ada")],
         ),
     )

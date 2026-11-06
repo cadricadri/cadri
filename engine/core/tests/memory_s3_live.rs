@@ -85,24 +85,20 @@ fn books() -> Vec<Book> {
     books
 }
 
-fn fill_book(root: &Path, left: std::net::SocketAddr, right: std::net::SocketAddr, book: &Book) {
+fn fill_book(root: &Path, left: std::net::SocketAddr, book: &Book) {
     let client = Client::new(root, book, "writer");
     let first = url(left, book);
     git_ok(&client, &["init", "-b", "main"]);
     commit(&client, "base.md", "base\n", "base");
     git_ok(&client, &["push", &first, "HEAD:refs/heads/main"]);
     for index in 0..NOTES {
-        let server = if index % 2 == 0 { right } else { left };
         commit(
             &client,
             &format!("note-{index}.md"),
             &format!("note {index}\n"),
             &format!("note {index}"),
         );
-        git_ok(
-            &client,
-            &["push", &url(server, book), "HEAD:refs/heads/main"],
-        );
+        git_ok(&client, &["push", &first, "HEAD:refs/heads/main"]);
     }
 }
 
@@ -260,6 +256,19 @@ fn store(addr: std::net::SocketAddr, book: &Book) -> Value {
     } else {
         "/api/memories"
     };
+    json_at(addr, book, path)
+}
+
+fn log(addr: std::net::SocketAddr, book: &Book) -> Value {
+    let path = if book.scope == "user" {
+        "/api/memories/log?scope=user"
+    } else {
+        "/api/memories/log"
+    };
+    json_at(addr, book, path)
+}
+
+fn json_at(addr: std::net::SocketAddr, book: &Book, path: &str) -> Value {
     let (status, body) = http(addr, "GET", path, &book.org, &book.user, None);
     assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
     serde_json::from_slice(&body).unwrap()
@@ -501,13 +510,11 @@ async fn live_s3_many_books_and_conflicting_pushes() {
 
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_env(bucket.clone()).await.unwrap(),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_env(bucket.clone()).await.unwrap(),
     );
@@ -517,7 +524,7 @@ async fn live_s3_many_books_and_conflicting_pushes() {
     std::thread::scope(|scope| {
         for book in &books {
             let root = root.clone();
-            scope.spawn(move || fill_book(&root, left_addr, right_addr, book));
+            scope.spawn(move || fill_book(&root, left_addr, book));
         }
     });
 
@@ -532,11 +539,24 @@ async fn live_s3_many_books_and_conflicting_pushes() {
         }
     });
 
+    // A server started after every write loads each book from the bucket. The two
+    // running servers each saw only the writes that went through them.
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
+        false,
+        S3Books::from_env(bucket.clone()).await.unwrap(),
+    );
+    let fresh_addr = listen(assemble(
+        db::open(&db_path).unwrap(),
+        Arc::new(OrgHeader),
+        None,
+        fresh,
+    ))
+    .await;
+
     for book in &books {
-        let from_left = store(left_addr, book);
-        let from_right = store(right_addr, book);
-        assert_eq!(from_left, from_right, "{}", book.org);
-        let files = file_map(&from_right);
+        let from_fresh = store(fresh_addr, book);
+        let files = file_map(&from_fresh);
         assert_eq!(files["base.md"], "base\n", "{}", book.label());
         for index in 0..NOTES {
             assert_eq!(
@@ -556,7 +576,7 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             }
             None => {}
         }
-        let commits = from_right["commits"].as_array().unwrap();
+        let commits = log(fresh_addr, book)["commits"].as_array().unwrap().clone();
         let expected = NOTES + 1 + usize::from(book.conflict.is_some()) * 2;
         assert_eq!(commits.len(), expected, "{}", book.label());
     }
@@ -566,19 +586,21 @@ async fn live_s3_many_books_and_conflicting_pushes() {
             .unwrap_or_else(|| panic!("repo id for {}", book.label()));
         let prefix = format!("repos/{repo_id}/");
         let keys = list_keys(&bucket, &prefix);
-        let objects = keys.iter().filter(|key| key.contains("/objects/")).count();
+        let entries = keys.iter().filter(|key| key.contains("/log/")).count();
         assert!(
-            keys.iter().any(|key| key.ends_with("/refs/heads/main")),
-            "missing ref for {prefix}: {keys:?}"
+            !keys
+                .iter()
+                .any(|key| key.ends_with("/refs/heads/main") || key.contains("/objects/")),
+            "legacy keys written for {prefix}: {keys:?}"
         );
-        let commits = store(right_addr, book)["commits"].as_array().unwrap().len();
-        let orphans = usize::from(book.conflict.is_some());
-        assert!(
-            (commits..=commits + orphans).contains(&objects),
-            "{prefix} stored {objects} bundles for {commits} commits"
+        // Every push here adds one commit, and a lost log create stores nothing.
+        let commits = log(fresh_addr, book)["commits"].as_array().unwrap().len();
+        assert_eq!(
+            entries, commits,
+            "{prefix} stored {entries} log entries for {commits} commits"
         );
-        let remote = ls_remote(right_addr, book);
-        let tip = store(right_addr, book)["commits"][0]["id"]
+        let remote = ls_remote(fresh_addr, book);
+        let tip = log(fresh_addr, book)["commits"][0]["id"]
             .as_str()
             .unwrap()
             .to_string();

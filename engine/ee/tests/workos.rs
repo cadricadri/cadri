@@ -2839,6 +2839,69 @@ async fn a_webhook_from_another_api_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn workos_agent_edits_land_in_the_callers_book_as_a_robot() {
+    let (app, mock) = setup().await;
+    let ada = bearer(&member_token(&mock, "user_ada", "org_1"));
+    let sam = bearer(&member_token(&mock, "user_sam", "org_1"));
+    let ada_h = [("authorization", ada.as_str())];
+    let sam_h = [("authorization", sam.as_str())];
+    let edit = |content: &str, base: Option<&str>| {
+        let mut body = json!({
+            "message": "Agent note",
+            "changes": [{ "op": "write", "path": "notes.md", "content": content }],
+            "agent": "claude-code-7f3a"
+        });
+        if let Some(base) = base {
+            body["base"] = json!(base);
+        }
+        body
+    };
+    let uri = "/api/memories/commits?view=tree&scope=user";
+    let (status, _, saved) = send(
+        &app,
+        request(Method::POST, uri, &ada_h, Some(edit("one\n", None))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let first = saved["commit"].as_str().unwrap().to_string();
+    let (_, _, log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    assert_eq!(
+        log["commits"][0]["author"],
+        json!({ "kind": "robot", "id": "claude-code-7f3a" })
+    );
+    let (_, _, sam_book) = send(&app, get_with("/api/memories?scope=user", &sam_h)).await;
+    assert_eq!(sam_book["files"].as_array().unwrap().len(), 0);
+
+    // Ada's commit is not a base in Sam's book.
+    let (status, _, unknown) = send(
+        &app,
+        request(Method::POST, uri, &sam_h, Some(edit("x\n", Some(&first)))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(unknown["error"], "unknown base");
+
+    let (status, _, second) = send(
+        &app,
+        request(Method::POST, uri, &ada_h, Some(edit("two\n", Some(&first)))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let (status, _, conflict) = send(
+        &app,
+        request(
+            Method::POST,
+            uri,
+            &ada_h,
+            Some(edit("three\n", Some(&first))),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["paths"], json!(["notes.md"]));
+}
+
+#[tokio::test]
 async fn workos_token_isolates_team_and_personal_books() {
     let (app, mock) = setup().await;
     let ada = bearer(&member_token(&mock, "user_ada", "org_1"));
@@ -2862,10 +2925,8 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    assert_eq!(
-        saved["files"][0]["blame"][0]["author"]["user_id"],
-        "user_ada"
-    );
+    let (_, _, blamed) = send(&app, get_with("/api/memories/blame?path=team.md", &ada_h)).await;
+    assert_eq!(blamed["blame"][0]["author"]["user_id"], "user_ada");
 
     let personal = json!({
         "message": "Ada note",
@@ -2882,7 +2943,11 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let ada_commit = saved["commits"][0]["id"].as_str().unwrap().to_string();
+    let (_, _, personal_log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    let ada_commit = personal_log["commits"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let (_, _, sam_team) = send(&app, get_with("/api/memories", &sam_h)).await;
     assert_eq!(sam_team["files"][0]["content"], "shared\n");
@@ -2894,6 +2959,26 @@ async fn workos_token_isolates_team_and_personal_books() {
     assert_eq!(other_team["files"].as_array().unwrap().len(), 0);
     let (_, _, other_personal) = send(&app, get_with("/api/memories?scope=user", &other_h)).await;
     assert_eq!(other_personal["files"].as_array().unwrap().len(), 0);
+
+    let (_, _, ada_tree) = send(&app, get_with("/api/memories/tree?scope=user", &ada_h)).await;
+    let private_blob = ada_tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let (_, _, team_tree) = send(&app, get_with("/api/memories/tree", &ada_h)).await;
+    let shared_blob = team_tree["files"][0]["blob"].as_str().unwrap().to_string();
+    let blob_path = |sha: &str, scope: &str| format!("/api/memories/blob/{sha}?scope={scope}");
+    let (status, bytes) = send_raw(&app, get_with(&blob_path(&private_blob, "user"), &ada_h)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"private\n");
+    let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "user"), &sam_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "team"), &sam_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, bytes) = send_raw(&app, get_with(&blob_path(&shared_blob, "team"), &sam_h)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"shared\n");
+    let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "team"), &other_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "user"), &other_h)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, _, rejected) = send(
         &app,
@@ -2937,7 +3022,8 @@ async fn workos_token_isolates_team_and_personal_books() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let team_commit = sam_team["commits"][0]["id"].as_str().unwrap();
+    let (_, _, team_log) = send(&app, get_with("/api/memories/log", &sam_h)).await;
+    let team_commit = team_log["commits"][0]["id"].as_str().unwrap();
     assert!(!other_bytes
         .windows(team_commit.len())
         .any(|window| window == team_commit.as_bytes()));

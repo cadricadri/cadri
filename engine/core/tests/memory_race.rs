@@ -1,9 +1,9 @@
 //! Two engines, one book, one object store.
 //!
 //! Each engine has its own git directory and its own SQLite connection. They
-//! share the store, which is either the directory of lock files or the S3
-//! stand-in. A publish waits at [`PublishGate`] so both have finished
-//! validating before either compare-and-swap runs.
+//! share the store, which is either a directory or the S3 stand-in. A publish
+//! waits at [`PublishGate`] so both have finished validating before either
+//! creates the next log entry.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use cadri_core::auth::NoAuth;
 use cadri_core::db;
 use cadri_core::memory::testing::{
-    assemble, FakeS3, MemoryService, PublishGate, RefFault, S3Books,
+    assemble, FakeS3, LogFault, MemoryService, PublishGate, S3Books,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -32,8 +32,13 @@ async fn two_directory_servers_race_a_git_push_and_the_loser_retries() {
         store.clone(),
         root.join("left/scratch"),
     );
-    let right = MemoryService::open_at(root.join("right/repos"), store, root.join("right/scratch"));
-    race_git_pushes(root, left, right, None).await;
+    let right = MemoryService::open_at(
+        root.join("right/repos"),
+        store.clone(),
+        root.join("right/scratch"),
+    );
+    let fresh = MemoryService::open_at(root.join("fresh/repos"), store, root.join("fresh/scratch"));
+    race_git_pushes(root, left, right, fresh, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -43,18 +48,21 @@ async fn two_s3_servers_race_a_git_push_and_the_loser_retries() {
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
+        false,
+        S3Books::from_client("memories", client.clone()),
+    );
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
         false,
         S3Books::from_client("memories", client),
     );
-    race_git_pushes(root, left, right, Some(&fake)).await;
-    assert_eq!(fake.ref_conflicts(), 1);
+    race_git_pushes(root, left, right, fresh, Some(&fake)).await;
+    assert_eq!(fake.log_conflicts(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -66,8 +74,13 @@ async fn two_directory_servers_race_a_ui_commit_and_both_land() {
         store.clone(),
         root.join("left/scratch"),
     );
-    let right = MemoryService::open_at(root.join("right/repos"), store, root.join("right/scratch"));
-    race_ui_commits(root, left, right, None).await;
+    let right = MemoryService::open_at(
+        root.join("right/repos"),
+        store.clone(),
+        root.join("right/scratch"),
+    );
+    let fresh = MemoryService::open_at(root.join("fresh/repos"), store, root.join("fresh/scratch"));
+    race_ui_commits(root, left, right, fresh, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -77,56 +90,51 @@ async fn two_s3_servers_race_a_ui_commit_and_both_land() {
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
+        false,
+        S3Books::from_client("memories", client.clone()),
+    );
+    let fresh = MemoryService::open_s3(
+        root.join("fresh"),
         false,
         S3Books::from_client("memories", client),
     );
-    race_ui_commits(root, left, right, Some(&fake)).await;
-    assert_eq!(fake.ref_conflicts(), 1);
+    race_ui_commits(root, left, right, fresh, Some(&fake)).await;
+    assert_eq!(fake.log_conflicts(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_crash_before_the_ref_swap_publishes_once_on_retry() {
+async fn s3_crash_before_the_log_create_publishes_once_on_retry() {
     let root = temp();
     let (fake, addr, _peer) = s3_pair(&root).await;
     let config = git_config(&root);
     let repo = root.join("agent");
     let url = format!("http://{addr}/git/team.git");
     seed(&repo, &config, &url);
+    assert_eq!(log_keys(&fake).len(), 1);
 
     let sha = commit_file(&repo, &config, "note.md", "after\n", "edit");
-    fake.fail_next_ref_put(RefFault::Refuse);
+    fake.fail_next_log_put(LogFault::Refuse);
     let failed = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(!failed.status.success(), "{}", text(&failed.stderr));
-    assert!(
-        fake.keys()
-            .iter()
-            .any(|key| key.ends_with(&format!("/objects/{sha}"))),
-        "the bundle was stored before the ref swap failed: {:?}",
-        fake.keys()
-    );
+    assert_eq!(log_keys(&fake).len(), 1, "nothing is stored for {sha}");
     assert_ne!(remote_tip(&url, &config, &root), sha);
 
     let again = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
     assert_eq!(remote_tip(&url, &config, &root), sha);
-    let objects = fake
-        .keys()
-        .into_iter()
-        .filter(|key| key.contains("/objects/"))
-        .count();
-    assert_eq!(objects, 2, "retry must not write a second bundle for {sha}");
+    let keys = log_keys(&fake);
+    assert_eq!(keys.len(), 2, "one log entry for {sha}: {keys:?}");
+    assert!(keys[1].ends_with("/log/00000000000000000002"), "{keys:?}");
     let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn s3_crash_after_the_ref_swap_is_already_published() {
+async fn s3_crash_after_the_log_create_is_already_published() {
     let root = temp();
     let (fake, addr, peer) = s3_pair(&root).await;
     let config = git_config(&root);
@@ -135,26 +143,46 @@ async fn s3_crash_after_the_ref_swap_is_already_published() {
     seed(&repo, &config, &url);
 
     let sha = commit_file(&repo, &config, "note.md", "after\n", "edit");
-    fake.fail_next_ref_put(RefFault::StoreThenFail);
+    fake.fail_next_log_put(LogFault::StoreThenFail);
     let failed = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(!failed.status.success(), "{}", text(&failed.stderr));
+    assert_eq!(log_keys(&fake).len(), 2);
 
+    // The peer loads the book after the crash, so it sees the stored entry.
     let body = get_json(&peer, "/api/memories");
-    assert_eq!(body["commits"][0]["id"], sha);
+    let log = get_json(&peer, "/api/memories/log");
+    assert_eq!(log["commits"][0]["id"], sha);
     assert_eq!(file_map(&body)["note.md"], "after\n");
 
     let again = git(&repo, &config, &["push", &url, "HEAD:refs/heads/main"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
-    let after = get_json(&peer, "/api/memories");
+    assert_eq!(remote_tip(&url, &config, &root), sha);
+    assert_eq!(
+        log_keys(&fake).len(),
+        2,
+        "the retry reuses the stored entry for {sha}"
+    );
+    let after = get_json(&peer, "/api/memories/log");
     assert_eq!(after["commits"].as_array().unwrap().len(), 2);
     assert_eq!(after["commits"][0]["id"], sha);
     let _ = fs::remove_dir_all(root);
+}
+
+fn log_keys(fake: &FakeS3) -> Vec<String> {
+    let mut keys: Vec<String> = fake
+        .keys()
+        .into_iter()
+        .filter(|key| key.contains("/log/"))
+        .collect();
+    keys.sort();
+    keys
 }
 
 async fn race_git_pushes(
     root: PathBuf,
     left: MemoryService,
     right: MemoryService,
+    fresh: MemoryService,
     fake: Option<&FakeS3>,
 ) {
     let gate = PublishGate::new();
@@ -201,10 +229,10 @@ async fn race_git_pushes(
     assert_eq!(
         gate.conflicts(),
         1,
-        "both servers must lose one compare-and-swap"
+        "exactly one server must lose the log create"
     );
     if let Some(fake) = fake {
-        assert_eq!(fake.ref_conflicts(), 1);
+        assert_eq!(fake.log_conflicts(), 1);
     }
     let failed_is_left = !left_result.success;
     assert!(
@@ -235,8 +263,16 @@ async fn race_git_pushes(
     ));
     let tip = rev_parse(&loser_dir, &config, "HEAD");
 
-    let body = get_json(&right_addr, "/api/memories");
-    let ids: Vec<&str> = body["commits"]
+    let fresh_addr = listen(assemble(
+        db::open(&root.join("transcripts.db")).unwrap(),
+        Arc::new(NoAuth),
+        None,
+        fresh,
+    ))
+    .await;
+    let body = get_json(&fresh_addr, "/api/memories");
+    let log = get_json(&fresh_addr, "/api/memories/log");
+    let ids: Vec<&str> = log["commits"]
         .as_array()
         .unwrap()
         .iter()
@@ -254,6 +290,7 @@ async fn race_ui_commits(
     root: PathBuf,
     left: MemoryService,
     right: MemoryService,
+    fresh: MemoryService,
     fake: Option<&FakeS3>,
 ) {
     let gate = PublishGate::new();
@@ -274,13 +311,22 @@ async fn race_ui_commits(
     assert_eq!(right_status, 200, "right UI commit failed");
     assert_eq!(gate.conflicts(), 1);
     if let Some(fake) = fake {
-        assert_eq!(fake.ref_conflicts(), 1);
+        assert_eq!(fake.log_conflicts(), 1);
     }
-    let body = get_json(&right_addr, "/api/memories");
+    // A server started after both writes loads the book from the durable store.
+    let fresh_addr = listen(assemble(
+        db::open(&root.join("transcripts.db")).unwrap(),
+        Arc::new(NoAuth),
+        None,
+        fresh,
+    ))
+    .await;
+    let body = get_json(&fresh_addr, "/api/memories");
     let files = file_map(&body);
     assert_eq!(files["left.md"], "from the left server\n");
     assert_eq!(files["right.md"], "from the right server\n");
-    assert_eq!(body["commits"].as_array().unwrap().len(), 2);
+    let log = get_json(&fresh_addr, "/api/memories/log");
+    assert_eq!(log["commits"].as_array().unwrap().len(), 2);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -289,13 +335,11 @@ async fn s3_pair(root: &Path) -> (FakeS3, std::net::SocketAddr, std::net::Socket
     let client = S3Books::test_client(&fake.endpoint);
     let left = MemoryService::open_s3(
         root.join("left"),
-        None,
         false,
         S3Books::from_client("memories", client.clone()),
     );
     let right = MemoryService::open_s3(
         root.join("right"),
-        None,
         false,
         S3Books::from_client("memories", client),
     );

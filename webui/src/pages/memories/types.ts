@@ -9,8 +9,25 @@ export type BlameEntry = {
 
 export type MemoryFile = {
   path: string;
-  content: string;
+  /** Blob SHA of the saved text. Empty for a file this page just created or edited. */
+  blob: string;
+  /** `null` means the text is not loaded yet. */
+  content: string | null;
   blame: BlameEntry[];
+};
+
+export type LoadedFile = MemoryFile & { content: string };
+
+export type TreeEntry = { path: string; blob: string; size: number };
+
+export type OpenFile = { path: string; blob: string; content: string };
+
+export type MemoryTree = {
+  tip: string | null;
+  seq: number;
+  files: TreeEntry[];
+  directories: string[];
+  open?: OpenFile;
 };
 
 export type MemoryCommit = {
@@ -22,6 +39,7 @@ export type MemoryCommit = {
 };
 
 export type MemoryStore = {
+  tip: string | null;
   files: MemoryFile[];
   directories: string[];
   commits: MemoryCommit[];

@@ -7,18 +7,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
-use crate::memory::{self, Change, GitHttp, MemoryService, MemoryStore};
+use crate::memory::{
+    self, BlameEntry, Change, EditRequest, GitHttp, MemoryCommit, MemoryService, MemoryStore,
+};
 use crate::ApiError;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
@@ -37,12 +39,7 @@ struct AppState {
 pub fn router(db: Connection, auth: Arc<dyn Authenticator>, extra: Option<Router>) -> Router {
     let n = MEMORY_ROOTS.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("cadri-memories-{}-{n}", std::process::id()));
-    assemble(
-        db,
-        auth,
-        extra,
-        MemoryService::open_local(root, None, false),
-    )
+    assemble(db, auth, extra, MemoryService::open_local(root, false))
 }
 
 pub fn assemble(
@@ -61,6 +58,11 @@ pub fn assemble(
             get(list_transcripts).post(post_transcript),
         )
         .route("/api/memories", get(get_memories))
+        .route("/api/memories/tree", get(get_memory_tree))
+        .route("/api/memories/blob/{sha}", get(get_memory_blob))
+        .route("/api/memories/tip", get(get_memory_tip))
+        .route("/api/memories/log", get(get_memory_log))
+        .route("/api/memories/blame", get(get_memory_blame))
         .route("/api/memories/commits", post(post_memories))
         .route("/git/{book}/{*path}", get(git_http).post(git_http))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -116,10 +118,9 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
             .unwrap_or_else(|| Path::new("."))
             .join("memories"),
     };
-    let mount = std::env::var("CADRI_MEMORIES_MOUNT")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    if std::env::var("CADRI_MEMORIES_MOUNT").is_ok_and(|value| !value.is_empty()) {
+        eprintln!("CADRI_MEMORIES_MOUNT is no longer used");
+    }
     let memories = match std::env::var("CADRI_MEMORIES_BUCKET") {
         Ok(bucket) if !bucket.is_empty() => {
             let books = memory::S3Books::from_env(bucket)
@@ -128,9 +129,9 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
                     eprintln!("failed to configure memory bucket: {err}");
                     std::process::exit(1);
                 });
-            MemoryService::open_s3(memories_root, mount, jail_required, books)
+            MemoryService::open_s3(memories_root, jail_required, books)
         }
-        _ => MemoryService::open_local(memories_root, mount, jail_required),
+        _ => MemoryService::open_local(memories_root, jail_required),
     };
     let app = assemble(connection, auth.clone(), extra, memories);
     let scheme = if tls_cert.is_some() { "https" } else { "http" };
@@ -288,11 +289,44 @@ struct MemoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct TreeQuery {
+    scope: Option<String>,
+    open: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitQuery {
+    scope: Option<String>,
+    view: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BlameQuery {
+    scope: Option<String>,
+    path: String,
+}
+
+#[derive(Serialize)]
+struct MemoryLogBody {
+    commits: Vec<MemoryCommit>,
+}
+
+#[derive(Serialize)]
+struct MemoryBlameBody {
+    path: String,
+    blame: Vec<BlameEntry>,
+}
+
+#[derive(Debug, Deserialize)]
 struct CommitRequest {
     #[serde(default)]
     message: String,
     #[serde(default)]
     changes: Vec<Change>,
+    #[serde(default)]
+    base: Option<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 fn memory_book(
@@ -343,27 +377,161 @@ async fn get_memories(
     Ok(Json(store))
 }
 
-async fn post_memories(
+fn tip_etag(tip: Option<&str>) -> String {
+    format!("\"{}\"", tip.unwrap_or("empty"))
+}
+
+fn matches_etag(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|tag| tag.trim() == etag))
+}
+
+fn validated_json(
+    headers: &HeaderMap,
+    etag: String,
+    cache: &'static str,
+    body: &impl Serialize,
+) -> Response {
+    let mut response = if matches_etag(headers, &etag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        Json(body).into_response()
+    };
+    let map = response.headers_mut();
+    if let Ok(value) = header::HeaderValue::from_str(&etag) {
+        map.insert(header::ETAG, value);
+    }
+    map.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(cache),
+    );
+    response
+}
+
+async fn get_memory_tree(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    query: Result<Query<TreeQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let open = query.open;
+    let tree = blocking(move || service.read_tree(&repo_id, open.as_deref())).await?;
+    Ok(validated_json(
+        &headers,
+        tip_etag(tree.tip.as_deref()),
+        "private, no-cache",
+        &tree,
+    ))
+}
+
+async fn get_memory_blob(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    UrlPath(sha): UrlPath<String>,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let etag = format!("\"{sha}\"");
+    let text = blocking(move || service.read_blob(&repo_id, &sha)).await?;
+    let mut response = text.to_string().into_response();
+    let map = response.headers_mut();
+    map.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    map.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    if let Ok(value) = header::HeaderValue::from_str(&etag) {
+        map.insert(header::ETAG, value);
+    }
+    Ok(response)
+}
+
+async fn get_memory_tip(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let (tip, seq) = blocking(move || service.read_tip(&repo_id)).await?;
+    Ok(validated_json(
+        &headers,
+        tip_etag(tip.as_deref()),
+        "no-cache",
+        &json!({ "tip": tip, "seq": seq }),
+    ))
+}
+
+async fn get_memory_log(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
     query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Json<MemoryLogBody>, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let commits = blocking(move || service.read_log(&repo_id)).await?;
+    Ok(Json(MemoryLogBody { commits }))
+}
+
+async fn get_memory_blame(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    query: Result<Query<BlameQuery>, QueryRejection>,
+) -> Result<Json<MemoryBlameBody>, ApiError> {
+    let Query(query) = query?;
+    let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
+    let service = state.memories.clone();
+    let path = query.path;
+    let blame_path = path.clone();
+    let blame = blocking(move || service.read_blame(&repo_id, &blame_path)).await?;
+    Ok(Json(MemoryBlameBody { path, blame }))
+}
+
+async fn post_memories(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    query: Result<Query<CommitQuery>, QueryRejection>,
     body: Result<Json<CommitRequest>, JsonRejection>,
-) -> Result<Json<MemoryStore>, ApiError> {
+) -> Result<Response, ApiError> {
     let Query(query) = query?;
     let Json(request) = body?;
     let (scope, user_id) = memory_book(&identity, query.scope.as_deref())?;
     let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
     let service = state.memories.clone();
-    let actor = identity.user_id.clone();
-    let label = identity
-        .email
-        .clone()
-        .unwrap_or_else(|| identity.user_id.clone());
-    let store = blocking(move || {
-        service.commit(&repo_id, &actor, &label, &request.message, &request.changes)
-    })
-    .await?;
-    Ok(Json(store))
+    let edit = EditRequest {
+        user_id: identity.user_id.clone(),
+        label: identity
+            .email
+            .clone()
+            .unwrap_or_else(|| identity.user_id.clone()),
+        message: request.message,
+        changes: request.changes,
+        base: request.base,
+        agent: request.agent,
+    };
+    let outcome = blocking(move || service.edit(&repo_id, edit)).await?;
+    if query.view.as_deref() == Some("tree") {
+        return Ok(Json(outcome.tree()).into_response());
+    }
+    Ok(Json(outcome.store()).into_response())
 }
 
 async fn git_http(
@@ -375,14 +543,19 @@ async fn git_http(
     let (scope, user_id) = git_book(&book, &identity)?;
     let is_post = request.method() == Method::POST;
     let service_name = request.uri().query().and_then(query_param_service);
+    let gzip = request_is_gzip(request.headers())?;
     let body = axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES)
         .await
         .map_err(|_| ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "memory push is too large"))?;
     let repo_id = memory_repo(&identity.org_id, scope, &user_id)?;
     let actor = identity.user_id.clone();
     let service = state.memories.clone();
-    let payload = body.to_vec();
     let reply = blocking(move || {
+        let payload = if gzip {
+            gunzip_capped(&body)?
+        } else {
+            body.to_vec()
+        };
         service.serve_git(
             &repo_id,
             &path,
@@ -395,6 +568,37 @@ async fn git_http(
     .await?;
     let GitHttp::Ready { content_type, body } = reply;
     Ok(git_response(content_type, body))
+}
+
+fn request_is_gzip(headers: &HeaderMap) -> Result<bool, ApiError> {
+    let Some(value) = headers.get(header::CONTENT_ENCODING) else {
+        return Ok(false);
+    };
+    let encoding = value.to_str().unwrap_or("").trim().to_ascii_lowercase();
+    match encoding.as_str() {
+        "gzip" | "x-gzip" => Ok(true),
+        "" | "identity" => Ok(false),
+        _ => Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported content encoding",
+        )),
+    }
+}
+
+fn gunzip_capped(body: &[u8]) -> Result<Vec<u8>, ApiError> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "malformed gzip request body"))?;
+    if out.len() > MAX_BODY_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "decompressed request body is too large",
+        ));
+    }
+    Ok(out)
 }
 
 fn query_param_service(query: &str) -> Option<String> {

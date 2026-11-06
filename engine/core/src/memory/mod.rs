@@ -12,8 +12,8 @@ pub mod testing;
 
 pub(crate) use git::GitHttp;
 pub use git::{memory_repo_id, MemoryService, PublishGate};
-pub use s3::{FakeS3, RefFault, S3Books};
-pub(crate) use types::{Change, MemoryStore};
+pub use s3::{FakeS3, LogFault, S3Books};
+pub(crate) use types::{BlameEntry, Change, EditRequest, MemoryCommit, MemoryStore};
 
 pub fn jail_available() -> bool {
     jail::available()

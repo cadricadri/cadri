@@ -4,7 +4,7 @@ import remarkGfm from "remark-gfm";
 import { HumanMark, RobotMark } from "../../icons";
 import { blameGroups, type BlameGroup } from "./blame";
 import { AuthorMark } from "./AuthorMark";
-import type { MemoryAuthor, MemoryCommit, MemoryFile } from "./types";
+import type { LoadedFile, MemoryAuthor, MemoryCommit, MemoryFile } from "./types";
 
 export type FileTab = "preview" | "code";
 
@@ -19,8 +19,10 @@ export function FileView({
   onSave,
   onEditingChange,
   onDiscard,
+  onNeedHistory,
+  onNeedBlame,
 }: {
-  file: MemoryFile;
+  file: LoadedFile;
   createIn?: string;
   commits: MemoryCommit[];
   paths: string[];
@@ -30,6 +32,8 @@ export function FileView({
   onSave: (content: string, message: string, nextPath: string) => void;
   onEditingChange: (editing: boolean) => void;
   onDiscard?: () => void;
+  onNeedHistory?: () => void;
+  onNeedBlame?: () => void;
 }) {
   const creating = createIn !== undefined;
   const filename = creating ? "" : (file.path.split("/").pop() ?? file.path);
@@ -88,6 +92,14 @@ export function FileView({
       textRef.current?.focus();
     }
   }, [creating, editing, tab]);
+
+  const blameLoaded = file.blame.length > 0;
+  useEffect(() => {
+    if (blameOpen && !creating && !blameLoaded) {
+      onNeedBlame?.();
+      onNeedHistory?.();
+    }
+  }, [blameOpen, creating, blameLoaded, onNeedBlame, onNeedHistory]);
 
   useEffect(() => {
     onEditingChange(editing);
@@ -198,7 +210,7 @@ export function FileView({
               </button>
             ))}
           </div>
-          <Contributors file={file} />
+          {blameLoaded ? <Contributors file={file} /> : null}
         </div>
       </div>
       {tab === "preview" ? (
@@ -214,11 +226,22 @@ export function FileView({
               type="button"
               aria-pressed={blameOpen}
               aria-label={blameOpen ? "Hide blame" : "Show blame"}
-              onClick={() => setBlameOpen((open) => !open)}
+              onClick={() =>
+                setBlameOpen((open) => {
+                  if (!open) {
+                    onNeedHistory?.();
+                  }
+                  return !open;
+                })
+              }
             >
               <span>Blame</span>
             </button>
-            {blameOpen && !editing ? (
+            {blameOpen && !blameLoaded && !creating ? (
+              <p className="status" role="status">
+                Loading blame…
+              </p>
+            ) : blameOpen && !editing ? (
               <div className="memory-blame">
                 <BlameView file={file} buffer={buffer} commits={commits} />
               </div>
@@ -323,7 +346,7 @@ function BlameRail({
   commits,
 }: {
   railRef: Ref<HTMLDivElement>;
-  file: MemoryFile;
+  file: LoadedFile;
   buffer: string;
   commits: MemoryCommit[];
 }) {
@@ -355,7 +378,7 @@ function BlameRail({
   );
 }
 
-function BlameView({ file, buffer, commits }: { file: MemoryFile; buffer: string; commits: MemoryCommit[] }) {
+function BlameView({ file, buffer, commits }: { file: LoadedFile; buffer: string; commits: MemoryCommit[] }) {
   const groups = blameGroups(file.blame, file.content, buffer);
   const byId = new Map(commits.map((commit) => [commit.id, commit]));
   const stamps = heatStamps(groups, byId);

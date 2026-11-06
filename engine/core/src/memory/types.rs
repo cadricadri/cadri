@@ -25,9 +25,43 @@ pub struct BlameEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeEntry {
+    pub path: String,
+    pub blob: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFile {
+    pub path: String,
+    pub blob: String,
+    pub content: String,
+}
+
+/// A book's tip without file text, except for the one file the page opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryTree {
+    pub tip: Option<String>,
+    pub seq: u64,
+    pub files: Vec<TreeEntry>,
+    pub directories: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<OpenFile>,
+}
+
+/// The tree after an edit, with the commit that edit made (`None` for a no-op).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedTree {
+    #[serde(flatten)]
+    pub tree: MemoryTree,
+    pub commit: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryFile {
     pub path: String,
     pub content: String,
+    #[serde(default)]
     pub blame: Vec<BlameEntry>,
 }
 
@@ -47,6 +81,7 @@ pub struct MemoryStore {
     pub files: Vec<MemoryFile>,
     #[serde(default)]
     pub directories: Vec<String>,
+    #[serde(default)]
     pub commits: Vec<MemoryCommit>,
 }
 
@@ -56,6 +91,29 @@ pub(crate) enum Change {
     Write { path: String, content: String },
     Delete { path: String },
     Rename { from: String, to: String },
+}
+
+/// One edit through `POST /api/memories/commits`. `user_id` and `label` are the
+/// signed-in human; `agent`, when set, authors the commit as that robot.
+#[derive(Debug, Clone)]
+pub(crate) struct EditRequest {
+    pub user_id: String,
+    pub label: String,
+    pub message: String,
+    pub changes: Vec<Change>,
+    /// The tip the caller last saw. Paths changed since then must not be touched.
+    pub base: Option<String>,
+    pub agent: Option<String>,
+}
+
+impl Change {
+    /// Every path this change reads or writes.
+    pub(crate) fn paths(&self) -> Vec<&str> {
+        match self {
+            Change::Write { path, .. } | Change::Delete { path } => vec![path],
+            Change::Rename { from, to } => vec![from, to],
+        }
+    }
 }
 
 impl MemoryStore {
@@ -277,6 +335,7 @@ impl MemoryStore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         MemoryStore {
             files: Vec::new(),
@@ -295,7 +354,7 @@ impl MemoryStore {
                     "invalid memory path",
                 ));
             }
-            if file.blame.len() != file.content.split('\n').count() {
+            if !file.blame.is_empty() && file.blame.len() != file.content.split('\n').count() {
                 return Err(ApiError::new(
                     StatusCode::BAD_REQUEST,
                     "blame does not match the file",
