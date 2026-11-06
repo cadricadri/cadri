@@ -263,7 +263,7 @@ export default function Team() {
     <Page title="Team">
       <form className="team-invite" onSubmit={(event) => void submit(event)}>
         <label className="team-invite-label" htmlFor="invite-email">
-          Add your teammate!
+          Invite your teammates!
         </label>
         <input
           id="invite-email"
