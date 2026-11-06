@@ -354,7 +354,9 @@ def cmd_memory(args: argparse.Namespace) -> int:
                     raise CliError(f"could not read {args.file}: {exc}") from exc
             else:
                 content = sys.stdin.read()
-            return memory.write(book, args.path, content, "\n\n".join(args.message), args.agent)
+            return memory.write(
+                book, args.path, content, "\n\n".join(args.message), args.agent, args.session
+            )
     except memory.MemoryFailure as exc:
         print(f"cadri: {exc}", file=sys.stderr)
         return exc.code
@@ -414,6 +416,11 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--file", default=None, help="read content from this file instead of stdin")
     write.add_argument("-m", "--message", required=True, action="append", help="repeat for more paragraphs, like git")
     write.add_argument("--agent", default=None)
+    write.add_argument(
+        "--session",
+        default=None,
+        help="id of the agent session writing this memory (default: $CADRI_SESSION_ID)",
+    )
     watch = mem_sub.add_parser("watch", help="Keep clones within a minute of the server")
     watch.add_argument("--detach", action="store_true")
     watch.add_argument("--url", default=None)

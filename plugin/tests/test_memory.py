@@ -181,6 +181,47 @@ class MemoryClientTests(unittest.TestCase):
         self.assertNotIn("base", post["body"])
         self.assertEqual(post["body"]["agent"], "env-agent")
 
+    def write_server(self):
+        return FakeServer(
+            {
+                "/api/me": (200, {"org_id": "org1", "user_id": "u1"}),
+                "/api/memories/commits": (200, {"commit": NEW}),
+                "/api/memories/tip": (200, {"tip": NEW}),
+            }
+        )
+
+    def test_write_sends_the_session_flag(self):
+        self.make_clone(self.team)
+        server = self.write_server()
+        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "from-env"}):
+            self.run_cli(["memory", "write", "a.md", "-m", "m", "--session", "sess-1"], server, GitRecorder())
+        post = next(r for r in server.requests if r["method"] == "POST")
+        self.assertEqual(post["body"]["session_id"], "sess-1")
+
+    def test_write_falls_back_to_the_session_env_and_omits_it_when_unset(self):
+        self.make_clone(self.team)
+        server = self.write_server()
+        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "from-env"}):
+            self.run_cli(["memory", "write", "a.md", "-m", "m"], server, GitRecorder())
+        post = next(r for r in server.requests if r["method"] == "POST")
+        self.assertEqual(post["body"]["session_id"], "from-env")
+
+        server = self.write_server()
+        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": ""}):
+            self.run_cli(["memory", "write", "a.md", "-m", "m"], server, GitRecorder())
+        post = next(r for r in server.requests if r["method"] == "POST")
+        self.assertNotIn("session_id", post["body"])
+
+    def test_session_start_hook_exports_the_session_id(self):
+        env_file = Path(self.tmp.name) / "claude.env"
+        with mock.patch.dict(os.environ, {"CLAUDE_ENV_FILE": str(env_file)}):
+            hooks.export_session({"session_id": "b4fb4a10-4a57"})
+            hooks.export_session({"session_id": "bad id; rm -rf /"})
+        self.assertEqual(
+            env_file.read_text(),
+            "export CADRI_SESSION_ID=b4fb4a10-4a57\nexport CADRI_HARNESS=claude_code\n",
+        )
+
     def test_write_exits_3_on_a_conflict_and_lists_the_paths(self):
         self.make_clone(self.team)
         server = FakeServer(

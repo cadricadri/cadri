@@ -72,6 +72,25 @@ pub struct MemoryCommit {
     pub author: Author,
     pub message: String,
     pub files: Vec<String>,
+    /// The agent session that wrote this commit, when the writer said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// One file a commit touched, as text before and after. `None` means absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileChange {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// A commit with the full text of every file it changed, for the diff page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CommitDetail {
+    #[serde(flatten)]
+    pub commit: MemoryCommit,
+    pub changes: Vec<FileChange>,
 }
 
 /// JSON view of one memory book. The git store is what GET returns and what a UI
@@ -104,6 +123,8 @@ pub(crate) struct EditRequest {
     /// The tip the caller last saw. Paths changed since then must not be touched.
     pub base: Option<String>,
     pub agent: Option<String>,
+    /// Recorded as the `Cadri-Session-Id` trailer so the commit links to its transcript.
+    pub session_id: Option<String>,
 }
 
 impl Change {
@@ -439,6 +460,7 @@ fn commit(id: &str, at: &str, author: Author, message: &str, files: &[&str]) -> 
         author,
         message: message.to_string(),
         files: files.iter().map(|path| (*path).to_string()).collect(),
+        session_id: None,
     }
 }
 

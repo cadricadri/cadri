@@ -36,6 +36,20 @@ export type MemoryCommit = {
   author: MemoryAuthor;
   message: string;
   files: string[];
+  /** The agent session that wrote this commit, when it said so. */
+  session_id?: string;
+};
+
+export type FileChange = {
+  path: string;
+  /** `null` when the file did not exist on that side of the commit. */
+  before: string | null;
+  after: string | null;
+};
+
+export type CommitDetail = MemoryCommit & {
+  book: "team" | "user";
+  changes: FileChange[];
 };
 
 export type MemoryStore = {

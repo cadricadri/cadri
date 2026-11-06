@@ -745,6 +745,131 @@ async fn an_agent_edit_is_authored_as_a_robot_over_http() {
 }
 
 #[tokio::test]
+async fn memory_commits_link_to_the_session_that_wrote_them() {
+    let app = app(Arc::new(OrgHeaderAuth));
+    let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];
+    let claude = concat!(
+        r#"{"type":"user","message":{"role":"user","content":"write the runbook"},"timestamp":"2026-10-07T18:00:00.000Z"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Write"},{"type":"text","text":"Saved it."}]},"timestamp":"2026-10-07T18:01:00.000Z"}"#,
+    );
+    let (status, _, _) = send(&app, post_transcript("sess-1", claude, &ada)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, post_transcript("sess-2", "plain", &ada)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let write =
+        |content: &str| json!([{ "op": "write", "path": "runbook.md", "content": content }]);
+    let (status, _, first) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?view=tree",
+            &json!({ "message": "Add runbook", "changes": write("one\n"), "agent": "claude-code-1", "session_id": "sess-1" }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, _, second) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?view=tree",
+            &json!({ "message": "Tweak runbook", "changes": write("one\ntwo\n"), "session_id": "sess-1" }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    let (status, _, bad) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?view=tree",
+            &json!({ "changes": write("x"), "session_id": "no spaces" }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(bad["error"], "invalid session id");
+
+    let (_, _, list) = send(&app, get_request("/api/transcripts", &ada)).await;
+    let row = |id: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let linked = row("sess-1");
+    assert_eq!(linked["prompt"], "write the runbook");
+    assert_eq!(linked["has_writes"], true);
+    assert_eq!(linked["event_count"], 3);
+    assert_eq!(linked["memory_commits"].as_array().unwrap().len(), 2);
+    assert_eq!(linked["memory_commits"][0]["book"], "team");
+    assert_eq!(linked["memory_commits"][0]["session_id"], "sess-1");
+    assert!(linked.get("content").is_none());
+    assert_eq!(row("sess-2")["memory_commits"], json!([]));
+
+    let (status, _, detail) = send(&app, get_request("/api/transcripts/sess-1", &ada)).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["messages"],
+        json!([
+            { "role": "user", "text": "write the runbook", "at": "2026-10-07T18:00:00.000Z" },
+            { "role": "assistant", "text": "Saved it.", "at": "2026-10-07T18:01:00.000Z" }
+        ])
+    );
+    assert_eq!(
+        detail["tool_calls"],
+        json!([{ "name": "Write", "at": "2026-10-07T18:01:00.000Z" }])
+    );
+    assert_eq!(detail["tool_call_count"], 1);
+    assert_eq!(detail["memory_commits"].as_array().unwrap().len(), 2);
+    assert!(detail.get("content").is_none());
+    let (status, _, _) = send(&app, get_request("/api/transcripts/nope", &ada)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(
+        &app,
+        get_request("/api/transcripts/sess-1", &[("x-test-org", "org-b")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let commit = second["commit"].as_str().unwrap();
+    let (status, _, diff) = send(
+        &app,
+        get_request(&format!("/api/memories/commits/{commit}"), &ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{diff}");
+    assert_eq!(diff["book"], "team");
+    assert_eq!(diff["session_id"], "sess-1");
+    assert_eq!(diff["message"], "Tweak runbook");
+    assert_eq!(
+        diff["changes"],
+        json!([{ "path": "runbook.md", "before": "one\n", "after": "one\ntwo\n" }])
+    );
+    let first_commit = first["commit"].as_str().unwrap();
+    let (_, _, created) = send(
+        &app,
+        get_request(&format!("/api/memories/commits/{first_commit}"), &ada),
+    )
+    .await;
+    assert_eq!(created["changes"][0]["before"], Value::Null);
+    assert_eq!(created["author"]["kind"], "robot");
+
+    let (status, _, _) = send(
+        &app,
+        get_request(&format!("/api/memories/commits/{commit}?scope=user"), &ada),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send(&app, get_request("/api/memories/commits/xyz", &ada)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn memory_directories_round_trip_and_cannot_match_a_file() {
     let app = app(Arc::new(OrgHeaderAuth));
     let ada = [("x-test-org", "org-a"), ("x-test-user", "ada")];

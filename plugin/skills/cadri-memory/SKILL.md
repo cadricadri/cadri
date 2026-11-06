@@ -27,7 +27,7 @@ Write a memory when the user corrects you, states a preference, or you find out 
 Update an existing file when one covers the topic. New files start with `name` and `description` frontmatter and get a line in that book's `README.md`.
 
 ```bash
-cadri memory write path/in/book.md --file /tmp/memory.md -m "What changed" -m "Sources: <harness>:<session id>"
+cadri memory write path/in/book.md --file /tmp/memory.md --session <session id> -m "What changed"
 ```
 
-Add `--scope user` for the personal book. Exit status 3 means the file changed since your clone: run `cadri memory sync`, re-read it, merge, and write again. Never commit or push in the clone yourself; always write through `cadri memory write`.
+`--session` links the commit to this session's transcript in Cadri. Claude Code sets `CADRI_SESSION_ID` for you, so it can be left out there; elsewhere pass this session's id (Cursor: the conversation uuid of this chat's file under `agent-transcripts/`; Codex: the id in this session's file name under `~/.codex/sessions/`; OpenCode: the `ses_…` id). Add `--scope user` for the personal book. Exit status 3 means the file changed since your clone: run `cadri memory sync`, re-read it, merge, and write again. Never commit or push in the clone yourself; always write through `cadri memory write`.

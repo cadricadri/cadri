@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -21,6 +23,7 @@ HARNESSES = ("claude_code", "cursor", "codex", "opencode")
 ALIASES = {"claude": "claude_code"}
 START_EVENTS = {"SessionStart", "sessionStart", "session.created"}
 UPLOAD_TIMEOUT_SECONDS = 30
+SESSION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def log_path() -> Path:
@@ -119,6 +122,21 @@ def upload(payload: dict) -> None:
     print(f"cadri: {base}/api/transcripts returned {status}{detail}", file=sys.stderr)
 
 
+def export_session(event: dict) -> None:
+    """Claude Code sources `CLAUDE_ENV_FILE` before each Bash command, so `cadri memory
+    write` in this session picks up `CADRI_SESSION_ID` and links its commits here."""
+    env_file = os.environ.get("CLAUDE_ENV_FILE")
+    session_id = text(event, "session_id")
+    if not env_file or session_id is None or not SESSION_ID.match(session_id):
+        return
+    try:
+        with open(env_file, "a", encoding="utf-8") as handle:
+            handle.write(f"export CADRI_SESSION_ID={shlex.quote(session_id)}\n")
+            handle.write("export CADRI_HARNESS=claude_code\n")
+    except OSError as exc:
+        print(f"cadri: session id not exported: {exc}", file=sys.stderr)
+
+
 def start_memory_watcher() -> None:
     if not memory.git_ready():
         return
@@ -178,6 +196,8 @@ def run(name: str, stdin: str) -> int:
     if not isinstance(event, dict):
         print("cadri: hook input must be a JSON object", file=sys.stderr)
         return 0
+    if harness == "claude_code" and text(event, "hook_event_name") in START_EVENTS:
+        export_session(event)
     sys.stdout.flush()
     sys.stderr.flush()
     if not detach():

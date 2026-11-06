@@ -397,7 +397,7 @@ function BlameView({ file, buffer, commits }: { file: LoadedFile; buffer: string
               {group.unsaved || !group.author ? (
                 <span className="author-mark blame-unsaved">unsaved</span>
               ) : (
-                <AuthorMark author={group.author} />
+                <AuthorMark author={group.author} sessionId={commit?.session_id} />
               )}
               <p>{commit?.message ?? "Unsaved edit"}</p>
               {commit ? <time dateTime={commit.at}>{ago(commit.at)}</time> : null}

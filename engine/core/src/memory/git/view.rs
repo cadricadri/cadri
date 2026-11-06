@@ -2,11 +2,11 @@ use std::collections::HashMap;
 
 use axum::http::StatusCode;
 
-use crate::memory::types::{Author, BlameEntry, MemoryCommit};
+use crate::memory::types::{Author, BlameEntry, CommitDetail, FileChange, MemoryCommit};
 #[cfg(test)]
 use crate::memory::types::{MemoryFile, MemoryStore};
 
-use super::author::{author_from, display_message};
+use super::author::{author_from, display_message, session_from};
 use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_text, local_head, Repo};
 use super::ids::is_hex;
@@ -134,6 +134,76 @@ pub(super) fn read_commits(repo: &Repo) -> Result<Vec<MemoryCommit>, Fail> {
         None,
         &[],
     )?;
+    Ok(parse_log(&text))
+}
+
+/// One commit and the before/after text of each file it changed.
+pub(super) fn read_commit_detail(repo: &Repo, sha: &str) -> Result<CommitDetail, Fail> {
+    let not_found = || Fail::api(StatusCode::NOT_FOUND, "memory commit not found");
+    if !is_hex(sha, 40) {
+        return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid commit id"));
+    }
+    let kind = git_text(repo, &["cat-file", "-t", sha], None, &[]).map_err(|_| not_found())?;
+    if kind != "commit" {
+        return Err(not_found());
+    }
+    let text = git_text(
+        repo,
+        &[
+            "log",
+            "-1",
+            "--format=format:%x02%H%x1e%cI%x1e%B%x1e",
+            "--name-only",
+            sha,
+        ],
+        None,
+        &[],
+    )?;
+    let commit = parse_log(&text).into_iter().next().ok_or_else(not_found)?;
+    let raw = git_text(
+        repo,
+        &[
+            "diff-tree",
+            "-r",
+            "--root",
+            "--no-renames",
+            "--no-commit-id",
+            sha,
+        ],
+        None,
+        &[],
+    )?;
+    let mut changes = Vec::new();
+    for line in raw.lines() {
+        // `:100644 100644 <old> <new> M\t<path>`
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        if is_keep(path) {
+            continue;
+        }
+        let fields: Vec<&str> = meta.split_whitespace().collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        changes.push(FileChange {
+            path: path.to_string(),
+            before: blob_text(repo, fields[2])?,
+            after: blob_text(repo, fields[3])?,
+        });
+    }
+    Ok(CommitDetail { commit, changes })
+}
+
+fn blob_text(repo: &Repo, sha: &str) -> Result<Option<String>, Fail> {
+    if sha.bytes().all(|byte| byte == b'0') {
+        return Ok(None);
+    }
+    let bytes = git_bytes(repo, &["cat-file", "blob", sha], None, &[])?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn parse_log(text: &str) -> Vec<MemoryCommit> {
     let mut commits = Vec::new();
     for record in text.split('\u{2}') {
         if record.trim().is_empty() {
@@ -159,7 +229,8 @@ pub(super) fn read_commits(repo: &Repo) -> Result<Vec<MemoryCommit>, Fail> {
             author: author_from(message),
             message: display_message(message),
             files,
+            session_id: session_from(message),
         });
     }
-    Ok(commits)
+    commits
 }

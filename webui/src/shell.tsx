@@ -5,7 +5,9 @@ import { Page } from "./page";
 import { useSession } from "./session";
 
 const Memories = lazy(() => import("./pages/Memories"));
-const Transcripts = lazy(() => import("./pages/Transcripts"));
+const Transcripts = lazy(() => import("./pages/transcripts/TranscriptList"));
+const TranscriptDetail = lazy(() => import("./pages/transcripts/TranscriptDetail"));
+const CommitDiff = lazy(() => import("./pages/memories/CommitDiff"));
 const Usage = lazy(() => import("./pages/Usage"));
 const Team = lazy(() => import("./pages/Team"));
 const Billing = lazy(() => import("./pages/Billing"));
@@ -33,7 +35,9 @@ export function App() {
       <Suspense fallback={<p className="status">Loading…</p>}>
         <Routes>
           <Route path="/" element={<Memories />} />
+          <Route path="/memories/commits/:id" element={<CommitDiff />} />
           <Route path="/transcripts" element={<Transcripts />} />
+          <Route path="/transcripts/:sessionId" element={<TranscriptDetail />} />
           <Route path="/usage" element={<Usage />} />
           <Route
             path="/team"
@@ -157,7 +161,12 @@ function Shell({ children }: { children: ReactNode }) {
           Cadri
         </NavLink>
         <nav className="nav-links" aria-label="Pages">
-          <NavLink to="/" end className={linkClass} data-tone="pink">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) => linkClass({ isActive: isActive || pathname.startsWith("/memories/") })}
+            data-tone="pink"
+          >
             <NavGlyph name="memories" />
             Memories
           </NavLink>

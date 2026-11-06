@@ -36,7 +36,8 @@ Two layers:
 
 - **`GET /api/transcripts` (list)** returns Layer B + metadata: `preview`, `transcript_text`, `conversation`, harness/model fields, `bytes`, timestamps. **Omits** Layer A `content` / trajectory.
 - **`POST /api/transcripts`** response still includes stored Layer A `content` so the uploader can confirm what was saved.
-- Full Layer A for an existing session is not exposed on a dedicated detail route yet; add when the UI needs drill-in.
+- The server parses Layer A on every upload (`engine/core/src/transcript/`) and stores a summary: `prompt`, `started_at`, `ended_at`, `user_turns`, `assistant_turns`, `tool_call_count`, `tool_counts`, `has_writes`. List rows carry it plus `event_count` and `memory_commits` (commits whose `Cadri-Session-Id` names the session).
+- **`GET /api/transcripts/{session_id}`** returns the row with `messages` (`[{role: user|assistant, text, notes?, at?}]`, tool calls hidden; `notes` is assistant text written before a tool call in the same turn, `text` the reply after the last one), `tool_calls` (`[{name, at?}]`) and `memory_commits`. It does not return raw `content`.
 
 ### Visibility
 
@@ -49,3 +50,5 @@ Memory text lives in the git book. Provenance:
 - **Id:** `commit_hash` + file path (no separate `memory_uuid` table in v1).
 - Client may include in commit message / API metadata: `thread_id`, `other_memories_used`, harness/model, `compaction_prompt_version`.
 - Server sets author from token + `Cadri-Author-Kind`.
+- `POST /api/memories/commits` accepts `session_id`; the server writes it as a `Cadri-Session-Id:` trailer. Commits without the trailer but with a `Sources: <thread_id>, …` or `Sources: <harness>:<thread_id>, …` line are linked by the first id listed.
+- **`GET /api/memories/commits/{id}?scope=team|user`** returns the commit (`session_id` included) and `changes: [{path, before, after}]` with full file text (`null` when absent).

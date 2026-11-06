@@ -286,7 +286,14 @@ def default_agent_id() -> str:
     return f"{safe_part(harness)}-{secrets.token_hex(2)}"
 
 
-def write(book: Book, path: str, content: str, message: str, agent: str | None) -> int:
+def current_session_id() -> str | None:
+    """The agent session doing the write, so the commit links back to its transcript."""
+    return os.environ.get("CADRI_SESSION_ID", "").strip() or None
+
+
+def write(
+    book: Book, path: str, content: str, message: str, agent: str | None, session: str | None = None
+) -> int:
     ensure_clone(book)
     head = local_head(book)
     body: dict = {
@@ -296,6 +303,9 @@ def write(book: Book, path: str, content: str, message: str, agent: str | None) 
     }
     if head:
         body["base"] = head
+    session = session or current_session_id()
+    if session:
+        body["session_id"] = session
     status, _, reply = http_json(
         "POST", f"{book.base}/api/memories/commits?view=tree{book.query.replace('?', '&')}", book.base, body
     )

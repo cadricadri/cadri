@@ -1,5 +1,6 @@
 //! HTTP router, auth gate, and request handlers.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,8 +20,10 @@ use serde_json::{json, Value};
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingTranscript, Transcript};
 use crate::memory::{
-    self, BlameEntry, Change, EditRequest, GitHttp, MemoryCommit, MemoryService, MemoryStore,
+    self, BlameEntry, Change, CommitDetail, EditRequest, GitHttp, MemoryCommit, MemoryService,
+    MemoryStore,
 };
+use crate::transcript;
 use crate::ApiError;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
@@ -57,6 +60,7 @@ pub fn assemble(
             "/api/transcripts",
             get(list_transcripts).post(post_transcript),
         )
+        .route("/api/transcripts/{session_id}", get(get_transcript))
         .route("/api/memories", get(get_memories))
         .route("/api/memories/tree", get(get_memory_tree))
         .route("/api/memories/blob/{sha}", get(get_memory_blob))
@@ -64,6 +68,7 @@ pub fn assemble(
         .route("/api/memories/log", get(get_memory_log))
         .route("/api/memories/blame", get(get_memory_blame))
         .route("/api/memories/commits", post(post_memories))
+        .route("/api/memories/commits/{id}", get(get_memory_commit))
         .route("/git/{book}/{*path}", get(git_http).post(git_http))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     let mut app = Router::new()
@@ -327,6 +332,8 @@ struct CommitRequest {
     base: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 fn memory_book(
@@ -526,6 +533,7 @@ async fn post_memories(
         changes: request.changes,
         base: request.base,
         agent: request.agent,
+        session_id: request.session_id.filter(|session| !session.is_empty()),
     };
     let outcome = blocking(move || service.edit(&repo_id, edit)).await?;
     if query.view.as_deref() == Some("tree") {
@@ -619,16 +627,137 @@ fn git_response(content_type: &'static str, body: Vec<u8>) -> Response {
         .into_response()
 }
 
+/// A memory commit as listed on a transcript, with the book it lives in.
+#[derive(Serialize)]
+struct LinkedCommit {
+    book: &'static str,
+    #[serde(flatten)]
+    commit: MemoryCommit,
+}
+
+#[derive(Serialize)]
+struct TranscriptRow {
+    #[serde(flatten)]
+    transcript: Transcript,
+    memory_commits: Vec<LinkedCommit>,
+}
+
+#[derive(Serialize)]
+struct TranscriptDetail {
+    #[serde(flatten)]
+    transcript: Transcript,
+    messages: Vec<transcript::Message>,
+    tool_calls: Vec<transcript::ToolCall>,
+    memory_commits: Vec<LinkedCommit>,
+}
+
+#[derive(Serialize)]
+struct CommitDetailBody {
+    book: &'static str,
+    #[serde(flatten)]
+    detail: CommitDetail,
+}
+
+/// Every commit in the team book and the caller's own book that names a session,
+/// grouped by that session id. A book that fails to load is skipped, not fatal.
+async fn commits_by_session(
+    state: &AppState,
+    identity: &Identity,
+) -> HashMap<String, Vec<LinkedCommit>> {
+    let mut by_session: HashMap<String, Vec<LinkedCommit>> = HashMap::new();
+    for scope in ["team", "user"] {
+        let Ok((book, user_id)) = memory_book(identity, Some(scope)) else {
+            continue;
+        };
+        let Ok(repo_id) = memory_repo(&identity.org_id, book, &user_id) else {
+            continue;
+        };
+        let service = state.memories.clone();
+        let commits = match blocking(move || service.read_log(&repo_id)).await {
+            Ok(commits) => commits,
+            Err(err) => {
+                eprintln!("memory log for {book} unavailable: {}", err.message);
+                continue;
+            }
+        };
+        for commit in commits {
+            if let Some(session) = commit.session_id.clone() {
+                by_session
+                    .entry(session)
+                    .or_default()
+                    .push(LinkedCommit { book, commit });
+            }
+        }
+    }
+    by_session
+}
+
 async fn list_transcripts(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
-) -> Result<Json<Vec<Transcript>>, ApiError> {
-    let connection = lock_db(&state)?;
-    let transcripts = db::list(&connection, &identity.org_id).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to list transcripts: {err}"),
-        )
-    })?;
-    Ok(Json(transcripts))
+) -> Result<Json<Vec<TranscriptRow>>, ApiError> {
+    let transcripts = {
+        let connection = lock_db(&state)?;
+        db::list(&connection, &identity.org_id).map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to list transcripts: {err}"),
+            )
+        })?
+    };
+    let mut by_session = commits_by_session(&state, &identity).await;
+    let rows = transcripts
+        .into_iter()
+        .map(|transcript| TranscriptRow {
+            memory_commits: by_session
+                .remove(&transcript.session_id)
+                .unwrap_or_default(),
+            transcript,
+        })
+        .collect();
+    Ok(Json(rows))
+}
+
+async fn get_transcript(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    UrlPath(session_id): UrlPath<String>,
+) -> Result<Json<TranscriptDetail>, ApiError> {
+    let found = {
+        let connection = lock_db(&state)?;
+        db::get(&connection, &identity.org_id, &session_id).map_err(|err| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read transcript: {err}"),
+            )
+        })?
+    };
+    let mut transcript =
+        found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transcript not found"))?;
+    let content = transcript.content.take().unwrap_or_default();
+    let parsed = transcript::parse(&content, transcript.conversation.as_ref());
+    let memory_commits = commits_by_session(&state, &identity)
+        .await
+        .remove(&session_id)
+        .unwrap_or_default();
+    Ok(Json(TranscriptDetail {
+        transcript,
+        messages: parsed.messages,
+        tool_calls: parsed.tool_calls,
+        memory_commits,
+    }))
+}
+
+async fn get_memory_commit(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    UrlPath(id): UrlPath<String>,
+    query: Result<Query<MemoryQuery>, QueryRejection>,
+) -> Result<Json<CommitDetailBody>, ApiError> {
+    let Query(query) = query?;
+    let (book, user_id) = memory_book(&identity, query.scope.as_deref())?;
+    let repo_id = memory_repo(&identity.org_id, book, &user_id)?;
+    let service = state.memories.clone();
+    let detail = blocking(move || service.read_commit(&repo_id, &id)).await?;
+    Ok(Json(CommitDetailBody { book, detail }))
 }

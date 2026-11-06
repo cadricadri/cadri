@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod db;
 pub mod memory;
+pub mod transcript;
 
 mod api;
 mod error;

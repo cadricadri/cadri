@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 
 use crate::memory::types::{memory_path_ok, Change};
 
+use super::author::{is_trailer, SESSION_TRAILER};
 use super::error::Fail;
 use super::git_cli_exec::{git_ok, git_text, Repo};
 use super::ids::{is_hex, is_keep, MAX_FILE_BYTES, ZERO};
@@ -123,7 +124,7 @@ pub(super) fn clean_message(message: &str) -> Result<String, Fail> {
     let kept: Vec<&str> = message
         .trim()
         .lines()
-        .filter(|line| !line.starts_with("Cadri-Author-"))
+        .filter(|line| !is_trailer(line))
         .collect();
     let body = kept.join("\n").trim().to_string();
     if body.is_empty() {
@@ -304,6 +305,7 @@ pub(super) fn commit_tree(
     parent: Option<&str>,
     message: &str,
     author: &CommitAuthor,
+    session: Option<&str>,
 ) -> Result<String, Fail> {
     let mut args = vec!["commit-tree", tree];
     if let Some(parent) = parent {
@@ -326,9 +328,12 @@ pub(super) fn commit_tree(
             format!("{}@agents.cadri.local", sanitize_email(agent)),
         ),
     };
-    let body = format!(
+    let mut body = format!(
         "{message}\n\nCadri-Author-Kind: {kind}\nCadri-Author-Id: {id}\nCadri-Author-Label: {label}\n"
     );
+    if let Some(session) = session {
+        body.push_str(&format!("{SESSION_TRAILER} {session}\n"));
+    }
     git_text(
         repo,
         &args,

@@ -1333,6 +1333,7 @@ fn edit_request(message: &str, changes: Vec<Change>) -> crate::memory::types::Ed
         changes,
         base: None,
         agent: None,
+        session_id: None,
     }
 }
 

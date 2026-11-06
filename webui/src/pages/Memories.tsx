@@ -503,7 +503,7 @@ export default function Memories() {
               </button>
             </div>
           </div>
-          {store && committed ? <CommitLog commits={store.commits} onOpen={openFile} /> : null}
+          {store && committed ? <CommitLog commits={store.commits} scope={scope} onOpen={openFile} /> : null}
           {store && !committed ? (
             <div className="memory-workspace">
               <FileTree

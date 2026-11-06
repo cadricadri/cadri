@@ -9,10 +9,12 @@ use axum::http::StatusCode;
 
 use crate::memory::s3::S3Books;
 use crate::memory::types::{
-    BlameEntry, Change, CommittedTree, EditRequest, MemoryCommit, MemoryStore, MemoryTree,
+    BlameEntry, Change, CommitDetail, CommittedTree, EditRequest, MemoryCommit, MemoryStore,
+    MemoryTree,
 };
 use crate::ApiError;
 
+use super::author::valid_session;
 use super::bundle::parse_bundle_header;
 use super::commit::{
     apply_changes, check_content, clean_message, commit_tree, current_sources, valid_agent,
@@ -28,7 +30,7 @@ use super::protocol::{
 };
 use super::snapshot::{snapshot_after, snapshot_from_repo, Snapshot};
 use super::store::{clear_stage, obj_path, read_sha_file, ref_path};
-use super::view::{blame_file, read_commits};
+use super::view::{blame_file, read_commit_detail, read_commits};
 
 type FileBlames = HashMap<String, Vec<BlameEntry>>;
 
@@ -246,6 +248,18 @@ impl MemoryService {
         self.read_file_blame(repo_id, path).map_err(into_api)
     }
 
+    pub(crate) fn read_commit(&self, repo_id: &str, sha: &str) -> Result<CommitDetail, ApiError> {
+        let snapshot = self.snapshot(repo_id).map_err(into_api)?;
+        if snapshot.tip.is_none() {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "memory commit not found",
+            ));
+        }
+        let repo = self.repo(repo_id).map_err(into_api)?;
+        read_commit_detail(&repo, sha).map_err(into_api)
+    }
+
     /// Test helper: hold the write lock. Readers must not wait on this.
     #[cfg(test)]
     pub(crate) fn hold_writer(
@@ -294,6 +308,7 @@ impl MemoryService {
                 changes: changes.to_vec(),
                 base: None,
                 agent: None,
+                session_id: None,
             },
         )
         .map(|outcome| outcome.store())
@@ -312,6 +327,13 @@ impl MemoryService {
             .is_some_and(|agent| !valid_agent(agent))
         {
             return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid agent"));
+        }
+        if request
+            .session_id
+            .as_deref()
+            .is_some_and(|session| !valid_session(session))
+        {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid session id"));
         }
         self.submit(repo_id, request)
     }
@@ -1200,7 +1222,14 @@ fn apply_edit(
             label: &request.label,
         },
     };
-    let sha = commit_tree(repo, &built.tree, parent, &message, &author)?;
+    let sha = commit_tree(
+        repo,
+        &built.tree,
+        parent,
+        &message,
+        &author,
+        request.session_id.as_deref(),
+    )?;
     builder.committed(&sha);
     snapshot_after(current, &sha, &built.files, built.new_blobs).map(Some)
 }
