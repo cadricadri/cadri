@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Publish plugin/ from origin/main as GitHub release plugin-v<version>.
+# `curl -fsSL https://cadri.io/install.sh | bash` installs the newest one.
+set -euo pipefail
+
+version="${1:-}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "usage: plugin/scripts/release <major.minor.patch>" >&2; exit 2; }
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$root"
+
+git fetch --quiet origin main
+commit="$(git rev-parse origin/main)"
+tag="plugin-v$version"
+if gh release view "$tag" >/dev/null 2>&1; then
+  echo "release $tag already exists" >&2
+  exit 1
+fi
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+git archive --format=tar --prefix=cadri-plugin/ "$commit:plugin" | tar -x -C "$work"
+printf '%s\n' "$version" >"$work/cadri-plugin/VERSION"
+tar -czf "$work/cadri-plugin.tar.gz" -C "$work" cadri-plugin
+
+gh release create "$tag" "$work/cadri-plugin.tar.gz" \
+  --target "$commit" \
+  --title "Cadri plugin $version" \
+  --notes "Install or upgrade: curl -fsSL https://cadri.io/install.sh | bash" \
+  --latest
+echo "Released $tag from ${commit:0:12}."
+
+landing="$root/../landingpage/install.sh"
+if [[ -f "$landing" ]] && ! git show "$commit:plugin/install.sh" | cmp -s - "$landing"; then
+  echo "landingpage/install.sh differs from plugin/install.sh; copy it over and deploy the landing page." >&2
+fi

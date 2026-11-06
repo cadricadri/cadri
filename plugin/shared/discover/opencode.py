@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -14,6 +15,10 @@ def _db_candidates(home: Path) -> list[Path]:
         home / ".local" / "share" / "opencode" / "opencode.db",
         home / ".local" / "share" / "opencode" / "opencode-local.db",
     ]
+
+
+def database(home: Path) -> Path | None:
+    return next((path for path in _db_candidates(home) if path.is_file()), None)
 
 
 def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
@@ -65,11 +70,24 @@ def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
     return refs
 
 
-def export_session_json(db_path: Path, session_id: str) -> str:
-    """Export one OpenCode session as JSON for upload (info + messages)."""
-    import json
+def _decode(raw: object) -> dict:
+    if not isinstance(raw, str):
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"raw": raw}
+    return value if isinstance(value, dict) else {"raw": value}
 
+
+def export_session_json(db_path: Path, session_id: str) -> str:
+    """Export one OpenCode session as JSON for upload (info + messages).
+
+    OpenCode 2 keeps turns in session_message; OpenCode 1 keeps them in message and
+    part, and may also carry an empty session_message table.
+    """
     connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
     try:
         tables = {
             row[0]
@@ -78,36 +96,33 @@ def export_session_json(db_path: Path, session_id: str) -> str:
             )
         }
         info: dict = {"id": session_id}
+        for table in ("session_v2", "session"):
+            if table in tables:
+                row = connection.execute(f"SELECT * FROM {table} WHERE id = ?", (session_id,)).fetchone()
+                if row:
+                    info = dict(row)
+                    break
         messages: list = []
-        if "session_v2" in tables:
-            row = connection.execute(
-                "SELECT * FROM session_v2 WHERE id = ?", (session_id,)
-            ).fetchone()
-            if row:
-                cols = [d[0] for d in connection.execute("SELECT * FROM session_v2 LIMIT 0").description]
-                info = dict(zip(cols, row))
         if "session_message" in tables:
+            messages = [
+                _decode(row["data"])
+                for row in connection.execute(
+                    "SELECT data FROM session_message WHERE session_id = ? ORDER BY seq, id",
+                    (session_id,),
+                )
+            ]
+        if not messages and {"message", "part"} <= tables:
+            parts: dict[str, list] = {}
             for row in connection.execute(
-                "SELECT data FROM session_message WHERE session_id = ? ORDER BY id",
+                "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id",
                 (session_id,),
             ):
-                raw = row[0]
-                if isinstance(raw, str):
-                    try:
-                        messages.append(json.loads(raw))
-                    except json.JSONDecodeError:
-                        messages.append({"raw": raw})
-        elif "message" in tables:
+                parts.setdefault(row["message_id"], []).append(_decode(row["data"]))
             for row in connection.execute(
-                "SELECT data FROM message WHERE sessionID = ? ORDER BY id",
+                "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
                 (session_id,),
             ):
-                raw = row[0]
-                if isinstance(raw, str):
-                    try:
-                        messages.append(json.loads(raw))
-                    except json.JSONDecodeError:
-                        messages.append({"raw": raw})
+                messages.append({"id": row["id"], **_decode(row["data"]), "parts": parts.get(row["id"], [])})
         return json.dumps({"info": info, "messages": messages})
     finally:
         connection.close()

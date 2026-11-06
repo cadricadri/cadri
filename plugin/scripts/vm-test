@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Rehearse the hosted install on a fresh macOS VM: no Command Line Tools, no git,
+# no Homebrew, only the stub /usr/bin/python3. Needs Apple silicon and Tart (https://tart.run).
+#
+#   plugin/scripts/vm-test            install the newest GitHub release, as a user would
+#   plugin/scripts/vm-test --local    install this checkout's plugin/ instead
+#
+# Uploads go to a stand-in Cadri server on this Mac. The VM stays up afterwards as
+# cadri-test: ssh admin@$(tart ip cadri-test) (password admin); tart stop cadri-test.
+set -euo pipefail
+
+IMAGE="ghcr.io/cirruslabs/macos-tahoe-vanilla:latest"
+BASE="cadri-raw"
+VM="cadri-test"
+FILE_PORT=8765
+CADRI_PORT=18767
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+work="$(mktemp -d)"
+pids=()
+cleanup() {
+  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+say() { printf '\n== %s\n' "$*"; }
+command -v tart >/dev/null || { echo "install Tart first: https://tart.run" >&2; exit 1; }
+
+say "Preparing VM $VM from a pristine $BASE"
+tart list --quiet 2>/dev/null | grep -qx "$BASE" || tart clone "$IMAGE" "$BASE"
+tart stop "$VM" >/dev/null 2>&1 || true
+tart delete "$VM" >/dev/null 2>&1 || true
+tart clone "$BASE" "$VM"
+nohup tart run --no-graphics "$VM" >"$work/tart-run.log" 2>&1 &
+disown
+ip="$(tart ip --wait 180 "$VM")"
+host="${ip%.*}.1"
+echo "VM at $ip; this Mac is $host from inside it"
+
+key="$work/id_ed25519"
+ssh-keygen -q -t ed25519 -N "" -f "$key"
+ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
+for _ in $(seq 90); do
+  nc -z -G 2 "$ip" 22 2>/dev/null && break
+  sleep 2
+done
+if ! nc -z -G 2 "$ip" 22 2>/dev/null; then
+  tart list | grep -q "$VM.*running" || { echo "the VM stopped:" >&2; cat "$work/tart-run.log" >&2; exit 1; }
+  echo "cannot reach the VM at $ip. If nc says 'No route to host', macOS is blocking local network" >&2
+  echo "access for this terminal app: System Settings > Privacy & Security > Local Network." >&2
+  exit 1
+fi
+KEY="$key" IP="$ip" expect <<'EOF' >/dev/null
+set timeout 60
+spawn ssh-copy-id -i $env(KEY).pub -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@$env(IP)
+expect {
+  "assword:" { send "admin\r"; exp_continue }
+  eof
+}
+EOF
+vm() { ssh -i "$key" "${ssh_opts[@]}" "admin@$ip" "$@"; }
+
+mkdir -p "$work/serve"
+cat >"$work/cadri.py" <<'EOF'
+import json, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def reply(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code); self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        print("upload", body.get("harness"), body.get("thread_id"), body.get("hook_event"), len(body.get("content") or ""), flush=True)
+        self.reply(200, {"ok": True})
+    def do_GET(self):
+        # Identity lets cadri init and the memory watcher get as far as git, the step that
+        # must not open the Command Line Tools installer.
+        if self.path == "/api/me":
+            return self.reply(200, {"org_id": "org1", "user_id": "u1"})
+        self.reply(404, {"error": "not_found"})
+    def log_message(self, *args):
+        pass
+ThreadingHTTPServer(("0.0.0.0", int(sys.argv[1])), H).serve_forever()
+EOF
+python3 "$work/cadri.py" "$CADRI_PORT" >"$work/uploads.log" 2>&1 &
+pids+=($!)
+
+install_env=""
+install_url="https://cadri.io/install.sh"
+if [[ "${1:-}" == "--local" ]]; then
+  git -C "$root" archive --format=tar --prefix=cadri-plugin/ HEAD:plugin | tar -x -C "$work/serve"
+  echo "local-$(git -C "$root" rev-parse --short HEAD)" >"$work/serve/cadri-plugin/VERSION"
+  tar -czf "$work/serve/cadri-plugin.tar.gz" -C "$work/serve" cadri-plugin
+  cp "$root/plugin/install.sh" "$work/serve/install.sh"
+  (cd "$work/serve" && python3 -m http.server "$FILE_PORT" --bind 0.0.0.0 >/dev/null 2>&1) &
+  pids+=($!)
+  install_url="http://$host:$FILE_PORT/install.sh"
+  install_env="CADRI_PLUGIN_TGZ=http://$host:$FILE_PORT/cadri-plugin.tar.gz"
+fi
+
+popup_step=""
+# The installer's window shows up as its own process; dismiss it so a later step can trip it again.
+popup_after() {
+  sleep 3
+  if vm 'ps -axo comm | grep -q "[I]nstall Command Line Developer Tools"'; then
+    echo "!! the Command Line Tools installer opened after: $1"
+    popup_step="${popup_step:-$1}"
+    vm 'pkill -9 -f "Install Command Line Developer Tools" || true'
+  fi
+}
+
+say "Raw machine check"
+vm 'sw_vers -productVersion; xcode-select -p >/dev/null 2>&1 && echo "Command Line Tools: installed (not a raw Mac)" || echo "Command Line Tools: missing (good)"'
+popup_after "boot"
+
+say "Installing OpenCode (a real agent that runs free models without signing in)"
+vm 'curl -fsSL https://opencode.ai/install | bash >/dev/null 2>&1; ~/.opencode/bin/opencode --version'
+popup_after "installing OpenCode"
+
+say "curl -fsSL $install_url | bash"
+vm "curl -fsSL '$install_url' | env $install_env bash"
+popup_after "install.sh"
+
+say "cadri init against the stand-in server"
+vm "PATH=\$HOME/.opencode/bin:\$PATH ~/.local/bin/cadri init --local --url http://$host:$CADRI_PORT"
+popup_after "cadri init"
+
+say "A real OpenCode session"
+vm 'export PATH=$HOME/.opencode/bin:$PATH; model=$(opencode models 2>/dev/null | grep -m1 -- "-free$"); echo "model $model"; cd /tmp && opencode run --model "$model" "Reply with the single word pong." 2>&1 | tail -1'
+popup_after "the OpenCode session"
+sleep 8
+popup_after "the capture hooks"
+
+say "Results"
+failed=0
+check() { if eval "$2"; then echo "ok    $1"; else echo "FAIL  $1"; failed=1; fi; }
+check "no Command Line Tools prompt${popup_step:+ (opened after $popup_step)}" '[[ -z "$popup_step" ]]'
+check "cadri runs" 'vm "~/.local/bin/cadri --version" >/dev/null'
+check "OpenCode plugin installed" 'vm "test -f ~/.config/opencode/plugins/cadri.ts"'
+check "skills installed" 'vm "test -f ~/.agents/skills/cadri-memory-seed/SKILL.md"'
+check "OpenCode transcript uploaded by the plugin" 'awk "\$2 == \"opencode\" && \$5 > 500" "$work/uploads.log" | grep -q .'
+echo
+cat "$work/uploads.log"
+echo
+echo "VM $VM is still running: ssh admin@$ip (password admin), or tart stop $VM"
+exit "$failed"

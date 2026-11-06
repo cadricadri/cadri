@@ -1,4 +1,4 @@
-"""End-to-end tests for capture.py and cadri-login against a fake Cadri server."""
+"""End-to-end tests for `cadri hook claude` and `cadri login` against a fake Cadri server."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parent.parent
-CAPTURE = PLUGIN / "harnesses" / "claude" / "hooks" / "capture.py"
-LOGIN = PLUGIN / "bin" / "cadri_cli.py"
+CLI = PLUGIN / "bin" / "cadri_cli.py"
+CAPTURE = [sys.executable, str(CLI), "hook", "claude"]
+LOGIN = CLI
 
 
 class FakeCadri:
@@ -74,7 +75,7 @@ class PluginTestCase(unittest.TestCase):
 
     def env(self, **extra: str) -> dict:
         env = {k: v for k, v in os.environ.items() if not k.startswith("CADRI_")}
-        env.update({"HOME": str(self.home), "CADRI_URL": self.server.url, **extra})
+        env.update({"HOME": str(self.home), "CADRI_URL": self.server.url, "CADRI_HOOK_FOREGROUND": "1", **extra})
         return env
 
     def capture(self, **env: str) -> subprocess.CompletedProcess:
@@ -85,7 +86,7 @@ class PluginTestCase(unittest.TestCase):
             "hook_event_name": "Stop",
         }
         return subprocess.run(
-            [sys.executable, str(CAPTURE)],
+            CAPTURE,
             input=json.dumps(event),
             env=self.env(**env),
             capture_output=True,
@@ -187,7 +188,7 @@ class CaptureTests(PluginTestCase):
 
     def test_invalid_hook_input_exits_zero(self):
         result = subprocess.run(
-            [sys.executable, str(CAPTURE)],
+            CAPTURE,
             input="not json",
             env=self.env(),
             capture_output=True,
