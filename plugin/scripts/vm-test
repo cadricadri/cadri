@@ -31,7 +31,8 @@ tart list --quiet 2>/dev/null | grep -qx "$BASE" || tart clone "$IMAGE" "$BASE"
 tart stop "$VM" >/dev/null 2>&1 || true
 tart delete "$VM" >/dev/null 2>&1 || true
 tart clone "$BASE" "$VM"
-tart run --no-graphics "$VM" >"$work/tart-run.log" 2>&1 &
+nohup tart run --no-graphics "$VM" >"$work/tart-run.log" 2>&1 &
+disown
 ip="$(tart ip --wait 180 "$VM")"
 host="${ip%.*}.1"
 echo "VM at $ip; this Mac is $host from inside it"
@@ -39,10 +40,16 @@ echo "VM at $ip; this Mac is $host from inside it"
 key="$work/id_ed25519"
 ssh-keygen -q -t ed25519 -N "" -f "$key"
 ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
-for _ in $(seq 60); do
-  nc -z "$ip" 22 2>/dev/null && break
+for _ in $(seq 90); do
+  nc -z -G 2 "$ip" 22 2>/dev/null && break
   sleep 2
 done
+if ! nc -z -G 2 "$ip" 22 2>/dev/null; then
+  tart list | grep -q "$VM.*running" || { echo "the VM stopped:" >&2; cat "$work/tart-run.log" >&2; exit 1; }
+  echo "cannot reach the VM at $ip. If nc says 'No route to host', macOS is blocking local network" >&2
+  echo "access for this terminal app: System Settings > Privacy & Security > Local Network." >&2
+  exit 1
+fi
 KEY="$key" IP="$ip" expect <<'EOF' >/dev/null
 set timeout 60
 spawn ssh-copy-id -i $env(KEY).pub -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@$env(IP)
