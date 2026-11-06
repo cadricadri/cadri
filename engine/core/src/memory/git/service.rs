@@ -879,8 +879,8 @@ impl MemoryService {
                 Ok(ready(report(Ok(()))))
             }
             // Conventional phrasing so clients that match `non-fast-forward`
-            // (including the Letta memory client) rebase and retry. A lost log
-            // create is that case: main moved, and this tip did not.
+            // rebase and retry. A lost log create is that case: main moved,
+            // and this tip did not.
             Err(Fail::Conflict) => {
                 if book.current().and_then(|now| now.tip.clone()).as_deref()
                     == Some(command.new.as_str())
