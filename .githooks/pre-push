@@ -3,5 +3,9 @@
 # the web UI build, and plugin tests.
 set -eu
 
+# Git exports GIT_DIR and friends to hooks (an absolute path from a worktree). The engine
+# tests run git in temporary repositories and would otherwise commit into this one.
+unset $(git rev-parse --local-env-vars)
+
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 "$root/scripts/check"
