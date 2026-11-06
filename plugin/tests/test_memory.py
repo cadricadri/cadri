@@ -18,7 +18,7 @@ sys.path.insert(0, str(PLUGIN))
 sys.path.insert(0, str(PLUGIN / "bin"))
 
 import cadri_cli  # noqa: E402
-from shared import memory  # noqa: E402
+from shared import hooks, memory  # noqa: E402
 
 BASE = "http://127.0.0.1:8080"
 HEAD = "a" * 40
@@ -87,6 +87,9 @@ class MemoryClientTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"CADRI_HOME": self.tmp.name, "CADRI_API_TOKEN": TOKEN, "CADRI_URL": BASE}, clear=False)
         env.start()
         self.addCleanup(env.stop)
+        ready = mock.patch.object(memory, "git_ready", return_value=True)
+        ready.start()
+        self.addCleanup(ready.stop)
         self.team = memory.Book(BASE, "org1", "u1", "team")
         self.user = memory.Book(BASE, "org1", "u1", "user")
 
@@ -96,6 +99,16 @@ class MemoryClientTests(unittest.TestCase):
     def run_cli(self, argv, server, git):
         with mock.patch("urllib.request.urlopen", server), mock.patch("subprocess.run", git):
             return cadri_cli.main(argv)
+
+    def test_never_runs_the_git_stub_on_a_mac_without_command_line_tools(self):
+        git = GitRecorder()
+        with mock.patch.object(memory, "git_ready", return_value=False), mock.patch("subprocess.run", git):
+            with self.assertRaisesRegex(memory.MemoryFailure, "xcode-select --install"):
+                memory.git(self.team, "fetch")
+            with mock.patch("subprocess.Popen") as popen:
+                hooks.start_memory_watcher()
+        self.assertEqual(git.calls, [])
+        popen.assert_not_called()
 
     def test_paths_for_team_and_user_books(self):
         root = Path(self.tmp.name) / "memory" / "127.0.0.1-8080" / "org1"

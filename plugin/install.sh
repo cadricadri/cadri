@@ -57,6 +57,21 @@ fetch_source() {
   dirname "$(dirname "$cli")"
 }
 
+# Without the Command Line Tools, /usr/bin/python3 is a stub that opens their installer,
+# and uv runs every python3 on PATH while it looks for interpreters.
+uv_quiet() {
+  if [[ "$(uname -s)" != "Darwin" ]] || xcode-select -p >/dev/null 2>&1; then
+    uv "$@"
+    return
+  fi
+  local dir path=""
+  local IFS=:
+  for dir in $PATH; do
+    [[ "$dir" == /usr/bin ]] || path="${path:+$path:}$dir"
+  done
+  PATH="$path" uv "$@"
+}
+
 copy_tree() {
   local src="$1"
   mkdir -p "$INSTALL_DIR"
@@ -95,7 +110,7 @@ main() {
   src="$(fetch_source)"
   copy_tree "$src"
   say "Setting up Python ${PYTHON_VERSION}…"
-  UV_PYTHON_PREFERENCE=only-managed uv sync --quiet --project "$INSTALL_DIR" --python "$PYTHON_VERSION"
+  UV_PYTHON_PREFERENCE=only-managed uv_quiet sync --quiet --project "$INSTALL_DIR" --python "$PYTHON_VERSION"
   write_shim
   ensure_path
   local version

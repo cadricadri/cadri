@@ -14,10 +14,12 @@ is never written to disk.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -158,7 +160,20 @@ def http_json(
         raise MemoryFailure(f"could not reach {url}: {exc}") from exc
 
 
+@functools.lru_cache(maxsize=1)
+def git_ready() -> bool:
+    """Whether git runs. On a fresh Mac /usr/bin/git is a stub that opens the Command Line Tools installer."""
+    path = shutil.which("git")
+    if path is None:
+        return False
+    if sys.platform == "darwin" and Path(path) == Path("/usr/bin/git"):
+        return subprocess.run(["xcode-select", "-p"], capture_output=True, check=False).returncode == 0
+    return True
+
+
 def git(book: Book, *args: str, cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    if not git_ready():
+        raise MemoryFailure("git is not installed; run `xcode-select --install`")
     auth = cadri_auth.auth_headers(book.base).get("Authorization")
     # A server in auth mode none needs no header; one that wants it answers 401 and
     # whoami/sync report "not signed in".

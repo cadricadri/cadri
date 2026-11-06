@@ -74,6 +74,10 @@ class H(BaseHTTPRequestHandler):
         print("upload", body.get("harness"), body.get("thread_id"), body.get("hook_event"), len(body.get("content") or ""), flush=True)
         self.reply(200, {"ok": True})
     def do_GET(self):
+        # Identity lets cadri init and the memory watcher get as far as git, the step that
+        # must not open the Command Line Tools installer.
+        if self.path == "/api/me":
+            return self.reply(200, {"org_id": "org1", "user_id": "u1"})
         self.reply(404, {"error": "not_found"})
     def log_message(self, *args):
         pass
@@ -102,7 +106,7 @@ popup_after() {
   if vm 'ps -axo comm | grep -q "[I]nstall Command Line Developer Tools"'; then
     echo "!! the Command Line Tools installer opened after: $1"
     popup_step="${popup_step:-$1}"
-    vm 'killall "Install Command Line Developer Tools" 2>/dev/null || true'
+    vm 'pkill -9 -f "Install Command Line Developer Tools" || true'
   fi
 }
 

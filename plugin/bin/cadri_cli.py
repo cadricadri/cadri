@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -217,16 +216,6 @@ def start_local_engine() -> None:
     print(f"Started local engine (log {log}). pid={proc.stdout.strip() or 'unknown'}")
 
 
-def git_ready() -> bool:
-    """Whether git runs. On a fresh Mac /usr/bin/git is a stub that asks to install the Command Line Tools."""
-    path = shutil.which("git")
-    if path is None:
-        return False
-    if sys.platform == "darwin" and Path(path) == Path("/usr/bin/git"):
-        return subprocess.run(["xcode-select", "-p"], capture_output=True, check=False).returncode == 0
-    return True
-
-
 def install_hooks(harnesses: list[str]) -> list[str]:
     install.remove_legacy(Path.home())
     lines = []
@@ -241,7 +230,7 @@ def install_hooks(harnesses: list[str]) -> list[str]:
 
 
 def clone_books(url: str | None) -> str:
-    if not git_ready():
+    if not memory.git_ready():
         return (
             "Memory: skipped, git is not installed. Run `xcode-select --install`, "
             "then `cadri memory clone` and `cadri memory clone --scope user`."

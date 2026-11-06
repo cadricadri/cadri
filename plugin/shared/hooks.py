@@ -120,6 +120,8 @@ def upload(payload: dict) -> None:
 
 
 def start_memory_watcher() -> None:
+    if not memory.git_ready():
+        return
     try:
         memory.touch_heartbeat()
         memory.detach_watcher(Path(__file__).resolve().parent.parent / "bin" / "cadri_cli.py")
