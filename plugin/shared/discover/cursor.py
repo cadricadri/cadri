@@ -1,4 +1,4 @@
-"""Cursor agent transcripts under ~/.cursor/projects/*/agent-transcripts/."""
+"""Cursor agent sessions under ~/.cursor/projects/*/agent-transcripts/."""
 
 from __future__ import annotations
 

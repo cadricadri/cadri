@@ -19,7 +19,7 @@ from shared import cadri_auth, hooks, install, memory  # noqa: E402
 from shared.discover import detected_harnesses, discover_all  # noqa: E402
 from shared.discover.opencode import export_session_json  # noqa: E402
 from shared.discover.types import SessionRef  # noqa: E402
-from shared.upload import post_transcript  # noqa: E402
+from shared.upload import post_session  # noqa: E402
 
 BACKFILL_WINDOW_SECONDS = 30 * 24 * 60 * 60
 BACKFILL_MAX_SESSIONS = 200
@@ -166,7 +166,7 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
         }
         try:
-            status, body = post_transcript(base, payload)
+            status, body = post_session(base, payload)
         except (OSError, ValueError) as exc:
             raise CliError(f"could not reach {base}: {exc}") from exc
         if status in (200, 201):
@@ -394,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     discover.add_argument("--days", type=float, default=30)
     discover.set_defaults(func=cmd_discover)
 
-    show = sub.add_parser("show", help="Print one local session transcript")
+    show = sub.add_parser("show", help="Print one local session")
     show.add_argument("thread_id")
     show.set_defaults(func=cmd_show)
 

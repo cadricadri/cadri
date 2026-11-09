@@ -1,4 +1,4 @@
-"""`cadri hook <harness>`: turn one harness hook event into a transcript upload.
+"""`cadri hook <harness>`: turn one harness hook event into a session upload.
 
 Every harness calls the same entry point with its own JSON on stdin. The hook
 answers the harness at once and uploads in a detached child, so a slow network
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from . import cadri_auth, memory
 from .discover import opencode
-from .upload import post_transcript
+from .upload import post_session
 
 HARNESSES = ("claude_code", "cursor", "codex", "opencode")
 ALIASES = {"claude": "claude_code"}
@@ -61,7 +61,7 @@ def cursor_transcript(conversation_id: str) -> str | None:
 
 
 def build_payload(harness: str, event: dict) -> dict | None:
-    """The transcript row for this event, or None when there is nothing to upload yet."""
+    """The session row for this event, or None when there is nothing to upload yet."""
     hook_event = text(event, "hook_event_name")
     cwd = text(event, "cwd")
     if harness == "cursor":
@@ -108,7 +108,7 @@ def build_payload(harness: str, event: dict) -> dict | None:
 def upload(payload: dict) -> None:
     base = cadri_auth.server_url()
     try:
-        status, body = post_transcript(base, payload, UPLOAD_TIMEOUT_SECONDS)
+        status, body = post_session(base, payload, UPLOAD_TIMEOUT_SECONDS)
     except (OSError, ValueError) as exc:
         print(f"cadri: could not reach {base}: {exc}", file=sys.stderr)
         return
@@ -119,7 +119,7 @@ def upload(payload: dict) -> None:
         detail = "; open Cadri in the browser, create your team, then run cadri login"
     elif status in (401, 403):
         detail = "; run cadri login or set CADRI_API_TOKEN"
-    print(f"cadri: {base}/api/transcripts returned {status}{detail}", file=sys.stderr)
+    print(f"cadri: {base}/api/sessions returned {status}{detail}", file=sys.stderr)
 
 
 def export_session(event: dict) -> None:

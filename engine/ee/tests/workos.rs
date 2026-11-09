@@ -979,13 +979,13 @@ async fn invalid_bearer_tokens_are_rejected() {
     for (name, token) in cases {
         let (status, _, body) = send(
             &app,
-            get_with("/api/transcripts", &[("authorization", &bearer(&token))]),
+            get_with("/api/sessions", &[("authorization", &bearer(&token))]),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{name}");
         assert_eq!(body, json!({ "error": "unauthorized" }), "{name}");
     }
-    let (status, _, _) = send(&app, get_with("/api/transcripts", &[])).await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[])).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -1011,7 +1011,7 @@ async fn workos_orgs_are_isolated() {
         &app,
         request(
             Method::POST,
-            "/api/transcripts",
+            "/api/sessions",
             &[("authorization", &org_1)],
             Some(json!({ "session_id": "s1", "content": "secret" })),
         ),
@@ -1021,13 +1021,13 @@ async fn workos_orgs_are_isolated() {
 
     let (_, _, listed) = send(
         &app,
-        get_with("/api/transcripts", &[("authorization", &org_1)]),
+        get_with("/api/sessions", &[("authorization", &org_1)]),
     )
     .await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
     let (_, _, listed) = send(
         &app,
-        get_with("/api/transcripts", &[("authorization", &org_2)]),
+        get_with("/api/sessions", &[("authorization", &org_2)]),
     )
     .await;
     assert_eq!(listed, json!([]));
@@ -1135,8 +1135,7 @@ async fn refresh_endpoint_rotates_tokens() {
 #[tokio::test]
 async fn login_redirects_to_authkit() {
     let (app, mock) = setup().await;
-    let (status, headers, _) =
-        send(&app, get_with("/auth/login?return_to=/transcripts", &[])).await;
+    let (status, headers, _) = send(&app, get_with("/auth/login?return_to=/sessions", &[])).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
     assert!(location.starts_with(&format!("{}/user_management/authorize?", mock.base)));
@@ -1202,11 +1201,11 @@ async fn start_login(app: &Router, return_to: &str) -> (String, String) {
 #[tokio::test]
 async fn callback_sets_the_session_cookie() {
     let (app, _) = setup().await;
-    let (state, login_cookie) = start_login(&app, "/transcripts").await;
+    let (state, login_cookie) = start_login(&app, "/sessions").await;
     let uri = format!("/auth/callback?code=good-code&state={state}");
     let (status, headers, _) = send(&app, get_with(&uri, &[("cookie", &login_cookie)])).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
-    assert_eq!(headers.get(header::LOCATION).unwrap(), "/transcripts");
+    assert_eq!(headers.get(header::LOCATION).unwrap(), "/sessions");
 
     let session = set_cookie(&headers, cadri_ee::SESSION_COOKIE).unwrap();
     for attribute in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"] {
@@ -1255,7 +1254,7 @@ async fn expired_session_cookie_is_refreshed_once() {
     let (app, mock) = setup().await;
     let cookie = encrypted_session(&mock.token(Some("org_1"), now() - 3600), "good-refresh");
     let first = send(&app, get_with("/api/me", &[("cookie", &cookie)]));
-    let second = send(&app, get_with("/api/transcripts", &[("cookie", &cookie)]));
+    let second = send(&app, get_with("/api/sessions", &[("cookie", &cookie)]));
     let ((status_1, headers_1, body_1), (status_2, headers_2, _)) = tokio::join!(first, second);
     assert_eq!(status_1, StatusCode::OK);
     assert_eq!(status_2, StatusCode::OK);
@@ -2184,7 +2183,7 @@ async fn staging_signup_attempt(
         &app,
         request(
             Method::POST,
-            "/api/transcripts",
+            "/api/sessions",
             &[("cookie", &session_cookie)],
             Some(json!({
                 "session_id": transcript_id,
@@ -2197,7 +2196,7 @@ async fn staging_signup_attempt(
     .await;
     if status != StatusCode::OK || stored["session_id"] != transcript_id {
         return Err(format!(
-            "POST /api/transcripts returned {status} {}",
+            "POST /api/sessions returned {status} {}",
             stored["error"].as_str().unwrap_or("unknown")
         ));
     }
@@ -2320,11 +2319,7 @@ async fn billing_stays_off_until_stripe_is_configured() {
     let (status, _, body) = send(&app, get_with("/api/billing", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "error": "billing_disabled" }));
-    let (status, _, _) = send(
-        &app,
-        get_with("/api/transcripts", &[("authorization", &auth)]),
-    )
-    .await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -2468,7 +2463,7 @@ async fn naming_a_team_starts_a_thirty_day_trial() {
     assert_eq!(billing["access"], true);
     assert_eq!(billing["seat_count"], 1);
     assert!(billing["trial_end"].as_i64().unwrap() > now());
-    let (status, _, _) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("cookie", &session)])).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -2502,7 +2497,7 @@ async fn a_paused_trial_locks_the_product_until_the_entitlement_returns() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    let (status, _, body) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    let (status, _, body) = send(&app, get_with("/api/sessions", &[("cookie", &session)])).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     assert_eq!(body, json!({ "error": "payment_required" }));
     let (status, _, _) = send(&app, get_with("/api/me", &[("cookie", &session)])).await;
@@ -2521,11 +2516,7 @@ async fn a_paused_trial_locks_the_product_until_the_entitlement_returns() {
     assert_eq!(body, json!({ "error": "payment_required" }));
 
     let auth = bearer(&entitled_token(&mock, &org_id));
-    let (status, _, _) = send(
-        &app,
-        get_with("/api/transcripts", &[("authorization", &auth)]),
-    )
-    .await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -2652,7 +2643,7 @@ async fn allowlisted_orgs_skip_the_billing_gate() {
         }
     });
     assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
-    let (status, _, _) = send(&app, get_with("/api/transcripts", &[("cookie", &session)])).await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("cookie", &session)])).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -2730,11 +2721,7 @@ async fn an_older_event_does_not_replace_a_newer_subscription() {
     assert_eq!(post_webhook(&app, active).await, StatusCode::OK);
     assert_eq!(post_webhook(&app, stale).await, StatusCode::OK);
     let auth = bearer(&entitled_token(&mock, &org_id));
-    let (status, _, _) = send(
-        &app,
-        get_with("/api/transcripts", &[("authorization", &auth)]),
-    )
-    .await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -2758,11 +2745,8 @@ async fn a_past_due_subscription_stays_locked_while_the_entitlement_remains() {
     });
     assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
     let auth = bearer(&entitled_token(&mock, &org_id));
-    let (status, _, body) = send(
-        &app,
-        get_with("/api/transcripts", &[("authorization", &auth)]),
-    )
-    .await;
+    let (status, _, body) =
+        send(&app, get_with("/api/sessions", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     assert_eq!(body, json!({ "error": "payment_required" }));
 }
@@ -2788,11 +2772,7 @@ async fn a_failed_invoice_with_no_retries_left_cancels_the_subscription() {
     assert_eq!(post_webhook(&app, payload).await, StatusCode::OK);
     assert_eq!(mock.directory.lock().unwrap().cancels, 1);
     let auth = bearer(&entitled_token(&mock, &org_id));
-    let (status, _, _) = send(
-        &app,
-        get_with("/api/transcripts", &[("authorization", &auth)]),
-    )
-    .await;
+    let (status, _, _) = send(&app, get_with("/api/sessions", &[("authorization", &auth)])).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
 }
 

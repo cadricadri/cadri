@@ -4,7 +4,7 @@ export type MemoryBook = "team" | "user";
 
 export type LinkedCommit = MemoryCommit & { book: MemoryBook };
 
-export type TranscriptRow = {
+export type SessionRow = {
   session_id: string;
   cwd: string | null;
   hook_event: string | null;
@@ -45,7 +45,7 @@ export type ToolCall = {
   at?: string;
 };
 
-export type TranscriptDetail = TranscriptRow & {
+export type SessionDetail = SessionRow & {
   messages: ChatMessage[];
   tool_calls: ToolCall[];
 };
@@ -54,8 +54,8 @@ export function commitLink(commit: { id: string; book: MemoryBook }): string {
   return commit.book === "user" ? `/memories/commits/${commit.id}?scope=user` : `/memories/commits/${commit.id}`;
 }
 
-export function transcriptLink(sessionId: string): string {
-  return `/transcripts/${encodeURIComponent(sessionId)}`;
+export function sessionLink(sessionId: string): string {
+  return `/sessions/${encodeURIComponent(sessionId)}`;
 }
 
 export function shortId(id: string): string {
@@ -87,13 +87,4 @@ export function formatDuration(startIso: string, endIso: string): string {
   }
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
-}
-
-/** The last path segment of a working directory, e.g. `/Users/ada/site` → `site`. */
-export function folderName(cwd: string | null): string {
-  if (!cwd) {
-    return "";
-  }
-  const parts = cwd.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] ?? cwd;
 }

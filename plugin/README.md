@@ -30,7 +30,7 @@ plugin/
 | OpenCode | `~/.config/opencode/plugins/cadri.ts` | session.created, session.idle |
 
 The hook reads the event from stdin, answers the harness at once, and uploads the session
-transcript from a detached child (log: `~/.cadri/hooks.log`). Session start events also start
+from a detached child (log: `~/.cadri/hooks.log`). Session start events also start
 the memory watcher. Entries are recognized by their `cadri_cli.py … hook` command, so
 `cadri init` replaces them and `cadri uninstall` removes only them.
 

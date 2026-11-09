@@ -245,11 +245,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       <InstallGate
         onReady={() => {
           markInstallSkipped();
-          window.location.assign("/transcripts");
+          window.location.assign("/sessions");
         }}
         onSkip={() => {
           markInstallSkipped();
-          window.location.assign("/transcripts");
+          window.location.assign("/sessions");
         }}
         headers={() => authHeaders(gate.mode)}
       />
@@ -294,7 +294,7 @@ function TokenGate({ message, onSubmit }: { message: string; onSubmit: (value: s
         <p className="hint">
           The API token is saved in <code>docker/.env</code> and printed when Docker starts Cadri.
           Share it with other people on your local network so they can open Cadri. Anyone with the
-          token can read and write transcripts.
+          token can read and write sessions.
         </p>
         <label className="field" htmlFor="token-input">
           API token
@@ -328,7 +328,7 @@ function InstallGate({
     let cancelled = false;
     const tick = async () => {
       try {
-        const response = await fetch("/api/transcripts", { headers: headers() });
+        const response = await fetch("/api/sessions", { headers: headers() });
         if (cancelled) {
           return;
         }
@@ -419,7 +419,7 @@ function OrganizationGate({ onSubmit }: { onSubmit: (name: string) => Promise<Or
       <form className="panel" onSubmit={submit}>
         <h1>Name your team to open Cadri.</h1>
         <p className="hint">
-          Name the team this account belongs to. Transcripts are shared with that team. Someone
+          Name the team this account belongs to. Sessions are shared with that team. Someone
           joins this team only when they accept an email invite. Signing up without an invite starts
           a separate team. The team includes a 30-day trial. After that, Cadri is billed monthly
           for each active member.

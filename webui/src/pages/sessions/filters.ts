@@ -1,4 +1,4 @@
-import type { TranscriptRow } from "./types";
+import type { SessionRow } from "./types";
 
 export type RangeKey = "all" | "1d" | "3d" | "7d" | "30d" | "custom";
 export type Chip = "all" | "memories" | "no-memories" | "writes";
@@ -121,7 +121,7 @@ export function inWindow(iso: string, window: { start: number | null; end: numbe
 }
 
 /** Every filter except time, so the chart can show the whole span around the window. */
-export function matchesFacets(row: TranscriptRow, filters: Filters): boolean {
+export function matchesFacets(row: SessionRow, filters: Filters): boolean {
   if (filters.harness && (row.harness ?? "") !== filters.harness) {
     return false;
   }
@@ -143,12 +143,12 @@ export function matchesFacets(row: TranscriptRow, filters: Filters): boolean {
   }
 }
 
-export function applyFilters(rows: TranscriptRow[], filters: Filters, now: number): TranscriptRow[] {
+export function applyFilters(rows: SessionRow[], filters: Filters, now: number): SessionRow[] {
   const window = timeWindow(filters, now);
   return rows.filter((row) => matchesFacets(row, filters) && inWindow(row.started_at, window));
 }
 
-export function distinct(rows: TranscriptRow[], pick: (row: TranscriptRow) => string | undefined): string[] {
+export function distinct(rows: SessionRow[], pick: (row: SessionRow) => string | undefined): string[] {
   const seen = new Set<string>();
   for (const row of rows) {
     const value = pick(row);

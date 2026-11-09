@@ -1,7 +1,7 @@
 [project]
 name = "cadri"
 version = "0.1.0"
-description = "Cadri agent bootstrap: discover harness sessions, backfill transcripts, install harness plugins"
+description = "Cadri agent bootstrap: discover harness sessions, backfill sessions, install harness plugins"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = []

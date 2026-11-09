@@ -1,4 +1,4 @@
-//! Cadri engine library: auth, transcripts DB, and git-backed memory.
+//! Cadri engine library: auth, sessions DB, and git-backed memory.
 
 pub mod auth;
 pub mod db;

@@ -4,10 +4,10 @@ import { Page } from "../../page";
 import { useSession } from "../../session";
 import { ChatThread } from "./ChatThread";
 import { HarnessLogo } from "./HarnessLogo";
-import { TranscriptSidebar } from "./TranscriptSidebar";
-import { shortId, type TranscriptDetail as Detail } from "./types";
+import { SessionSidebar } from "./SessionSidebar";
+import { shortId, type SessionDetail as Detail } from "./types";
 
-export default function TranscriptDetail() {
+export default function SessionDetail() {
   const session = useSession();
   const { sessionId = "" } = useParams();
   const [detail, setDetail] = useState<Detail | null>(null);
@@ -17,7 +17,7 @@ export default function TranscriptDetail() {
   const load = useCallback(async () => {
     const id = ++request.current;
     try {
-      const response = await fetch(`/api/transcripts/${encodeURIComponent(sessionId)}`, { headers: session.headers() });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { headers: session.headers() });
       if (id !== request.current) {
         return;
       }
@@ -44,7 +44,7 @@ export default function TranscriptDetail() {
       if (id !== request.current) {
         return;
       }
-      setStatus(error instanceof Error ? `Could not load the transcript: ${error.message}` : "Could not load the transcript.");
+      setStatus(error instanceof Error ? `Could not load the session: ${error.message}` : "Could not load the session.");
     }
   }, [session, sessionId]);
 
@@ -58,21 +58,21 @@ export default function TranscriptDetail() {
 
   return (
     <Page
-      title="Transcript"
+      title="Session"
       beside={
         detail ? (
-          <span className="transcript-title-id">
+          <span className="session-title-id">
             <HarnessLogo harness={detail.harness} size={18} />
             <code title={detail.session_id}>{shortId(detail.session_id)}</code>
           </span>
         ) : null
       }
       actions={
-        <Link className="btn ghost btn-back" to="/transcripts">
+        <Link className="btn ghost btn-back" to="/sessions">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M19 12H5M11 18l-6-6 6-6" />
           </svg>
-          All transcripts
+          All sessions
         </Link>
       }
     >
@@ -82,11 +82,11 @@ export default function TranscriptDetail() {
         </p>
       ) : null}
       {detail ? (
-        <div className="transcript-detail">
-          <section className="transcript-chat" aria-label="Conversation">
+        <div className="session-detail">
+          <section className="session-chat" aria-label="Conversation">
             <ChatThread messages={detail.messages} />
           </section>
-          <TranscriptSidebar detail={detail} userLabel={userLabel} />
+          <SessionSidebar detail={detail} userLabel={userLabel} />
         </div>
       ) : null}
     </Page>

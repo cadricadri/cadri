@@ -17,7 +17,7 @@ description: Install Cadri on this machine by following cadri.io/docs/installati
    - Every agent it lists should show where its hooks went. Report any that say "not installed" and why.
    - If Codex is listed, tell the user to open Codex, type `/hooks`, and trust the Cadri hooks.
    - If memory was skipped because git is missing, ask the user to run `xcode-select --install`, then run `cadri memory clone` and `cadri memory clone --scope user`.
-4. Tell the user their sessions are showing up on the Transcripts page in Cadri.
+4. Tell the user their sessions are showing up on the Sessions page in Cadri.
 5. Load the `cadri-memory-seed` skill and follow it.
 
 To remove Cadri's hooks and skills later: `cadri uninstall`.

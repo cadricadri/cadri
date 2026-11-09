@@ -60,7 +60,7 @@ pub(super) fn inspect(
             }
             // Robot commits use the caller's credentials. Kind=robot means an
             // agent wrote the note (e.g. followed a memory skill); the id is the
-            // agent's own label and is not looked up in transcripts.
+            // agent's own label and is not looked up in sessions.
             Parsed::Human { .. } | Parsed::Robot { .. } => {}
             Parsed::Dream { .. } => {
                 return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid author"));

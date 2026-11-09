@@ -33,7 +33,7 @@ function Select({
   );
 }
 
-export function TranscriptFilters({
+export function SessionFilters({
   filters,
   harnesses,
   models,
@@ -49,7 +49,7 @@ export function TranscriptFilters({
   onChange: (changes: Partial<Filters>) => void;
 }) {
   return (
-    <div className="transcript-filters">
+    <div className="session-filters">
       <div className="filter-grid">
         <Select
           label="Harness"

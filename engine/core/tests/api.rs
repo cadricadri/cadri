@@ -92,10 +92,10 @@ fn post_json(path: &str, body: &Value, headers: &[(&str, &str)]) -> Request<Body
     builder.body(Body::from(body.to_string())).unwrap()
 }
 
-fn post_transcript(session_id: &str, content: &str, headers: &[(&str, &str)]) -> Request<Body> {
+fn post_session(session_id: &str, content: &str, headers: &[(&str, &str)]) -> Request<Body> {
     let mut builder = Request::builder()
         .method(Method::POST)
-        .uri("/api/transcripts")
+        .uri("/api/sessions")
         .header(header::CONTENT_TYPE, "application/json");
     for (name, value) in headers {
         builder = builder.header(*name, *value);
@@ -188,12 +188,14 @@ async fn no_auth_uses_the_default_org() {
         json!({ "user_id": "default", "email": null, "org_id": "default", "org_name": null })
     );
 
-    let (status, _, stored) = send(&app, post_transcript("s1", "hello", &[])).await;
+    let (status, _, stored) = send(&app, post_session("s1", "hello", &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stored["session_id"], "s1");
     assert_eq!(stored["bytes"], 5);
-    let (_, _, listed) = send(&app, get_request("/api/transcripts", &[])).await;
+    let (_, _, listed) = send(&app, get_request("/api/sessions", &[])).await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
+    let (_, _, aliased) = send(&app, get_request("/api/transcripts", &[])).await;
+    assert_eq!(aliased, listed);
 }
 
 #[tokio::test]
@@ -205,9 +207,9 @@ async fn token_auth_rejects_missing_and_wrong_tokens() {
         vec![("authorization", "Basic secret")],
     ] {
         for request in [
-            get_request("/api/transcripts", &headers),
+            get_request("/api/sessions", &headers),
             get_request("/api/me", &headers),
-            post_transcript("s1", "x", &headers),
+            post_session("s1", "x", &headers),
         ] {
             let (status, _, body) = send(&app, request).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -216,9 +218,9 @@ async fn token_auth_rejects_missing_and_wrong_tokens() {
     }
 
     let auth = [("authorization", "Bearer secret")];
-    let (status, _, _) = send(&app, post_transcript("s1", "x", &auth)).await;
+    let (status, _, _) = send(&app, post_session("s1", "x", &auth)).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, listed) = send(&app, get_request("/api/transcripts", &auth)).await;
+    let (status, _, listed) = send(&app, get_request("/api/sessions", &auth)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(listed[0]["session_id"], "s1");
     let (_, _, me) = send(&app, get_request("/api/me", &auth)).await;
@@ -226,16 +228,16 @@ async fn token_auth_rejects_missing_and_wrong_tokens() {
 }
 
 #[tokio::test]
-async fn orgs_cannot_see_each_others_transcripts() {
+async fn orgs_cannot_see_each_others_sessions() {
     let app = app(Arc::new(OrgHeaderAuth));
     let a = [("x-test-org", "org-a")];
     let b = [("x-test-org", "org-b")];
-    send(&app, post_transcript("shared", "from a", &a)).await;
-    send(&app, post_transcript("only-a", "a2", &a)).await;
-    send(&app, post_transcript("shared", "from b", &b)).await;
+    send(&app, post_session("shared", "from a", &a)).await;
+    send(&app, post_session("only-a", "a2", &a)).await;
+    send(&app, post_session("shared", "from b", &b)).await;
 
-    let (_, _, listed_a) = send(&app, get_request("/api/transcripts", &a)).await;
-    let (_, _, listed_b) = send(&app, get_request("/api/transcripts", &b)).await;
+    let (_, _, listed_a) = send(&app, get_request("/api/sessions", &a)).await;
+    let (_, _, listed_b) = send(&app, get_request("/api/sessions", &b)).await;
     let ids = |listed: &Value| -> Vec<String> {
         let mut ids: Vec<String> = listed
             .as_array()
@@ -276,13 +278,13 @@ async fn errors_are_json() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body["error"].is_string());
 
-    let (status, _, body) = send(&app, post_transcript("", "x", &[])).await;
+    let (status, _, body) = send(&app, post_session("", "x", &[])).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body, json!({ "error": "session_id is required" }));
 
     let request = Request::builder()
         .method(Method::POST)
-        .uri("/api/transcripts")
+        .uri("/api/sessions")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from("{not json"))
         .unwrap();
@@ -294,9 +296,9 @@ async fn errors_are_json() {
 #[tokio::test]
 async fn bodies_over_32_mib_are_rejected() {
     let app = app(Arc::new(NoAuth));
-    let (status, _, _) = send(&app, post_transcript("big", &"x".repeat(31 << 20), &[])).await;
+    let (status, _, _) = send(&app, post_session("big", &"x".repeat(31 << 20), &[])).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, body) = send(&app, post_transcript("big", &"x".repeat(33 << 20), &[])).await;
+    let (status, _, body) = send(&app, post_session("big", &"x".repeat(33 << 20), &[])).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert!(body["error"].is_string());
 }
@@ -753,9 +755,9 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
         "\n",
         r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Write"},{"type":"text","text":"Saved it."}]},"timestamp":"2026-10-07T18:01:00.000Z"}"#,
     );
-    let (status, _, _) = send(&app, post_transcript("sess-1", claude, &ada)).await;
+    let (status, _, _) = send(&app, post_session("sess-1", claude, &ada)).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, _) = send(&app, post_transcript("sess-2", "plain", &ada)).await;
+    let (status, _, _) = send(&app, post_session("sess-2", "plain", &ada)).await;
     assert_eq!(status, StatusCode::OK);
 
     let write =
@@ -792,7 +794,7 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(bad["error"], "invalid session id");
 
-    let (_, _, list) = send(&app, get_request("/api/transcripts", &ada)).await;
+    let (_, _, list) = send(&app, get_request("/api/sessions", &ada)).await;
     let row = |id: &str| {
         list.as_array()
             .unwrap()
@@ -811,7 +813,7 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
     assert!(linked.get("content").is_none());
     assert_eq!(row("sess-2")["memory_commits"], json!([]));
 
-    let (status, _, detail) = send(&app, get_request("/api/transcripts/sess-1", &ada)).await;
+    let (status, _, detail) = send(&app, get_request("/api/sessions/sess-1", &ada)).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
     assert_eq!(
         detail["messages"],
@@ -827,11 +829,11 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
     assert_eq!(detail["tool_call_count"], 1);
     assert_eq!(detail["memory_commits"].as_array().unwrap().len(), 2);
     assert!(detail.get("content").is_none());
-    let (status, _, _) = send(&app, get_request("/api/transcripts/nope", &ada)).await;
+    let (status, _, _) = send(&app, get_request("/api/sessions/nope", &ada)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = send(
         &app,
-        get_request("/api/transcripts/sess-1", &[("x-test-org", "org-b")]),
+        get_request("/api/sessions/sess-1", &[("x-test-org", "org-b")]),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1168,7 +1170,7 @@ async fn no_cors_headers_are_sent() {
     let app = app(Arc::new(NoAuth));
     let (_, headers, _) = send(
         &app,
-        get_request("/api/transcripts", &[("origin", "https://evil.example")]),
+        get_request("/api/sessions", &[("origin", "https://evil.example")]),
     )
     .await;
     assert!(headers.get("access-control-allow-origin").is_none());

@@ -24,7 +24,7 @@ const glyphs: Record<string, ReactNode> = {
       <path d="M12.15 10.2 12.6 11.5 13.9 11.95 12.6 12.4 12.15 13.7 11.7 12.4 10.4 11.95 11.7 11.5 12.15 10.2Z" />
     </Glyph>
   ),
-  transcripts: (
+  sessions: (
     <Glyph>
       <path d="M4 2.2h5.4L12.8 5.5V13.8H4z" />
       <path d="M9.2 2.3V5.6h3.4" />

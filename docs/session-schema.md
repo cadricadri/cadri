@@ -1,15 +1,15 @@
-# Cadri transcript + memory commit schema (v1)
+# Cadri session + memory commit schema (v1)
 
 Locked for agent-side initialization. Client never sends `user_id` / `org_id`.
 
-## Transcripts
+## Sessions
 
 Two layers:
 
 - **A (trajectory):** full session blob (native JSONL or trajectory-v1) for memory gen / drill-in.
 - **B (conversation):** user-visible turns for list UI.
 
-### Client POST (`POST /api/transcripts`)
+### Client POST (`POST /api/sessions`)
 
 | Field | Required | Notes |
 |---|---|---|
@@ -34,10 +34,10 @@ Two layers:
 
 ### List vs detail
 
-- **`GET /api/transcripts` (list)** returns Layer B + metadata: `preview`, `transcript_text`, `conversation`, harness/model fields, `bytes`, timestamps. **Omits** Layer A `content` / trajectory.
-- **`POST /api/transcripts`** response still includes stored Layer A `content` so the uploader can confirm what was saved.
+- **`GET /api/sessions` (list)** returns Layer B + metadata: `preview`, `transcript_text`, `conversation`, harness/model fields, `bytes`, timestamps. **Omits** Layer A `content` / trajectory.
+- **`POST /api/sessions`** response still includes stored Layer A `content` so the uploader can confirm what was saved.
 - The server parses Layer A on every upload (`engine/core/src/transcript/`) and stores a summary: `prompt`, `started_at`, `ended_at`, `user_turns`, `assistant_turns`, `tool_call_count`, `tool_counts`, `has_writes`. List rows carry it plus `event_count` and `memory_commits` (commits whose `Cadri-Session-Id` names the session).
-- **`GET /api/transcripts/{session_id}`** returns the row with `messages` (`[{role: user|assistant, text, notes?, at?}]`, tool calls hidden; `notes` is assistant text written before a tool call in the same turn, `text` the reply after the last one), `tool_calls` (`[{name, at?}]`) and `memory_commits`. It does not return raw `content`.
+- **`GET /api/sessions/{session_id}`** returns the row with `messages` (`[{role: user|assistant, text, notes?, at?}]`, tool calls hidden; `notes` is assistant text written before a tool call in the same turn, `text` the reply after the last one), `tool_calls` (`[{name, at?}]`) and `memory_commits`. It does not return raw `content`.
 
 ### Visibility
 

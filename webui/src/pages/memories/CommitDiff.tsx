@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import { Page } from "../../page";
 import { useSession } from "../../session";
-import { shortId, transcriptLink } from "../transcripts/types";
+import { sessionLink, shortId } from "../sessions/types";
 import { AuthorMark } from "./AuthorMark";
 import { diffLines, diffStats, type DiffLine } from "./diff";
 import type { CommitDetail, FileChange } from "./types";
@@ -84,7 +84,7 @@ export default function CommitDiff() {
             {detail.session_id ? (
               <p className="commit-source">
                 Created in session{" "}
-                <Link className="text-link" to={transcriptLink(detail.session_id)}>
+                <Link className="text-link" to={sessionLink(detail.session_id)}>
                   <code>{shortId(detail.session_id)}</code>
                 </Link>
               </p>

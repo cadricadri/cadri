@@ -15,7 +15,7 @@ def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
     for path in root.rglob("*.jsonl"):
         if not path.is_file():
             continue
-        # Skip side files that are not session transcripts when possible.
+        # Skip side files that are not sessions when possible.
         name = path.name
         if name.startswith("."):
             continue

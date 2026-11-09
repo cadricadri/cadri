@@ -449,7 +449,7 @@ h1 {
   word-break: break-word;
 }
 
-.transcripts-empty {
+.sessions-empty {
   display: grid;
   gap: 16px;
   justify-items: center;
@@ -457,7 +457,7 @@ h1 {
   text-align: center;
 }
 
-.transcripts-empty-art {
+.sessions-empty-art {
   width: min(640px, 100%);
   height: auto;
   border: 2px solid var(--line);
@@ -1911,7 +1911,7 @@ a.author-mark:hover span {
   }
 }
 
-/* Transcripts: activity chart */
+/* Sessions: activity chart */
 
 .activity-chart {
   margin-bottom: 16px;
@@ -2001,9 +2001,9 @@ a.author-mark:hover span {
   border-radius: 2px;
 }
 
-/* Transcripts: filters */
+/* Sessions: filters */
 
-.transcript-filters {
+.session-filters {
   display: grid;
   gap: 10px;
   margin-bottom: 12px;
@@ -2083,31 +2083,31 @@ a.author-mark:hover span {
   padding: 6px 12px;
 }
 
-/* Transcripts: table */
+/* Sessions: table */
 
-.transcript-table {
+.session-table {
   min-width: 980px;
 }
 
-.transcript-table th {
+.session-table th {
   color: var(--mute);
   font-size: 12px;
   white-space: nowrap;
 }
 
-.transcript-table td {
+.session-table td {
   vertical-align: middle;
 }
 
-.transcript-row {
+.session-row {
   cursor: pointer;
 }
 
-.transcript-row:hover td {
+.session-row:hover td {
   background: color-mix(in srgb, var(--cyan) 12%, var(--paper));
 }
 
-.transcript-id a {
+.session-id a {
   color: var(--ink);
   font-family: var(--mono);
   font-size: 12.5px;
@@ -2142,39 +2142,32 @@ a.author-mark:hover span {
   white-space: nowrap;
 }
 
-.transcript-prompt {
-  max-width: 30rem;
+.session-prompt {
+  max-width: 42rem;
 }
 
-.transcript-model {
+.session-model {
   display: block;
   color: var(--mute);
   font-size: 12px;
 }
 
-.transcript-prompt-text {
+.session-prompt-text {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
   font-weight: 500;
   word-break: break-word;
 }
 
-.transcript-folder {
-  display: block;
-  color: var(--mute);
-  font-family: var(--mono);
-  font-size: 11.5px;
-}
-
-.transcript-time {
+.session-time {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-.transcript-none {
+.session-none {
   color: var(--mute);
 }
 
@@ -2252,7 +2245,7 @@ a.author-mark:hover span {
 
 /* Transcript detail */
 
-.transcript-title-id {
+.session-title-id {
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -2264,14 +2257,14 @@ a.author-mark:hover span {
   font-size: 13px;
 }
 
-.transcript-detail {
+.session-detail {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
   align-items: start;
   gap: 16px;
 }
 
-.transcript-chat {
+.session-chat {
   min-width: 0;
   padding: 18px;
   border: 1px solid var(--line);
@@ -2378,7 +2371,7 @@ a.author-mark:hover span {
   min-width: 0;
 }
 
-.transcript-side {
+.session-side {
   display: grid;
   gap: 12px;
   position: sticky;
@@ -2714,11 +2707,11 @@ a.author-mark:hover span {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .transcript-detail {
+  .session-detail {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .transcript-side {
+  .session-side {
     position: static;
   }
 

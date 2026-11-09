@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { AuthorMark } from "../memories/AuthorMark";
 import { HarnessLogo, harnessInfo } from "./HarnessLogo";
-import { commitLink, formatDuration, formatTime, type TranscriptDetail } from "./types";
+import { commitLink, formatDuration, formatTime, type SessionDetail } from "./types";
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -34,10 +34,10 @@ function CopyId({ id }: { id: string }) {
   );
 }
 
-export function TranscriptSidebar({ detail, userLabel }: { detail: TranscriptDetail; userLabel: string | null }) {
+export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; userLabel: string | null }) {
   const tools = Object.entries(detail.tool_counts).sort(([, left], [, right]) => right - left);
   return (
-    <aside className="transcript-side" aria-label="Transcript details">
+    <aside className="session-side" aria-label="Session details">
       <section className="side-card">
         <h2>Overview</h2>
         <dl className="side-facts">

@@ -3,7 +3,7 @@
 // includes API time; that is cadri_http_request_duration_seconds on the engine.
 // Labels are route patterns. Memories is "/".
 
-const PAGES = new Set(["/", "/transcripts", "/usage", "/team", "/billing"]);
+const PAGES = new Set(["/", "/sessions", "/usage", "/team", "/billing"]);
 
 let installed = false;
 let documentReported = false;
@@ -64,6 +64,12 @@ function wrapHistory(name: "pushState" | "replaceState"): void {
 }
 
 function pagePattern(pathname: string): string {
+  if (pathname === "/sessions" || pathname.startsWith("/sessions/")) {
+    return "/sessions";
+  }
+  if (pathname === "/transcripts" || pathname.startsWith("/transcripts/")) {
+    return "/sessions";
+  }
   return PAGES.has(pathname) ? pathname : "other";
 }
 

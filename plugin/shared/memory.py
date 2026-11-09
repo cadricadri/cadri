@@ -287,7 +287,7 @@ def default_agent_id() -> str:
 
 
 def current_session_id() -> str | None:
-    """The agent session doing the write, so the commit links back to its transcript."""
+    """The agent session doing the write, so the commit links back to its session."""
     return os.environ.get("CADRI_SESSION_ID", "").strip() or None
 
 

@@ -1,13 +1,13 @@
 import { Link } from "react-router";
 import { HumanMark, RobotMark } from "../../icons";
-import { transcriptLink } from "../transcripts/types";
+import { sessionLink } from "../sessions/types";
 import type { MemoryAuthor } from "./types";
 
 export function shortRobotId(id: string): string {
   return id.slice(0, 8);
 }
 
-/** The author's mark. With `sessionId`, it links to the transcript that wrote the commit. */
+/** The author's mark. With `sessionId`, it links to the session that wrote the commit. */
 export function AuthorMark({ author, sessionId }: { author: MemoryAuthor; sessionId?: string }) {
   const robot = author.kind === "robot";
   const name = robot ? shortRobotId(author.id) : author.label;
@@ -20,7 +20,7 @@ export function AuthorMark({ author, sessionId }: { author: MemoryAuthor; sessio
   );
   if (sessionId) {
     return (
-      <Link className="author-mark" to={transcriptLink(sessionId)} title={`${title} · open the session that wrote this`}>
+      <Link className="author-mark" to={sessionLink(sessionId)} title={`${title} · open the session that wrote this`}>
         {body}
       </Link>
     );

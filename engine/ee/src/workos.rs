@@ -540,7 +540,7 @@ impl WorkOs {
     /// Gives the signed-in user one organization and a session token that carries it.
     ///
     /// AuthKit can register a user who was not invited. That access token has no `org_id`, and
-    /// Cadri stores every transcript under the organization on the token. This creates the
+    /// Cadri stores every session under the organization on the token. This creates the
     /// organization they name and adds them as its admin. An email invitation joins an existing
     /// organization during signup, so the invitee never reaches here. A token that already names
     /// an organization is not given a second one. Someone with several memberships is rejected:

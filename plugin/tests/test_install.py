@@ -74,7 +74,7 @@ class ClaudeInstallTests(InstallTestCase):
         install.uninstall_all(self.home)
         self.assertEqual(self.read(".claude/settings.json"), {"model": "opus", "hooks": {"Stop": [user_hook]}})
 
-    def test_installed_command_uploads_the_transcript(self):
+    def test_installed_command_uploads_the_session(self):
         install.install_harness("claude_code", self.home)
         command = self.read(".claude/settings.json")["hooks"]["Stop"][0]["hooks"][0]["command"]
         event = {"session_id": "s1", "transcript_path": str(self.transcript), "hook_event_name": "Stop"}
@@ -147,7 +147,7 @@ class CursorInstallTests(InstallTestCase):
         install.uninstall_all(self.home)
         self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
 
-    def test_stop_hook_finds_the_transcript_by_conversation_id(self):
+    def test_stop_hook_finds_the_session_by_conversation_id(self):
         install.install_harness("cursor", self.home)
         command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
         folder = self.home / ".cursor/projects/Users-me-app/agent-transcripts/c1"
@@ -169,7 +169,7 @@ class CursorInstallTests(InstallTestCase):
         self.assertEqual(upload["body"]["cwd"], "/Users/me/app")
         self.assertEqual(upload["body"]["model"], "claude-opus")
 
-    def test_session_start_without_transcript_uploads_nothing(self):
+    def test_session_start_without_a_file_uploads_nothing(self):
         install.install_harness("cursor", self.home)
         command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
         result = self.run_hook(command, {"conversation_id": "c2", "hook_event_name": "stop"})

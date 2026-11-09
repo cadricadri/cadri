@@ -4,7 +4,7 @@ See [cadri.io](https://www.cadri.io/)
 
 **Turn AI agent sessions into team knowledge.**
 
-Engineering teams now do a lot of their work alongside AI agents, and almost none of what those sessions teach ever gets written down. The fix for a flaky test, the setup step that has to happen first, the way a certain kind of ticket gets resolved: it all lives in a transcript nobody reads again, while the runbook, the PR description, and the design doc never get written.
+Engineering teams now do a lot of their work alongside AI agents, and almost none of what those sessions teach ever gets written down. The fix for a flaky test, the setup step that has to happen first, the way a certain kind of ticket gets resolved: it all lives in a session nobody reads again, while the runbook, the PR description, and the design doc never get written.
 
 Cadri captures what agents and developers learn while working, distills it into small reusable knowledge units, and makes it searchable by both people and future agents. Every unit links back to the sessions it came from, so you can always see why Cadri believes something.
 
@@ -38,7 +38,7 @@ cadri/
 
 From the repository root. Each command starts the engine and the web UI, then prints the address to open.
 
-**On this machine.** Requires [Rust](https://rustup.rs) and Node.js. There is no login, and transcripts are stored in `engine/data/`, which git ignores. The first run compiles the engine, which can take a few minutes. Ctrl-C stops both processes.
+**On this machine.** Requires [Rust](https://rustup.rs) and Node.js. There is no login, and sessions are stored in `engine/data/`, which git ignores. The first run compiles the engine, which can take a few minutes. Ctrl-C stops both processes.
 
 ```sh
 ./scripts/run
@@ -71,7 +71,7 @@ git config core.hooksPath .githooks
 
 Cadri runs in two ways from the same codebase:
 
-- **Self-hosted.** `./scripts/run-with-docker` runs the engine and the web UI on one machine. Transcripts stay in a SQLite file on that machine.
+- **Self-hosted.** `./scripts/run-with-docker` runs the engine and the web UI on one machine. Sessions stay in a SQLite file on that machine.
 - **Hosted.** A managed multi-tenant service for teams who prefer not to run it themselves. Tenant isolation is built into the data model from the start (`org_id` on every row).
 
 

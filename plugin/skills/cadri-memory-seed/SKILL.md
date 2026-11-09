@@ -36,7 +36,7 @@ Choose up to 15 sessions where a human and an agent did real work. Prefer the ne
 
 Split the sessions into batches of about five. If you can run subagents, give each batch to one subagent (run at most three at a time) and have it return candidate lessons, not file edits. Otherwise read them yourself, one batch at a time.
 
-Read a session with `cadri show <thread_id>`. Transcripts can be large: look at the human's messages first (search for `"role":"user"` or `"type":"user"`), then read around the corrections.
+Read a session with `cadri show <thread_id>`. Sessions can be large: look at the human's messages first (search for `"role":"user"` or `"type":"user"`), then read around the corrections.
 
 For each session, look for these, in priority order:
 
@@ -86,7 +86,7 @@ cadri memory write preferences/code-review.md --scope user --file /tmp/cadri-mem
   --session 2f1c… -m "Add code review preferences" -m "Sources: claude_code:2f1c…, cursor:7a9e…"
 ```
 
-`--session` takes the bare id of the session the memory mostly came from; the Transcripts page lists the commit under that session's "Memories generated". Leave out `--scope user` for the team book. Update `README.md` the same way once the topic files are written.
+`--session` takes the bare id of the session the memory mostly came from; the Sessions page lists the commit under that session's "Memories generated". Leave out `--scope user` for the team book. Update `README.md` the same way once the topic files are written.
 
 Exit status 3 means someone changed the same file since your clone: run `cadri memory sync`, re-read the file, merge your change, and write again.
 

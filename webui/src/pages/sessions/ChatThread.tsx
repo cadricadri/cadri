@@ -4,7 +4,7 @@ import { formatTime, type ChatMessage } from "./types";
 
 export function ChatThread({ messages }: { messages: ChatMessage[] }) {
   if (messages.length === 0) {
-    return <p className="memory-empty">This transcript has no messages Cadri could read.</p>;
+    return <p className="memory-empty">This session has no messages Cadri could read.</p>;
   }
   return (
     <ol className="chat-thread">

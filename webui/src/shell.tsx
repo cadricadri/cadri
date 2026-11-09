@@ -1,12 +1,12 @@
 import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Link, NavLink, Navigate, Route, Routes, useLocation } from "react-router";
+import { Link, NavLink, Navigate, Route, Routes, useLocation, useParams } from "react-router";
 import { NavGlyph } from "./icons";
 import { Page } from "./page";
 import { useSession } from "./session";
 
 const Memories = lazy(() => import("./pages/Memories"));
-const Transcripts = lazy(() => import("./pages/transcripts/TranscriptList"));
-const TranscriptDetail = lazy(() => import("./pages/transcripts/TranscriptDetail"));
+const Sessions = lazy(() => import("./pages/sessions/SessionList"));
+const SessionDetail = lazy(() => import("./pages/sessions/SessionDetail"));
 const CommitDiff = lazy(() => import("./pages/memories/CommitDiff"));
 const Usage = lazy(() => import("./pages/Usage"));
 const Team = lazy(() => import("./pages/Team"));
@@ -36,8 +36,10 @@ export function App() {
         <Routes>
           <Route path="/" element={<Memories />} />
           <Route path="/memories/commits/:id" element={<CommitDiff />} />
-          <Route path="/transcripts" element={<Transcripts />} />
-          <Route path="/transcripts/:sessionId" element={<TranscriptDetail />} />
+          <Route path="/sessions" element={<Sessions />} />
+          <Route path="/sessions/:sessionId" element={<SessionDetail />} />
+          <Route path="/transcripts" element={<Navigate to="/sessions" replace />} />
+          <Route path="/transcripts/:sessionId" element={<TranscriptRedirect />} />
           <Route path="/usage" element={<Usage />} />
           <Route
             path="/team"
@@ -60,6 +62,11 @@ export function App() {
       </Suspense>
     </Shell>
   );
+}
+
+function TranscriptRedirect() {
+  const { sessionId = "" } = useParams();
+  return <Navigate to={`/sessions/${encodeURIComponent(sessionId)}`} replace />;
 }
 
 function WorkosRoute({ children }: { children: ReactNode }) {
@@ -170,9 +177,9 @@ function Shell({ children }: { children: ReactNode }) {
             <NavGlyph name="memories" />
             Memories
           </NavLink>
-          <NavLink to="/transcripts" className={linkClass} data-tone="cyan">
-            <NavGlyph name="transcripts" />
-            Transcripts
+          <NavLink to="/sessions" className={linkClass} data-tone="cyan">
+            <NavGlyph name="sessions" />
+            Sessions
           </NavLink>
           <NavLink to="/usage" className={linkClass} data-tone="sun">
             <NavGlyph name="usage" />

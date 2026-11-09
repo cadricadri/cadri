@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::auth::{Authenticator, Identity};
-use crate::db::{self, IncomingTranscript, Transcript};
+use crate::db::{self, IncomingSession, SessionRecord};
 use crate::memory::{
     self, BlameEntry, Change, CommitDetail, EditRequest, GitHttp, MemoryCommit, MemoryService,
     MemoryStore,
@@ -56,11 +56,11 @@ pub fn assemble(
     let state = AppState { db, auth, memories };
     let protected = Router::new()
         .route("/api/me", get(me))
-        .route(
-            "/api/transcripts",
-            get(list_transcripts).post(post_transcript),
-        )
-        .route("/api/transcripts/{session_id}", get(get_transcript))
+        .route("/api/sessions", get(list_sessions).post(post_session))
+        .route("/api/sessions/{session_id}", get(get_session))
+        // Plugins released before the sessions rename still call these paths.
+        .route("/api/transcripts", get(list_sessions).post(post_session))
+        .route("/api/transcripts/{session_id}", get(get_session))
         .route("/api/memories", get(get_memories))
         .route("/api/memories/tree", get(get_memory_tree))
         .route("/api/memories/blob/{sha}", get(get_memory_blob))
@@ -259,11 +259,11 @@ async fn me(Extension(identity): Extension<Identity>) -> Json<Identity> {
     Json(identity)
 }
 
-async fn post_transcript(
+async fn post_session(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
-    body: Result<Json<IncomingTranscript>, JsonRejection>,
-) -> Result<Json<Transcript>, ApiError> {
+    body: Result<Json<IncomingSession>, JsonRejection>,
+) -> Result<Json<SessionRecord>, ApiError> {
     let Json(incoming) = body?;
     if incoming.thread_id().is_none() {
         return Err(ApiError::new(
@@ -274,7 +274,7 @@ async fn post_transcript(
     if !incoming.has_body() {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
-            "transcript body is required",
+            "session body is required",
         ));
     }
     let connection = lock_db(&state)?;
@@ -282,7 +282,7 @@ async fn post_transcript(
         db::upsert(&connection, &identity.org_id, &identity.user_id, &incoming).map_err(|err| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to store transcript: {err}"),
+                format!("failed to store session: {err}"),
             )
         })?;
     Ok(Json(stored))
@@ -627,7 +627,7 @@ fn git_response(content_type: &'static str, body: Vec<u8>) -> Response {
         .into_response()
 }
 
-/// A memory commit as listed on a transcript, with the book it lives in.
+/// A memory commit as listed on a session, with the book it lives in.
 #[derive(Serialize)]
 struct LinkedCommit {
     book: &'static str,
@@ -636,16 +636,16 @@ struct LinkedCommit {
 }
 
 #[derive(Serialize)]
-struct TranscriptRow {
+struct SessionRow {
     #[serde(flatten)]
-    transcript: Transcript,
+    session: SessionRecord,
     memory_commits: Vec<LinkedCommit>,
 }
 
 #[derive(Serialize)]
-struct TranscriptDetail {
+struct SessionDetail {
     #[serde(flatten)]
-    transcript: Transcript,
+    session: SessionRecord,
     messages: Vec<transcript::Message>,
     tool_calls: Vec<transcript::ToolCall>,
     memory_commits: Vec<LinkedCommit>,
@@ -692,56 +692,54 @@ async fn commits_by_session(
     by_session
 }
 
-async fn list_transcripts(
+async fn list_sessions(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
-) -> Result<Json<Vec<TranscriptRow>>, ApiError> {
-    let transcripts = {
+) -> Result<Json<Vec<SessionRow>>, ApiError> {
+    let sessions = {
         let connection = lock_db(&state)?;
         db::list(&connection, &identity.org_id).map_err(|err| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to list transcripts: {err}"),
+                format!("failed to list sessions: {err}"),
             )
         })?
     };
     let mut by_session = commits_by_session(&state, &identity).await;
-    let rows = transcripts
+    let rows = sessions
         .into_iter()
-        .map(|transcript| TranscriptRow {
-            memory_commits: by_session
-                .remove(&transcript.session_id)
-                .unwrap_or_default(),
-            transcript,
+        .map(|session| SessionRow {
+            memory_commits: by_session.remove(&session.session_id).unwrap_or_default(),
+            session,
         })
         .collect();
     Ok(Json(rows))
 }
 
-async fn get_transcript(
+async fn get_session(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
     UrlPath(session_id): UrlPath<String>,
-) -> Result<Json<TranscriptDetail>, ApiError> {
+) -> Result<Json<SessionDetail>, ApiError> {
     let found = {
         let connection = lock_db(&state)?;
         db::get(&connection, &identity.org_id, &session_id).map_err(|err| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read transcript: {err}"),
+                format!("failed to read session: {err}"),
             )
         })?
     };
-    let mut transcript =
-        found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "transcript not found"))?;
-    let content = transcript.content.take().unwrap_or_default();
-    let parsed = transcript::parse(&content, transcript.conversation.as_ref());
+    let mut session =
+        found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "session not found"))?;
+    let content = session.content.take().unwrap_or_default();
+    let parsed = transcript::parse(&content, session.conversation.as_ref());
     let memory_commits = commits_by_session(&state, &identity)
         .await
         .remove(&session_id)
         .unwrap_or_default();
-    Ok(Json(TranscriptDetail {
-        transcript,
+    Ok(Json(SessionDetail {
+        session,
         messages: parsed.messages,
         tool_calls: parsed.tool_calls,
         memory_commits,

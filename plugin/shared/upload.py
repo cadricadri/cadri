@@ -1,4 +1,4 @@
-"""POST transcripts to a Cadri server."""
+"""POST sessions to a Cadri server."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ REFRESH_TIMEOUT_SECONDS = 5
 UPLOAD_TIMEOUT_SECONDS = 30
 
 
-def post_transcript(base: str, payload: dict[str, Any], timeout: float = UPLOAD_TIMEOUT_SECONDS) -> tuple[int, dict]:
-    url = f"{base.rstrip('/')}/api/transcripts"
+def post_session(base: str, payload: dict[str, Any], timeout: float = UPLOAD_TIMEOUT_SECONDS) -> tuple[int, dict]:
+    url = f"{base.rstrip('/')}/api/sessions"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     headers.update(cadri_auth.auth_headers(base, REFRESH_TIMEOUT_SECONDS))
     request = urllib.request.Request(

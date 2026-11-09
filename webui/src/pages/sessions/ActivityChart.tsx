@@ -1,9 +1,9 @@
 import { useState, type KeyboardEvent } from "react";
 import { addDays, dayKey, dayStart, RANGE_LABELS, timeWindow, type Filters, type RangeKey } from "./filters";
 import { harnessInfo } from "./HarnessLogo";
-import type { MemoryBook, TranscriptRow } from "./types";
+import type { MemoryBook, SessionRow } from "./types";
 
-type Mode = "transcripts" | "memories";
+type Mode = "sessions" | "memories";
 
 type Series = { key: string; label: string; color: string };
 
@@ -69,12 +69,12 @@ function dayKeys(window: { start: number | null; end: number }, times: number[])
 
 function buildChart(
   mode: Mode,
-  rows: TranscriptRow[],
+  rows: SessionRow[],
   commits: Array<{ at: string; book: MemoryBook }>,
   window: { start: number | null; end: number },
 ) {
   const items =
-    mode === "transcripts"
+    mode === "sessions"
       ? rows.map((row) => ({ at: row.started_at, series: row.harness ?? "" }))
       : commits.map((commit) => ({ at: commit.at, series: commit.book }));
   // Both modes share one span so toggling keeps the same days on the axis.
@@ -84,7 +84,7 @@ function buildChart(
   const days = bucket(items, dayKeys(window, times));
   const seriesKeys = [...new Set(items.map((item) => item.series))].sort();
   const series: Series[] =
-    mode === "transcripts"
+    mode === "sessions"
       ? seriesKeys.map((key) => {
           const info = harnessInfo(key || undefined);
           return { key, label: info.label, color: info.color };
@@ -168,7 +168,7 @@ export function ActivityChart({
   onChange,
   onPickDay,
 }: {
-  rows: TranscriptRow[];
+  rows: SessionRow[];
   commits: Array<{ at: string; book: MemoryBook }>;
   filters: Filters;
   now: number;
@@ -176,7 +176,7 @@ export function ActivityChart({
   onPickDay: (key: string) => void;
 }) {
   const window = timeWindow(filters, now);
-  const [mode, setMode] = useState<Mode>("transcripts");
+  const [mode, setMode] = useState<Mode>("sessions");
   const chart = buildChart(mode, rows, commits, window);
 
   const plotWidth = WIDTH - LEFT - RIGHT;
@@ -184,8 +184,8 @@ export function ActivityChart({
   const slot = plotWidth / Math.max(1, chart.days.length);
   const barWidth = Math.max(1, Math.min(28, slot * 0.62));
   const labelEvery = Math.max(1, Math.ceil(chart.days.length / 8));
-  const noun = mode === "transcripts" ? "transcript" : "memory";
-  const plural = mode === "transcripts" ? "transcripts" : "memories";
+  const noun = mode === "sessions" ? "session" : "memory";
+  const plural = mode === "sessions" ? "sessions" : "memories";
 
   function describe(day: Day): string {
     const label = dayLabel.format(new Date(dayStart(day.key)));
@@ -209,14 +209,14 @@ export function ActivityChart({
         <div>
           <h2>Activity</h2>
           <p className="activity-sub">
-            {mode === "transcripts"
+            {mode === "sessions"
               ? `${chart.total} ${chart.total === 1 ? noun : plural} per day, by agent harness`
               : `${chart.total} memory ${chart.total === 1 ? "commit" : "commits"} per day, team and personal books`}
           </p>
         </div>
         <div className="memory-switch" role="group" aria-label="Chart">
-          <button type="button" aria-pressed={mode === "transcripts"} onClick={() => setMode("transcripts")}>
-            Transcripts
+          <button type="button" aria-pressed={mode === "sessions"} onClick={() => setMode("sessions")}>
+            Sessions
           </button>
           <button type="button" aria-pressed={mode === "memories"} onClick={() => setMode("memories")}>
             Memories

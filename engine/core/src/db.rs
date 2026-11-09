@@ -12,7 +12,7 @@ use crate::transcript;
 /// Bump when the on-disk shape changes. Version 1 upgrades in place (see `upgrade_from_v1`);
 /// any other version is dropped and recreated. Versions 2 and 3 were used by schemas from
 /// before the reset to 1, so they still exist on disk and must not mean "current".
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Columns derived from `content` by `transcript::parse`, rewritten on every upload.
 const SUMMARY_COLUMNS: &[(&str, &str)] = &[
@@ -26,8 +26,8 @@ const SUMMARY_COLUMNS: &[(&str, &str)] = &[
     ("has_writes", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
-const CREATE_TRANSCRIPTS: &str = "
-CREATE TABLE transcripts (
+const CREATE_SESSIONS: &str = "
+CREATE TABLE sessions (
     org_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     cwd TEXT,
@@ -54,13 +54,13 @@ CREATE TABLE transcripts (
     has_writes INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (org_id, session_id)
 );
-CREATE INDEX transcripts_org_updated ON transcripts (org_id, updated_at DESC);
+CREATE INDEX sessions_org_updated ON sessions (org_id, updated_at DESC);
 ";
 
 const PREVIEW_CHARS: usize = 240;
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct IncomingTranscript {
+pub(crate) struct IncomingSession {
     /// Preferred client field; aliases `session_id`.
     #[serde(default)]
     pub thread_id: Option<String>,
@@ -83,7 +83,7 @@ pub(crate) struct IncomingTranscript {
     pub compaction_summary: Option<String>,
 }
 
-impl IncomingTranscript {
+impl IncomingSession {
     pub(crate) fn thread_id(&self) -> Option<&str> {
         self.thread_id
             .as_deref()
@@ -122,7 +122,7 @@ impl IncomingTranscript {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(crate) struct Transcript {
+pub(crate) struct SessionRecord {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
@@ -156,9 +156,9 @@ pub(crate) struct Transcript {
     /// First thing the person typed, from the parsed session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Session start from the transcript itself, else when the server first saw it.
+    /// Session start from the uploaded session itself, else when the server first saw it.
     pub started_at: String,
-    /// Session end from the transcript itself or the uploaded file time, else last upload.
+    /// Session end from the uploaded session itself or the uploaded file time, else last upload.
     pub ended_at: String,
     pub user_turns: u64,
     pub assistant_turns: u64,
@@ -210,7 +210,7 @@ fn write_summary(
     summary: &Summary,
 ) -> rusqlite::Result<()> {
     connection.execute(
-        "UPDATE transcripts SET
+        "UPDATE sessions SET
            prompt = ?3, started_at = ?4, ended_at = ?5, user_turns = ?6,
            assistant_turns = ?7, tool_calls = ?8, tool_counts = ?9, has_writes = ?10,
            model = COALESCE(model, ?11), cwd = COALESCE(cwd, ?12)
@@ -266,13 +266,16 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let transaction = connection.transaction()?;
     if version == 1 {
         upgrade_from_v1(&transaction)?;
+    } else if version == 4 {
+        rename_transcripts_table(&transaction)?;
     } else {
-        // Pre-production: no transcript data worth preserving — drop and recreate.
+        // Unknown or pre-reset schemas are dropped. Versions 2 and 3 must not be trusted.
         transaction.execute_batch(
             "DROP TABLE IF EXISTS transcripts;
+             DROP TABLE IF EXISTS sessions;
              DROP TABLE IF EXISTS memory_repos;",
         )?;
-        transaction.execute_batch(CREATE_TRANSCRIPTS)?;
+        transaction.execute_batch(CREATE_SESSIONS)?;
     }
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()
@@ -282,22 +285,44 @@ fn upgrade_from_v1(connection: &Connection) -> rusqlite::Result<()> {
     for (name, kind) in SUMMARY_COLUMNS {
         connection.execute_batch(&format!("ALTER TABLE transcripts ADD COLUMN {name} {kind}"))?;
     }
-    let mut statement =
-        connection.prepare("SELECT org_id, session_id, content, conversation FROM transcripts")?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                parse_conversation(row.get(3)?),
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let rows = {
+        let mut statement = connection
+            .prepare("SELECT org_id, session_id, content, conversation FROM transcripts")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    parse_conversation(row.get(3)?),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    rename_transcripts_table(connection)?;
     for (org_id, session_id, content, conversation) in rows {
         let summary = summarize(&content, conversation.as_ref());
         write_summary(connection, &org_id, &session_id, &summary)?;
     }
+    Ok(())
+}
+
+/// Version 4 stored the same rows in `transcripts`. Keep them under the sessions name.
+fn rename_transcripts_table(connection: &Connection) -> rusqlite::Result<()> {
+    let has_table: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transcripts'",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_table == 0 {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "ALTER TABLE transcripts RENAME TO sessions;
+         DROP INDEX IF EXISTS transcripts_org_updated;
+         CREATE INDEX IF NOT EXISTS sessions_org_updated ON sessions (org_id, updated_at DESC);",
+    )?;
     Ok(())
 }
 
@@ -325,7 +350,7 @@ fn preview(content: &str) -> String {
     out
 }
 
-fn preview_for(incoming: &IncomingTranscript, content: &str) -> String {
+fn preview_for(incoming: &IncomingSession, content: &str) -> String {
     if let Some(text) = incoming
         .transcript_text
         .as_ref()
@@ -344,7 +369,7 @@ fn parse_conversation(raw: Option<String>) -> Option<Value> {
     raw.and_then(|text| serde_json::from_str(&text).ok())
 }
 
-fn row_to_transcript(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Result<Transcript> {
+fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Result<SessionRecord> {
     let session_id: String = row.get(0)?;
     let content: String = row.get(3)?;
     let conversation = parse_conversation(row.get(11)?);
@@ -377,7 +402,7 @@ fn row_to_transcript(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Re
         .get::<_, Option<String>>(21)?
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
-    Ok(Transcript {
+    Ok(SessionRecord {
         thread_id: Some(session_id.clone()),
         session_id,
         cwd: row.get(1)?,
@@ -424,8 +449,8 @@ pub(crate) fn upsert(
     connection: &Connection,
     org_id: &str,
     user_id: &str,
-    incoming: &IncomingTranscript,
-) -> rusqlite::Result<Transcript> {
+    incoming: &IncomingSession,
+) -> rusqlite::Result<SessionRecord> {
     let thread_id = incoming
         .thread_id()
         .expect("caller validates thread_id")
@@ -434,25 +459,25 @@ pub(crate) fn upsert(
     let timestamp = now();
     let conversation = conversation_json(&incoming.conversation);
     connection.execute(
-        "INSERT INTO transcripts (
+        "INSERT INTO sessions (
             org_id, session_id, cwd, hook_event, content, created_at, updated_at,
             user_id, harness, harness_version, model, model_version, conversation,
             transcript_text, compaction_summary, client_timestamp
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(org_id, session_id) DO UPDATE SET
-           cwd = COALESCE(excluded.cwd, transcripts.cwd),
-           hook_event = COALESCE(excluded.hook_event, transcripts.hook_event),
+           cwd = COALESCE(excluded.cwd, sessions.cwd),
+           hook_event = COALESCE(excluded.hook_event, sessions.hook_event),
            content = excluded.content,
            updated_at = excluded.updated_at,
-           user_id = COALESCE(excluded.user_id, transcripts.user_id),
-           harness = COALESCE(excluded.harness, transcripts.harness),
-           harness_version = COALESCE(excluded.harness_version, transcripts.harness_version),
-           model = COALESCE(excluded.model, transcripts.model),
-           model_version = COALESCE(excluded.model_version, transcripts.model_version),
-           conversation = COALESCE(excluded.conversation, transcripts.conversation),
-           transcript_text = COALESCE(excluded.transcript_text, transcripts.transcript_text),
-           compaction_summary = COALESCE(excluded.compaction_summary, transcripts.compaction_summary),
-           client_timestamp = COALESCE(excluded.client_timestamp, transcripts.client_timestamp)",
+           user_id = COALESCE(excluded.user_id, sessions.user_id),
+           harness = COALESCE(excluded.harness, sessions.harness),
+           harness_version = COALESCE(excluded.harness_version, sessions.harness_version),
+           model = COALESCE(excluded.model, sessions.model),
+           model_version = COALESCE(excluded.model_version, sessions.model_version),
+           conversation = COALESCE(excluded.conversation, sessions.conversation),
+           transcript_text = COALESCE(excluded.transcript_text, sessions.transcript_text),
+           compaction_summary = COALESCE(excluded.compaction_summary, sessions.compaction_summary),
+           client_timestamp = COALESCE(excluded.client_timestamp, sessions.client_timestamp)",
         params![
             org_id,
             thread_id,
@@ -475,26 +500,26 @@ pub(crate) fn upsert(
     write_summary(connection, org_id, &thread_id, &summary)?;
 
     connection.query_row(
-        &format!("SELECT {SELECT_COLS} FROM transcripts WHERE org_id = ?1 AND session_id = ?2"),
+        &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
         params![org_id, thread_id],
         |row| {
-            let mut transcript = row_to_transcript(row, true)?;
-            let layer_a = transcript.content.as_deref().unwrap_or("");
-            transcript.preview = preview_for(incoming, layer_a);
-            Ok(transcript)
+            let mut session = row_to_session(row, true)?;
+            let layer_a = session.content.as_deref().unwrap_or("");
+            session.preview = preview_for(incoming, layer_a);
+            Ok(session)
         },
     )
 }
 
-pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Vec<Transcript>> {
+pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Vec<SessionRecord>> {
     let mut statement = connection.prepare(&format!(
         "SELECT {SELECT_COLS}
-         FROM transcripts
+         FROM sessions
          WHERE org_id = ?1
          ORDER BY updated_at DESC"
     ))?;
     // List is Layer B + metadata: omit the Layer A `content` / trajectory blob.
-    let rows = statement.query_map(params![org_id], |row| row_to_transcript(row, false))?;
+    let rows = statement.query_map(params![org_id], |row| row_to_session(row, false))?;
     let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     // A backfill uploads every session at once, so upload time says nothing about recency.
     rows.sort_by(|left, right| right.ended_at.cmp(&left.ended_at));
@@ -506,13 +531,13 @@ pub(crate) fn get(
     connection: &Connection,
     org_id: &str,
     session_id: &str,
-) -> rusqlite::Result<Option<Transcript>> {
+) -> rusqlite::Result<Option<SessionRecord>> {
     use rusqlite::OptionalExtension;
     connection
         .query_row(
-            &format!("SELECT {SELECT_COLS} FROM transcripts WHERE org_id = ?1 AND session_id = ?2"),
+            &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
             params![org_id, session_id],
-            |row| row_to_transcript(row, true),
+            |row| row_to_session(row, true),
         )
         .optional()
 }
@@ -521,8 +546,8 @@ pub(crate) fn get(
 mod tests {
     use super::*;
 
-    fn incoming(session_id: &str, content: &str) -> IncomingTranscript {
-        IncomingTranscript {
+    fn incoming(session_id: &str, content: &str) -> IncomingSession {
+        IncomingSession {
             thread_id: None,
             session_id: Some(session_id.to_string()),
             content: content.to_string(),
@@ -553,7 +578,7 @@ mod tests {
             &connection,
             "default",
             "user-1",
-            &IncomingTranscript {
+            &IncomingSession {
                 thread_id: Some("session-1".to_string()),
                 session_id: None,
                 content: "hello".to_string(),
@@ -576,7 +601,7 @@ mod tests {
             &connection,
             "default",
             "user-1",
-            &IncomingTranscript {
+            &IncomingSession {
                 thread_id: None,
                 session_id: Some("session-1".to_string()),
                 content: "hello\nfull transcript".to_string(),
@@ -620,7 +645,7 @@ mod tests {
             &connection,
             "default",
             "u",
-            &IncomingTranscript {
+            &IncomingSession {
                 thread_id: Some("t1".to_string()),
                 session_id: None,
                 content: String::new(),
@@ -663,7 +688,7 @@ mod tests {
             &connection,
             "default",
             "u",
-            &IncomingTranscript {
+            &IncomingSession {
                 thread_id: None,
                 session_id: Some("s1".to_string()),
                 content: "huge trajectory blob".to_string(),
@@ -791,6 +816,47 @@ mod tests {
         assert_eq!(listed[0].prompt.as_deref(), Some("install the vercel cli"));
         assert_eq!(listed[0].model.as_deref(), Some("claude-opus-4"));
         assert_eq!(listed[0].started_at, "2026-10-07T18:43:41.432Z");
+    }
+
+    #[test]
+    fn upgrade_from_v4_renames_the_table_and_keeps_rows() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE transcripts (
+                    org_id TEXT NOT NULL, session_id TEXT NOT NULL, cwd TEXT, hook_event TEXT,
+                    content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    user_id TEXT, harness TEXT, harness_version TEXT, model TEXT,
+                    model_version TEXT, conversation TEXT, transcript_text TEXT,
+                    compaction_summary TEXT, client_timestamp TEXT,
+                    prompt TEXT, started_at TEXT, ended_at TEXT,
+                    user_turns INTEGER NOT NULL DEFAULT 0,
+                    assistant_turns INTEGER NOT NULL DEFAULT 0,
+                    tool_calls INTEGER NOT NULL DEFAULT 0,
+                    tool_counts TEXT, has_writes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (org_id, session_id)
+                );
+                CREATE INDEX transcripts_org_updated ON transcripts (org_id, updated_at DESC);
+                PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO transcripts (
+                    org_id, session_id, content, created_at, updated_at, prompt, started_at, ended_at
+                 ) VALUES (
+                    'default', 'kept', 'hello', '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z',
+                    'hello', '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(user_version(&connection), SCHEMA_VERSION);
+        let listed = list(&connection, "default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "kept");
+        assert_eq!(listed[0].prompt.as_deref(), Some("hello"));
     }
 
     #[test]

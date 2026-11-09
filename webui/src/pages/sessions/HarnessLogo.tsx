@@ -90,7 +90,7 @@ export function HarnessLogo({ harness, size = 22 }: { harness: string | undefine
   );
 }
 
-/** The logo tile with the harness name under it, as in the transcript table. */
+/** The logo tile with the harness name under it, as in the session table. */
 export function HarnessBadge({ harness }: { harness: string | undefined }) {
   return (
     <span className="harness-badge">

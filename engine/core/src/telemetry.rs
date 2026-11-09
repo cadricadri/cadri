@@ -193,7 +193,8 @@ fn route_template(path: &str) -> &'static str {
         "/metrics" => "/metrics",
         "/api/auth/config" => "/api/auth/config",
         "/api/me" => "/api/me",
-        "/api/transcripts" => "/api/transcripts",
+        "/api/sessions" => "/api/sessions",
+        "/api/transcripts" => "/api/sessions",
         "/api/memories" => "/api/memories",
         "/api/memories/tree" => "/api/memories/tree",
         "/api/memories/tip" => "/api/memories/tip",
@@ -214,6 +215,7 @@ fn route_template(path: &str) -> &'static str {
         "/auth/device/start" => "/auth/device/start",
         "/auth/device/token" => "/auth/device/token",
         "/auth/refresh" => "/auth/refresh",
+        _ if is_session_route(path) => "/api/sessions/{session_id}",
         _ if path.starts_with("/api/memories/blob/") => "/api/memories/blob/{sha}",
         _ if is_git_route(path) => "/git/{book}/{path}",
         _ => auth_id_route(path).unwrap_or("unmatched"),
@@ -243,6 +245,15 @@ fn auth_id_route(path: &str) -> Option<&'static str> {
     None
 }
 
+fn is_session_route(path: &str) -> bool {
+    for prefix in ["/api/sessions/", "/api/transcripts/"] {
+        if let Some(id) = path.strip_prefix(prefix) {
+            return !id.is_empty() && !id.contains('/');
+        }
+    }
+    false
+}
+
 fn is_git_route(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/git/") else {
         return false;
@@ -258,7 +269,7 @@ fn is_git_route(path: &str) -> bool {
 fn page_label(page: &str) -> &'static str {
     match page {
         "/" => "/",
-        "/transcripts" => "/transcripts",
+        "/sessions" | "/transcripts" => "/sessions",
         "/usage" => "/usage",
         "/team" => "/team",
         "/billing" => "/billing",
@@ -272,6 +283,16 @@ mod tests {
 
     #[test]
     fn templates_keep_labels_low_cardinality() {
+        assert_eq!(route_template("/api/sessions"), "/api/sessions");
+        assert_eq!(route_template("/api/transcripts"), "/api/sessions");
+        assert_eq!(
+            route_template("/api/sessions/sess-1"),
+            "/api/sessions/{session_id}"
+        );
+        assert_eq!(
+            route_template("/api/transcripts/sess-1"),
+            "/api/sessions/{session_id}"
+        );
         assert_eq!(route_template("/api/memories"), "/api/memories");
         assert_eq!(route_template("/api/memories/log"), "/api/memories/log");
         assert_eq!(route_template("/api/memories/tree"), "/api/memories/tree");
@@ -299,6 +320,8 @@ mod tests {
             "/auth/memberships/{id}"
         );
         assert_eq!(page_label("/"), "/");
+        assert_eq!(page_label("/sessions"), "/sessions");
+        assert_eq!(page_label("/transcripts"), "/sessions");
         assert_eq!(page_label("user@example.com"), "other");
         assert_eq!(page_label("/team/org_abc"), "other");
         assert_eq!(status_class(StatusCode::OK), "2xx");

@@ -12,7 +12,7 @@ pub enum Author {
         user_id: String,
         label: String,
     },
-    /// Agent that wrote via a memory skill (not a transcript lookup).
+    /// Agent that wrote via a memory skill (not a session lookup).
     Robot {
         id: String,
     },
@@ -123,7 +123,7 @@ pub(crate) struct EditRequest {
     /// The tip the caller last saw. Paths changed since then must not be touched.
     pub base: Option<String>,
     pub agent: Option<String>,
-    /// Recorded as the `Cadri-Session-Id` trailer so the commit links to its transcript.
+    /// Recorded as the `Cadri-Session-Id` trailer so the commit links to its session.
     pub session_id: Option<String>,
 }
 
@@ -262,7 +262,7 @@ impl MemoryStore {
                             "",
                             "Robot edits link back to the session that wrote them.",
                             "",
-                            "Open the author mark to see that session in Transcripts.",
+                            "Open the author mark to see that session.",
                             "",
                             "Human edits stay attached to the person's WorkOS identity.",
                         ],

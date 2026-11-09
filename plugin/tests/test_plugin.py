@@ -100,7 +100,7 @@ class PluginTestCase(unittest.TestCase):
         self.credentials.chmod(0o600)
 
     def uploads(self) -> list[dict]:
-        return self.server.requests_to("/api/transcripts")
+        return self.server.requests_to("/api/sessions")
 
     def mode(self) -> int:
         return stat.S_IMODE(self.credentials.stat().st_mode)
@@ -166,14 +166,14 @@ class CaptureTests(PluginTestCase):
         self.assertEqual(saved[self.server.url]["access_token"], "old")
 
     def test_rejected_upload_exits_zero(self):
-        self.server.respond("/api/transcripts", (401, {"error": "unauthorized"}))
+        self.server.respond("/api/sessions", (401, {"error": "unauthorized"}))
         result = self.capture()
         self.assertEqual(result.returncode, 0)
         self.assertIn("401", result.stderr)
 
     def test_no_organization_hints_at_the_team_form(self):
         self.write_credentials({"access_token": "a", "refresh_token": "r", "expires_at": time.time() + 3600})
-        self.server.respond("/api/transcripts", (403, {"error": "no_organization"}))
+        self.server.respond("/api/sessions", (403, {"error": "no_organization"}))
         result = self.capture()
         self.assertEqual(result.returncode, 0)
         self.assertIn("create your team", result.stderr)

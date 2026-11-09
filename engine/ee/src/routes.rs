@@ -446,12 +446,12 @@ mod tests {
 
     #[test]
     fn return_to_must_be_a_same_origin_path() {
-        for ok in ["/", "/transcripts", "/a/b?c=d#e", "/%2F%2Fevil.com"] {
+        for ok in ["/", "/sessions", "/a/b?c=d#e", "/%2F%2Fevil.com"] {
             assert!(is_safe_return_to(ok), "{ok}");
         }
         for bad in [
             "",
-            "transcripts",
+            "sessions",
             "//evil.com",
             "/\\evil.com",
             "https://evil.com",

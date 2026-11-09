@@ -5,27 +5,26 @@ import { useSession } from "../../session";
 import { loadMemoryLog } from "../memories/books";
 import { ActivityChart } from "./ActivityChart";
 import { applyFilters, distinct, matchesFacets, readFilters, withFilters, type Filters } from "./filters";
-import { TranscriptFilters } from "./FilterBar";
+import { SessionFilters } from "./FilterBar";
 import { HarnessBadge } from "./HarnessLogo";
 import {
   commitLink,
-  folderName,
   formatTime,
+  sessionLink,
   shortId,
-  transcriptLink,
   type LinkedCommit,
   type MemoryBook,
-  type TranscriptRow,
+  type SessionRow,
 } from "./types";
 
-export default function TranscriptList() {
+export default function SessionList() {
   const session = useSession();
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const legacySession = params.get("session");
   const [status, setStatus] = useState("Loading…");
   const [phase, setPhase] = useState<"loading" | "done">("loading");
-  const [rows, setRows] = useState<TranscriptRow[]>([]);
+  const [rows, setRows] = useState<SessionRow[]>([]);
   const [commits, setCommits] = useState<Array<{ at: string; book: MemoryBook }>>([]);
   const request = useRef(0);
   const seeding = rows.length === 0 && phase === "done" && status.startsWith("Seeding");
@@ -37,7 +36,7 @@ export default function TranscriptList() {
     setPhase("loading");
     setNow(Date.now());
     try {
-      const response = await fetch("/api/transcripts", { headers: session.headers() });
+      const response = await fetch("/api/sessions", { headers: session.headers() });
       if (id !== request.current) {
         return;
       }
@@ -54,16 +53,16 @@ export default function TranscriptList() {
       if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
       }
-      const transcripts = (await response.json()) as TranscriptRow[];
-      setRows(transcripts);
-      setStatus(transcripts.length === 0 ? "Seeding sessions from your agents…" : "");
+      const sessions = (await response.json()) as SessionRow[];
+      setRows(sessions);
+      setStatus(sessions.length === 0 ? "Seeding sessions from your agents…" : "");
       setPhase("done");
     } catch (error) {
       if (id !== request.current) {
         return;
       }
       setRows([]);
-      setStatus(error instanceof Error ? `Could not load transcripts: ${error.message}` : "Could not load transcripts.");
+      setStatus(error instanceof Error ? `Could not load sessions: ${error.message}` : "Could not load sessions.");
       setPhase("done");
     }
   }, [session]);
@@ -107,23 +106,23 @@ export default function TranscriptList() {
     change({ range: "custom", from: key, to: key });
   }
 
-  function openRow(event: MouseEvent<HTMLTableRowElement>, row: TranscriptRow): void {
+  function openRow(event: MouseEvent<HTMLTableRowElement>, row: SessionRow): void {
     if ((event.target as HTMLElement).closest("a, button, summary, details")) {
       return;
     }
-    navigate(transcriptLink(row.session_id));
+    navigate(sessionLink(row.session_id));
   }
 
   if (legacySession) {
-    return <Navigate to={transcriptLink(legacySession)} replace />;
+    return <Navigate to={sessionLink(legacySession)} replace />;
   }
 
   const filtered = shown.length !== rows.length;
-  const count = `${shown.length} transcript${shown.length === 1 ? "" : "s"}${filtered ? ` of ${rows.length}` : ""}.`;
+  const count = `${shown.length} session${shown.length === 1 ? "" : "s"}${filtered ? ` of ${rows.length}` : ""}.`;
 
   return (
     <Page
-      title="Transcripts"
+      title="Sessions"
       actions={
         <button
           className="btn ghost"
@@ -142,9 +141,9 @@ export default function TranscriptList() {
           <p className="status" role="status">
             {status}
           </p>
-          <div className="transcripts-empty">
+          <div className="sessions-empty">
             <img
-              className="transcripts-empty-art"
+              className="sessions-empty-art"
               src="/images/pantheon-collab.png"
               width={768}
               height={512}
@@ -166,7 +165,7 @@ export default function TranscriptList() {
             onChange={change}
             onPickDay={pickDay}
           />
-          <TranscriptFilters
+          <SessionFilters
             filters={filters}
             harnesses={distinct(rows, (row) => row.harness)}
             models={distinct(rows, (row) => row.model)}
@@ -179,10 +178,10 @@ export default function TranscriptList() {
           </p>
           {rows.length > 0 ? (
             <div className="table-scroll">
-              <table className="transcript-table">
+              <table className="session-table">
                 <thead>
                   <tr>
-                    <th>Transcript ID</th>
+                    <th>Session ID</th>
                     <th>Agent Harness</th>
                     <th>Session Prompt</th>
                     <th title="User, assistant and tool events">Activity</th>
@@ -193,29 +192,24 @@ export default function TranscriptList() {
                 </thead>
                 <tbody>
                   {shown.map((row) => (
-                    <tr key={row.session_id} className="transcript-row" onClick={(event) => openRow(event, row)}>
-                      <td className="transcript-id">
-                        <Link to={transcriptLink(row.session_id)} title={row.session_id}>
+                    <tr key={row.session_id} className="session-row" onClick={(event) => openRow(event, row)}>
+                      <td className="session-id">
+                        <Link to={sessionLink(row.session_id)} title={row.session_id}>
                           {shortId(row.session_id)}
                         </Link>
                       </td>
                       <td>
                         <HarnessBadge harness={row.harness} />
                       </td>
-                      <td className="transcript-prompt">
-                        {row.model ? <span className="transcript-model">{row.model}</span> : null}
-                        <span className="transcript-prompt-text">{row.prompt || row.preview || "No prompt"}</span>
-                        {row.cwd ? (
-                          <span className="transcript-folder" title={row.cwd}>
-                            {folderName(row.cwd)}
-                          </span>
-                        ) : null}
+                      <td className="session-prompt">
+                        {row.model ? <span className="session-model">{row.model}</span> : null}
+                        <span className="session-prompt-text">{row.prompt || row.preview || "No prompt"}</span>
                       </td>
                       <td>
                         <ActivityBar row={row} />
                       </td>
-                      <td className="transcript-time">{formatTime(row.started_at)}</td>
-                      <td className="transcript-time">{formatTime(row.ended_at)}</td>
+                      <td className="session-time">{formatTime(row.started_at)}</td>
+                      <td className="session-time">{formatTime(row.ended_at)}</td>
                       <td>
                         <MemoryLinks commits={row.memory_commits} />
                       </td>
@@ -223,7 +217,7 @@ export default function TranscriptList() {
                   ))}
                 </tbody>
               </table>
-              {shown.length === 0 ? <p className="memory-empty">No transcripts match these filters.</p> : null}
+              {shown.length === 0 ? <p className="memory-empty">No sessions match these filters.</p> : null}
             </div>
           ) : null}
         </>
@@ -232,7 +226,7 @@ export default function TranscriptList() {
   );
 }
 
-function ActivityBar({ row }: { row: TranscriptRow }) {
+function ActivityBar({ row }: { row: SessionRow }) {
   const total = Math.max(1, row.event_count);
   const parts = [
     { key: "user", count: row.user_turns, label: "user" },
@@ -263,7 +257,7 @@ function memoryCount(count: number): string {
 
 function MemoryLinks({ commits }: { commits: LinkedCommit[] }) {
   if (commits.length === 0) {
-    return <span className="transcript-none">—</span>;
+    return <span className="session-none">—</span>;
   }
   if (commits.length === 1) {
     const [commit] = commits;
