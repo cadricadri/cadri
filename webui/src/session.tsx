@@ -18,13 +18,12 @@ import {
   type AuthMode,
 } from "./auth";
 import type { InviteResult, Me, OrgResult } from "./ee/workos";
+import { CopyButton, INSTALL_DOCS_URL, INSTALL_PROMPT } from "./install";
 import { clearMemoryCaches, primeMemoryBook, setMemoryIdentity } from "./pages/memories/books";
 
 type WorkosModule = typeof import("./ee/workos");
 
 const INSTALL_SKIP_KEY = "cadri.onboarding.install.skipped";
-const INSTALL_PROMPT =
-  "Follow the installation instructions at https://cadri.io/docs/installation";
 
 type Gate =
   | { kind: "loading" }
@@ -317,7 +316,6 @@ function InstallGate({
   onSkip: () => void;
   headers: () => Record<string, string>;
 }) {
-  const [copied, setCopied] = useState(false);
   const [status, setStatus] = useState("Waiting for your agent to connect…");
 
   useEffect(() => {
@@ -362,19 +360,8 @@ function InstallGate({
         </p>
         <pre className="install-prompt">{INSTALL_PROMPT}</pre>
         <div className="form-actions">
-          <button
-            className="btn"
-            type="button"
-            onClick={() => {
-              void navigator.clipboard.writeText(INSTALL_PROMPT).then(() => {
-                setCopied(true);
-                window.setTimeout(() => setCopied(false), 1500);
-              });
-            }}
-          >
-            {copied ? "Copied" : "Copy prompt"}
-          </button>
-          <a className="btn ghost" href="https://cadri.io/docs/installation" target="_blank" rel="noreferrer">
+          <CopyButton text={INSTALL_PROMPT} />
+          <a className="btn ghost" href={INSTALL_DOCS_URL} target="_blank" rel="noreferrer">
             Open docs
           </a>
           <button className="btn ghost" type="button" onClick={onSkip}>

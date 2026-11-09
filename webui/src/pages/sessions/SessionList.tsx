@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
+import { CopyButton, INSTALL_DOCS_URL, INSTALL_PROMPT } from "../../install";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { loadMemoryLog } from "../memories/books";
@@ -150,9 +151,18 @@ export default function SessionList() {
               alt="Pixel art of humans and robots building a temple together"
             />
             <p className="hint">
-              Waiting for <code>cadri init</code> to upload sessions. Paste the install prompt into your agent if you
-              have not already.
+              Waiting for <code>cadri init</code> to upload sessions. Paste this prompt into your agent if you have not
+              already.
             </p>
+            <div className="install-offer">
+              <pre className="install-prompt">{INSTALL_PROMPT}</pre>
+              <div className="form-actions">
+                <CopyButton text={INSTALL_PROMPT} />
+                <a className="btn ghost" href={INSTALL_DOCS_URL} target="_blank" rel="noreferrer">
+                  Open docs
+                </a>
+              </div>
+            </div>
           </div>
         </>
       ) : (

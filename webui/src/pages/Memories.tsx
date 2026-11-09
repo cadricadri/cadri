@@ -25,8 +25,14 @@ import { FileView, type FileTab } from "./memories/FileView";
 import type { LoadedFile, MemoryAuthor, MemoryFile, MemoryStore, MemoryTree } from "./memories/types";
 import { applyCreateFile, applyCreateFolder, applyMove, applyRenameFolder, planMove, type PathIssue } from "./memories/folders";
 import { applyUpload, prepareUploads } from "./memories/upload";
+import { EmptyBook, type EmptyPhase } from "./memories/EmptyBook";
+import type { SessionRow } from "./sessions/types";
 
 type MemoryScope = "team" | "user";
+
+/** A book stays in "memories are being populated" until the oldest relevant session is this old. */
+const SEEDING_WINDOW_MS = 60 * 60 * 1000;
+const EMPTY_BOOK_POLL_MS = 10_000;
 
 type Notice = {
   title: string;
@@ -44,6 +50,7 @@ export default function Memories() {
   const [editing, setEditing] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [draftDirectory, setDraftDirectory] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionRow[] | null>(null);
   const request = useRef(0);
   const blamedPaths = useRef(new Set<string>());
   const seenScope = useRef<MemoryScope>("team");
@@ -110,6 +117,66 @@ export default function Memories() {
     }
     void load();
   }, [load, scope]);
+
+  const awaitingFirstMemory = store !== null && store.tip === null;
+  useEffect(() => {
+    if (!awaitingFirstMemory) {
+      return;
+    }
+    let cancel = false;
+
+    const loadSessions = async () => {
+      try {
+        const response = await fetch("/api/sessions", { headers: session.headers() });
+        if (cancel) {
+          return;
+        }
+        if (response.status === 401) {
+          session.unauthorized();
+          return;
+        }
+        if (!response.ok) {
+          return;
+        }
+        const rows = (await response.json()) as SessionRow[];
+        if (!cancel && Array.isArray(rows)) {
+          setSessions(rows);
+        }
+      } catch {
+        /* The next poll retries. */
+      }
+    };
+
+    const watchBook = async () => {
+      try {
+        const response = await fetch(treeUrl(scope), {
+          headers: { ...session.headers(), "if-none-match": '"empty"' },
+        });
+        if (cancel || response.status === 304 || !response.ok) {
+          return;
+        }
+        const tree = (await response.json()) as MemoryTree;
+        if (cancel || !tree.tip) {
+          return;
+        }
+        const next = readStore(storeFromTree(tree, null));
+        rememberMemoryBook(scope, next);
+        setStore(next);
+      } catch {
+        /* The next poll retries. */
+      }
+    };
+
+    void loadSessions();
+    const id = window.setInterval(() => {
+      void loadSessions();
+      void watchBook();
+    }, EMPTY_BOOK_POLL_MS);
+    return () => {
+      cancel = true;
+      window.clearInterval(id);
+    };
+  }, [awaitingFirstMemory, scope, session]);
 
   const ensureBlame = useCallback(
     (path: string) => {
@@ -470,6 +537,7 @@ export default function Memories() {
     scope === "user"
       ? "Your memories are empty. Upload a file to start."
       : "This repo is empty. Upload a file to start.";
+  const phase = awaitingFirstMemory ? bookPhase(scope, sessions, session.me) : null;
 
   return (
     <Page
@@ -553,6 +621,8 @@ export default function Memories() {
                   onNeedBlame={() => ensureBlame(file.path)}
                   onSave={(content, message, nextPath) => void save(content, message, nextPath)}
                 />
+              ) : awaitingFirstMemory ? (
+                phase ? <EmptyBook scope={scope} phase={phase} /> : null
               ) : (
                 <p className="memory-empty">{emptyCopy}</p>
               )}
@@ -567,6 +637,26 @@ export default function Memories() {
 
 function commitsUrl(scope: MemoryScope): string {
   return scope === "user" ? "/api/memories/commits?view=tree&scope=user" : "/api/memories/commits?view=tree";
+}
+
+function treeUrl(scope: MemoryScope): string {
+  return scope === "user" ? "/api/memories/tree?scope=user" : "/api/memories/tree";
+}
+
+/** What an empty book should tell the reader, from how far session upload has gotten. */
+function bookPhase(scope: MemoryScope, sessions: SessionRow[] | null, me: Me | null): EmptyPhase | null {
+  if (!sessions) {
+    return null;
+  }
+  const relevant = scope === "user" && me ? sessions.filter((row) => row.user_id === me.user_id) : sessions;
+  if (relevant.length === 0) {
+    return "install";
+  }
+  const first = Math.min(...relevant.map((row) => Date.parse(row.created_at)));
+  if (!Number.isFinite(first) || Date.now() - first >= SEEDING_WINDOW_MS) {
+    return "empty";
+  }
+  return "seeding";
 }
 
 function withText(store: MemoryStore | null, path: string, blob: string, text: string): MemoryStore | null {

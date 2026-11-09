@@ -393,6 +393,7 @@ h1 {
   font-size: 13px;
   font-weight: 600;
   box-shadow: 2px 2px 0 var(--pink);
+  text-decoration: none;
 }
 
 .btn.ghost {
@@ -464,6 +465,11 @@ h1 {
   border-radius: 6px;
   box-shadow: 6px 6px 0 var(--line);
   image-rendering: pixelated;
+}
+
+.sessions-empty .install-offer {
+  width: min(560px, 100%);
+  text-align: left;
 }
 
 .upload-alert {
@@ -910,6 +916,14 @@ tr:last-child td {
 
 .memory-workspace > .memory-empty {
   flex: 1;
+}
+
+.memory-onboarding .install-prompt {
+  margin-top: 12px;
+}
+
+.memory-onboarding .form-actions {
+  margin: 4px 0 16px;
 }
 
 .memory-tree.dropping {
