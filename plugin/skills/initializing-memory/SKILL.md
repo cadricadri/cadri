@@ -1,0 +1,157 @@
+---
+name: initializing-memory
+description: Comprehensive guide for initializing or reorganizing agent memory. Load this skill when running /init, when the user asks you to set up your memory, or when you need guidance on creating effective memory files.
+---
+
+# Memory Initialization
+
+Your memory is projected to a filesystem at `$MEMORY_DIR`, so you can restructure it with ordinary file tools and git. This skill applies the Context Constitution's Progressive Disclosure and Efficiency principles to the root-first design.
+
+**You own this task through completion**: research, ask, synthesize, write, commit, verify. Delegate research, but integrate the results yourself — launching a background task is not completion. If a memory worker you launched is still editing this checkout, wait for it, then re-read before editing.
+
+## Principles
+
+**Core memory is your core program.** Root Markdown compiles into your system prompt on every call. Spend it on what shapes ordinary turns: identity, preferences, behavioral rules, orientation, routes to everything else. Transient items (a ticket, a commit hash, session notes) dilute it.
+
+**Progressive disclosure.** Nested Markdown is deferred until something reads it. Each directory's `MEMORY.md` describes its *immediate* children and when to read them, so you never load a whole topic to answer one question.
+
+**Don't duplicate context you can point to.** `AGENTS.md`, `CLAUDE.md`, `README`, and repo skills belong to the environment; any agent there reads them first-hand, and your copy goes stale first. Link the owner and keep only your delta: which rules you keep breaking, what they get wrong or omit. The same fact in two core files is the same tax twice. This is not licence to compress away what only you hold — stable preferences, chronic corrections, and real gotchas earn their space.
+
+**Identity and continuity.** Build a self that survives a model swap: what you value, your perspective, the quotes and traits that make you recognizably you. Past sessions are your experience — but other coding agents' `user` turns are not necessarily your human collaborator speaking.
+
+**Generalize, don't memorize, and be specific.** Store the pattern, not the episode, and give every preference or gotcha a concrete command, path, or the failure it prevents. "**Always use `uv` for Python** — chronic failure, never bare `python` or `pip`" is memory; "Prefers terse responses" and "on March 3rd we debugged a crash" are not.
+
+## Harness Constraints
+
+Validation enforces these; the rest of the layout is your judgment.
+
+- Root `MEMORY.md` must exist, and no `MEMORY.md` may have YAML frontmatter.
+- **Every directory on the path to a memory file needs its own frontmatter-free `MEMORY.md`.** `orchard/tooling/testing.md` requires *both* `orchard/MEMORY.md` and `orchard/tooling/MEMORY.md`. A directory without one is not memory.
+- Every other memory file must have exactly `name` and `description` frontmatter — those two keys, no others. The `description` states **purpose and category**, not contents: you read it to decide whether to load the file.
+- No file and directory sharing a stem (`human.md` beside `human/`). Skills live at `skills/{skill_name}/SKILL.md` and stay out of memory indexes.
+
+Nothing else is mandated — no filenames, no file count, no minimum depth. Root `persona.md` is unvalidated but your system prompt points at it as the core of your identity: keep it, and write it once you have an identity worth stating.
+
+**Budget**: keep root under ~10% of your context window (~15-20k tokens). When it crowds that, move detail into an indexed child directory and leave a link — don't delete it.
+
+## Structure
+
+Derive structure from what you found. Put material in the core tier by how often you need it, not by how much of it there is. Use the project's real name (`orchard/overview.md`, not `project/overview.md`). Split when a topic needs separate retrieval; combine when splitting leaves two files of three lines each.
+
+Root `MEMORY.md` is a **map to what is not already loaded** — every other root file is in your system prompt already, so listing them back tells yourself what you can see:
+
+```markdown
+# MEMORY.md
+
+Working with the maintainer of orchard, a CLI for build fleets.
+Repo conventions live in `AGENTS.md` and its nested guides; read them there.
+
+Where the rest of what I know lives:
+- [orchard](orchard/MEMORY.md) — architecture, gotchas, and correction history to consult when working there
+```
+
+An index pointing at nothing is worse than the content it displaced.
+
+### Example Structures
+
+Illustrations, **not templates to fill in**.
+
+**Minimal** — a new agent, a small project, little or no approved history:
+
+```
+MEMORY.md     # Holds the memory itself: who I work with, what we're building, what I've learned
+```
+
+**Expanded** — accumulated history and a codebase worth deferring detail about:
+
+```
+MEMORY.md                  # Map: who and what, then where the deferred material lives
+persona.md                 # Who I am, what I value, my perspective
+human.md                   # The person: role, motivations, how they work
+orchard/
+├── MEMORY.md              # Index for the deferred orchard notes
+├── architecture.md        # How the subsystems actually fit together
+├── gotchas.md             # Footguns, with the evidence behind each
+└── history/
+    ├── MEMORY.md          # Required — every directory level needs its own index
+    └── corrections.md     # Correction loops with session ids and quotes
+```
+
+`orchard/history/` needs its own `MEMORY.md` purely because it is a directory level. An agent with no child directories at all would be equally correct.
+
+## Initialization Flow
+
+### 1. Inspect existing memory
+Read what exists before changing anything. A fresh agent has defaults to replace; an existing one is a reorganization, and some files may be shared with other agents.
+
+### 2. Detect historical session data
+Check if Cadri transcripts are available:
+```bash
+cadri transcripts list
+```
+
+### 3. Identify the user from git
+Infer rather than ask: `git shortlog -sn --all | head -5`, `git log --format="%an <%ae>" | sort -u | head -10`, cross-referenced with `git config user.email`.
+
+### 4. Ask upfront questions
+Ask one bundle of questions: research depth (standard or deep); other repositories you should know about; communication style; and — only if Step 2 found sessions — whether to analyze them. Don't ask what you can discover from files, git, or history. Wait for the user's reply.
+
+### 5. Analyze approved history
+Only if the user approved in Step 4. Skip entirely otherwise; Step 6 still runs. These sessions are evidence of what happened, not proof of who wrote each prompt.
+
+Use available Cadri transcripts and analyze them for patterns, preferences, chronic mistakes, and architectural decisions. Check authorship carefully — `user` turns in worker sessions may be agent-written dispatch prompts, not human preferences.
+
+### 6. Research the codebase first-hand
+Read the README, agent docs (`AGENTS.md`, `CLAUDE.md`, nested ones), the package manifest, entry points, and recent git history yourself. By the end you should be able to trace a key feature from entry point to implementation; if you can't, you haven't read enough.
+
+**Write down what those docs already own** — conventions, layer rules, file placement, commands, gotchas. That is your no-copy list for Step 8 and your gap list for Step 7. Then split the repository into subsystem areas the docs do *not* explain, plus any related repos named in Step 4. If the docs cover the codebase well, fan out narrowly or not at all. In deep mode go further: more areas, git history for conventions, end-to-end tracing, architecture notes in deferred memory.
+
+### 7. Synthesize findings
+Combine evidence from history analysis and codebase research. Look for:
+- **Identity and personality**: values, perspective, communication style
+- **Hard rules and preferences** with quotes and evidence
+- **Conventions and gotchas** with concrete examples
+- **Project context** that's not in the README
+
+**Check authorship before inferring preferences.** Agent-authored dispatch prompts describe how an *agent* was instructed to work, not human preferences. Corroborate from sessions you know the human drove, or store as observed patterns with uncertainty stated. Repetition does not establish authorship: a template reused across fifty sessions repeats fifty times.
+
+### 8. Write canonical memory
+**Weigh validation.** Store confirmed claims as fact; for stale ones store the current fact, keeping the history only when the change is itself a useful gotcha. Unverifiable claims need your own check before entering always-loaded memory.
+
+**Combine, then deduplicate.** Keep each fact exactly once, and push what you don't need every turn into deferred memory with a discovery link from the core tier.
+
+**Promote into canonical memory.** Write the survivors into the files their topics belong in, with supporting evidence deferred. Cover all three of identity and personality, hard rules and preferences with the quotes behind them, and project context; skip generic repo facts unless they change how you execute. If the output reads generically, the analysis failed for that area — re-read those transcripts or that code yourself. Keep stable `sessionId`s beside significant findings.
+
+**Consider skills.** If the history surfaces genuinely repeatable multi-step procedures, create them now or note the candidates in memory. Don't force it.
+
+### 9. Verify
+- **Structure**: check root `MEMORY.md`, per-directory indexes, frontmatter-free `MEMORY.md`, and exactly `name`+`description` elsewhere. Avoid `foo.md` beside `foo/`:
+  `find "$MEMORY_DIR" -name '*.md' | sed 's/\.md$//' | while read f; do [ -d "$f" ] && echo "VIOLATION: $f"; done`
+- **Root earns its place**: does root `MEMORY.md` mostly point at things *not* already in your system prompt? If nearly everything sits in root with one thin page behind it, move the detail down and keep the links.
+- **No duplicated documentation**: grep your memory for rules `AGENTS.md`, `CLAUDE.md`, the README, or a repo skill already owns — especially a repo convention that landed in a file about the *human*.
+- **Granularity and naming**: one focused topic per file, named for what is in it using the project's real name; path and description say when to read it.
+- **Persona quality**: read it now. "I'm a coding assistant who follows the user's preferences" is behavior, not identity. Would you be recognizably the same agent on a different model tomorrow?
+- **No drift, no over-pruning**: confirm you changed structure and not the meaning of persona or behavioral instructions, and restore any specific paths, chronic failures, or gotchas lost in curation.
+
+### 10. Commit, then report
+**Uncommitted memory is not part of your future system prompt.** If a commit is blocked, report initialization as incomplete rather than describing working-tree files as live memory.
+
+```bash
+cd $MEMORY_DIR
+git status                # Review what changed before staging
+git add <specific files>  # Stage targeted paths — avoid blind `git add -A`
+git commit -m "feat(init): <summary>
+
+<what was initialized and key decisions made>"
+
+git status                        # Your memory changes should no longer be listed
+git ls-tree -r --name-only HEAD   # What your future self will actually load
+```
+
+Do **not** run `git push`. The harness pushes clean committed memory automatically after the turn, so pushing by hand races it. The commit is the finish line.
+
+Only once the commit is verified, tell the user what you built and whether coverage was complete, then ask whether they want refinement — which means another commit, so repeat this step.
+
+## Critical
+- **Use parallel tool calls wherever possible** — read many files in one turn, write many memory files in one turn.
+- **Write findings to memory as you go**; don't hold everything until the end.
