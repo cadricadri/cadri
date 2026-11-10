@@ -38,19 +38,41 @@ Nothing else is mandated — no filenames, no file count, no minimum depth. Root
 
 Derive structure from what you found. Put material in the core tier by how often you need it, not by how much of it there is. Use the project's real name (`orchard/overview.md`, not `project/overview.md`). Split when a topic needs separate retrieval; combine when splitting leaves two files of three lines each.
 
-Root `MEMORY.md` is a **map to what is not already loaded** — every other root file is in your system prompt already, so listing them back tells yourself what you can see:
+Root `MEMORY.md` is a **discovery guide** teaching agents how to find information, not an exhaustive listing:
 
 ```markdown
-# MEMORY.md
+# Team Memory
 
-Working with the maintainer of orchard, a CLI for build fleets.
-Repo conventions live in `AGENTS.md` and its nested guides; read them there.
+## How to Find Information
 
-Where the rest of what I know lives:
-- [orchard](orchard/MEMORY.md) — architecture, gotchas, and correction history to consult when working there
+**Start with grep when you have a keyword:**
+```bash
+grep -ri "concept" $MEMORY_DIR/team/
 ```
 
-An index pointing at nothing is worse than the content it displaced.
+**Component-specific knowledge:** When working on a service, check `components/[service-name]/`
+- `implementation.md` - How it works
+- `gotchas.md` - Known footguns and failure modes
+
+**Understanding past failures:** Check `incidents/[pattern-name]/` for analysis
+- Incidents are grouped by pattern (e.g., startup-death-spirals, database-deadlocks)
+- Each contains full analysis with what happened, root cause, and lesson
+
+**Operational knowledge:** Check `operations/`
+- `runbooks.md` - Common procedures
+- `alerts.md` - What alerts mean and how to respond
+
+**Architectural decisions:** Check `architecture/decisions.md` for rationale
+
+## Directory Guide
+
+- **components/** - Per-service/component knowledge, gotchas, implementation notes
+- **incidents/** - Grouped by failure pattern, full post-mortems with lessons
+- **operations/** - Runbooks, alert guides, debugging procedures
+- **architecture/** - Design decisions, technical rationale, tradeoffs
+```
+
+**Focus on discovery mechanisms** (grep, component paths) not exhaustive content listing. An index pointing at nothing is worse than the content it displaced.
 
 ### Example Structures
 
@@ -59,25 +81,41 @@ Illustrations, **not templates to fill in**.
 **Minimal** — a new agent, a small project, little or no approved history:
 
 ```
-MEMORY.md     # Holds the memory itself: who I work with, what we're building, what I've learned
+MEMORY.md     # Discovery guide + navigation
 ```
 
-**Expanded** — accumulated history and a codebase worth deferring detail about:
+**Team Memory (Expanded)** — accumulated knowledge organized by engineering concerns:
 
 ```
-MEMORY.md                  # Map: who and what, then where the deferred material lives
-persona.md                 # Who I am, what I value, my perspective
-human.md                   # The person: role, motivations, how they work
-orchard/
-├── MEMORY.md              # Index for the deferred orchard notes
-├── architecture.md        # How the subsystems actually fit together
-├── gotchas.md             # Footguns, with the evidence behind each
-└── history/
-    ├── MEMORY.md          # Required — every directory level needs its own index
-    └── corrections.md     # Correction loops with session ids and quotes
+team/
+├── MEMORY.md              # Discovery guide: how to find information (always loaded)
+├── components/
+│   ├── MEMORY.md          # Component index
+│   ├── api-gateway/
+│   │   ├── MEMORY.md      # Component-specific index
+│   │   ├── implementation.md  # How it works
+│   │   └── gotchas.md     # Known footguns
+│   └── auth-service/
+│       └── ...
+├── incidents/
+│   ├── MEMORY.md          # Incident index
+│   └── startup-death-spirals/
+│       ├── MEMORY.md
+│       └── 2026-05-api-gateway.md  # Full incident analysis
+├── operations/
+│   ├── MEMORY.md
+│   ├── runbooks.md        # Common procedures
+│   └── alerts.md          # Alert meanings and responses
+└── architecture/
+    ├── MEMORY.md
+    └── decisions.md       # Key technical decisions with rationale
 ```
 
-`orchard/history/` needs its own `MEMORY.md` purely because it is a directory level. An agent with no child directories at all would be equally correct.
+**Key differences from generic structure:**
+- **Semantic categories** (components, incidents, operations, architecture) not numbered sequences
+- **Component-based organization** enables discovery when working on specific services
+- **Incidents grouped by pattern** (startup-death-spirals, not individual incidents at top level)
+- **Root MEMORY.md focuses on discovery guidance** not exhaustive content listing
 
 ## Initialization Flow
 
