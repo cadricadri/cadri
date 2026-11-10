@@ -31,7 +31,6 @@ def list_sessions(home: Path, limit: int | None = None) -> list[SessionRef]:
                     thread_id=path.stem,
                     path=path,
                     updated_at=updated,
-                    cwd=str(project),
                 )
             )
     refs.sort(key=lambda item: item.updated_at, reverse=True)

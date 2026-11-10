@@ -21,7 +21,6 @@ Two layers:
 | `harness_version` | no | |
 | `model` | no | |
 | `model_version` | no | |
-| `cwd` | no | |
 | `hook_event` | no | `backfill`, `SessionEnd`, … |
 | `content` / `trajectory` | no* | Layer A blob. Prefer `trajectory`; `content` kept for back-compat (Claude JSONL). |
 | `compaction_summary` | no | Harness summary if compaction ran. |

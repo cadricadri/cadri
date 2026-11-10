@@ -50,13 +50,6 @@ export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; u
           </Fact>
           {detail.model ? <Fact label="Model">{detail.model}</Fact> : null}
           {userLabel ? <Fact label="User">{userLabel}</Fact> : null}
-          {detail.cwd ? (
-            <Fact label="Folder">
-              <code className="side-path" title={detail.cwd}>
-                {detail.cwd}
-              </code>
-            </Fact>
-          ) : null}
           <Fact label="Start">{formatTime(detail.started_at)}</Fact>
           <Fact label="End">{formatTime(detail.ended_at)}</Fact>
           <Fact label="Duration">{formatDuration(detail.started_at, detail.ended_at)}</Fact>

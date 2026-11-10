@@ -1,4 +1,4 @@
-import { CHIP_LABELS, type Chip, type Filters } from "./filters";
+import type { Filters } from "./filters";
 import { harnessInfo } from "./HarnessLogo";
 
 type Option = { value: string; label: string };
@@ -72,13 +72,6 @@ export function SessionFilters({
           options={users.map((value) => ({ value, label: userLabel(value) }))}
           onChange={(user) => onChange({ user })}
         />
-      </div>
-      <div className="memory-switch filter-chips" role="group" aria-label="Quick filters">
-        {(Object.keys(CHIP_LABELS) as Chip[]).map((chip) => (
-          <button key={chip} type="button" aria-pressed={filters.chip === chip} onClick={() => onChange({ chip })}>
-            {CHIP_LABELS[chip]}
-          </button>
-        ))}
       </div>
     </div>
   );

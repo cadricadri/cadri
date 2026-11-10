@@ -2093,10 +2093,6 @@ a.author-mark:hover span {
   font-size: 14px;
 }
 
-.filter-chips button {
-  padding: 6px 12px;
-}
-
 /* Sessions: table */
 
 .session-table {
@@ -2107,6 +2103,31 @@ a.author-mark:hover span {
   color: var(--mute);
   font-size: 12px;
   white-space: nowrap;
+}
+
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.sort-button:hover,
+.sort-button.active {
+  color: var(--ink);
+}
+
+.sort-arrow {
+  font-size: 11px;
+  line-height: 1;
 }
 
 .session-table td {
@@ -2188,7 +2209,7 @@ a.author-mark:hover span {
 .activity-cell {
   display: grid;
   gap: 4px;
-  min-width: 120px;
+  min-width: 11rem;
   font-size: 12px;
 }
 
@@ -2212,6 +2233,7 @@ a.author-mark:hover span {
 .activity-part {
   display: block;
   height: 100%;
+  min-width: 8px;
 }
 
 .activity-user {
@@ -2228,6 +2250,7 @@ a.author-mark:hover span {
 
 .activity-tail {
   color: var(--mute);
+  white-space: nowrap;
 }
 
 .memory-link,

@@ -6,7 +6,6 @@ export type LinkedCommit = MemoryCommit & { book: MemoryBook };
 
 export type SessionRow = {
   session_id: string;
-  cwd: string | null;
   hook_event: string | null;
   created_at: string;
   updated_at: string;

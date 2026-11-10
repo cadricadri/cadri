@@ -63,16 +63,12 @@ def cursor_transcript(conversation_id: str) -> str | None:
 def build_payload(harness: str, event: dict) -> dict | None:
     """The session row for this event, or None when there is nothing to upload yet."""
     hook_event = text(event, "hook_event_name")
-    cwd = text(event, "cwd")
     if harness == "cursor":
         thread_id = text(event, "conversation_id", "session_id")
         if thread_id is None:
             return None
         path = text(event, "transcript_path") or cursor_transcript(thread_id)
         content = read_file(path)
-        roots = event.get("workspace_roots")
-        if cwd is None and isinstance(roots, list) and roots and isinstance(roots[0], str):
-            cwd = roots[0]
     elif harness == "opencode":
         thread_id = text(event, "session_id")
         if thread_id is None:
@@ -92,7 +88,6 @@ def build_payload(harness: str, event: dict) -> dict | None:
     payload = {
         "thread_id": thread_id,
         "content": content,
-        "cwd": cwd,
         "hook_event": hook_event,
         "harness": harness,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -9,10 +9,11 @@ use serde_json::Value;
 
 use crate::transcript;
 
-/// Bump when the on-disk shape changes. Version 1 upgrades in place (see `upgrade_from_v1`);
-/// any other version is dropped and recreated. Versions 2 and 3 were used by schemas from
-/// before the reset to 1, so they still exist on disk and must not mean "current".
-pub const SCHEMA_VERSION: i64 = 5;
+/// Bump when the on-disk shape changes. Version 1 adds summary columns and renames
+/// `transcripts` to `sessions`. Version 4 renames that table. Version 5 is the sessions
+/// table with a `cwd` column; version 6 drops it. Versions 2 and 3 predate the reset
+/// to 1 and are dropped.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Columns derived from `content` by `transcript::parse`, rewritten on every upload.
 const SUMMARY_COLUMNS: &[(&str, &str)] = &[
@@ -30,7 +31,6 @@ const CREATE_SESSIONS: &str = "
 CREATE TABLE sessions (
     org_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
-    cwd TEXT,
     hook_event TEXT,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -71,7 +71,6 @@ pub(crate) struct IncomingSession {
     /// Layer A blob; if set and `content` is empty, stored as content.
     #[serde(default)]
     pub trajectory: Option<String>,
-    pub cwd: Option<String>,
     pub hook_event: Option<String>,
     pub timestamp: Option<String>,
     pub conversation: Option<Value>,
@@ -126,7 +125,6 @@ pub(crate) struct SessionRecord {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
-    pub cwd: Option<String>,
     pub hook_event: Option<String>,
     /// Layer A blob. Present on POST response; omitted from list.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,7 +177,6 @@ struct Summary {
     tool_counts: String,
     has_writes: bool,
     model: Option<String>,
-    cwd: Option<String>,
 }
 
 const PROMPT_CHARS: usize = 1000;
@@ -199,7 +196,6 @@ fn summarize(content: &str, conversation: Option<&Value>) -> Summary {
         tool_counts: serde_json::to_string(&parsed.tool_counts()).unwrap_or_else(|_| "{}".into()),
         has_writes: parsed.has_writes(),
         model: parsed.model.clone(),
-        cwd: parsed.cwd.clone(),
     }
 }
 
@@ -212,8 +208,8 @@ fn write_summary(
     connection.execute(
         "UPDATE sessions SET
            prompt = ?3, started_at = ?4, ended_at = ?5, user_turns = ?6,
-           assistant_turns = ?7, tool_calls = ?8, tool_counts = ?9, has_writes = ?10,
-           model = COALESCE(model, ?11), cwd = COALESCE(cwd, ?12)
+           assistant_turns = ?7, tool_calls = ?8, tool_counts = ?9,            has_writes = ?10,
+           model = COALESCE(model, ?11)
          WHERE org_id = ?1 AND session_id = ?2",
         params![
             org_id,
@@ -227,7 +223,6 @@ fn write_summary(
             summary.tool_counts,
             summary.has_writes,
             summary.model,
-            summary.cwd,
         ],
     )?;
     Ok(())
@@ -258,6 +253,20 @@ fn prepare(connection: &mut Connection) -> rusqlite::Result<()> {
     migrate(connection)
 }
 
+fn drop_cwd_column(connection: &Connection) -> rusqlite::Result<()> {
+    let names = {
+        let mut statement = connection.prepare("PRAGMA table_info(sessions)")?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        names
+    };
+    if names.iter().any(|name| name == "cwd") {
+        connection.execute_batch("ALTER TABLE sessions DROP COLUMN cwd")?;
+    }
+    Ok(())
+}
+
 pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version == SCHEMA_VERSION {
@@ -268,8 +277,9 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         upgrade_from_v1(&transaction)?;
     } else if version == 4 {
         rename_transcripts_table(&transaction)?;
-    } else {
+    } else if version != 5 {
         // Unknown or pre-reset schemas are dropped. Versions 2 and 3 must not be trusted.
+        // Version 5 is the sessions table and only loses its cwd column below.
         transaction.execute_batch(
             "DROP TABLE IF EXISTS transcripts;
              DROP TABLE IF EXISTS sessions;
@@ -277,6 +287,7 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         )?;
         transaction.execute_batch(CREATE_SESSIONS)?;
     }
+    drop_cwd_column(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()
 }
@@ -371,18 +382,18 @@ fn parse_conversation(raw: Option<String>) -> Option<Value> {
 
 fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Result<SessionRecord> {
     let session_id: String = row.get(0)?;
-    let content: String = row.get(3)?;
-    let conversation = parse_conversation(row.get(11)?);
-    let transcript_text: Option<String> = row.get(12)?;
+    let content: String = row.get(2)?;
+    let conversation = parse_conversation(row.get(10)?);
+    let transcript_text: Option<String> = row.get(11)?;
     let preview = match transcript_text.as_ref().filter(|value| !value.is_empty()) {
         Some(text) => preview(text),
         None => preview(&content),
     };
-    let created_at: String = row.get(4)?;
-    let updated_at: String = row.get(5)?;
-    let client_timestamp: Option<String> = row.get(14)?;
-    let parsed_start: Option<String> = row.get(16)?;
-    let parsed_end: Option<String> = row.get(17)?;
+    let created_at: String = row.get(3)?;
+    let updated_at: String = row.get(4)?;
+    let client_timestamp: Option<String> = row.get(13)?;
+    let parsed_start: Option<String> = row.get(15)?;
+    let parsed_end: Option<String> = row.get(16)?;
     let ended_at = [
         parsed_end,
         client_timestamp.as_deref().and_then(normalize_time),
@@ -395,33 +406,32 @@ fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Resul
         .unwrap_or_else(|| created_at.clone())
         .min(ended_at.clone());
     let count = |index: usize| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-    let user_turns = count(18)?;
-    let assistant_turns = count(19)?;
-    let tool_calls = count(20)?;
+    let user_turns = count(17)?;
+    let assistant_turns = count(18)?;
+    let tool_calls = count(19)?;
     let tool_counts = row
-        .get::<_, Option<String>>(21)?
+        .get::<_, Option<String>>(20)?
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
     Ok(SessionRecord {
         thread_id: Some(session_id.clone()),
         session_id,
-        cwd: row.get(1)?,
-        hook_event: row.get(2)?,
+        hook_event: row.get(1)?,
         bytes: content.len(),
         preview,
         content: if include_layer_a { Some(content) } else { None },
         created_at,
         updated_at,
-        user_id: row.get(6)?,
-        harness: row.get(7)?,
-        harness_version: row.get(8)?,
-        model: row.get(9)?,
-        model_version: row.get(10)?,
+        user_id: row.get(5)?,
+        harness: row.get(6)?,
+        harness_version: row.get(7)?,
+        model: row.get(8)?,
+        model_version: row.get(9)?,
         conversation,
         transcript_text,
-        compaction_summary: row.get(13)?,
+        compaction_summary: row.get(12)?,
         client_timestamp,
-        prompt: row.get(15)?,
+        prompt: row.get(14)?,
         started_at,
         ended_at,
         user_turns,
@@ -429,7 +439,7 @@ fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Resul
         tool_call_count: tool_calls,
         event_count: user_turns + assistant_turns + tool_calls,
         tool_counts,
-        has_writes: row.get(22)?,
+        has_writes: row.get(21)?,
     })
 }
 
@@ -440,7 +450,7 @@ fn normalize_time(text: &str) -> Option<String> {
     })
 }
 
-const SELECT_COLS: &str = "session_id, cwd, hook_event, content, created_at, updated_at,
+const SELECT_COLS: &str = "session_id, hook_event, content, created_at, updated_at,
          user_id, harness, harness_version, model, model_version, conversation,
          transcript_text, compaction_summary, client_timestamp, prompt, started_at, ended_at,
          user_turns, assistant_turns, tool_calls, tool_counts, has_writes";
@@ -460,12 +470,11 @@ pub(crate) fn upsert(
     let conversation = conversation_json(&incoming.conversation);
     connection.execute(
         "INSERT INTO sessions (
-            org_id, session_id, cwd, hook_event, content, created_at, updated_at,
+            org_id, session_id, hook_event, content, created_at, updated_at,
             user_id, harness, harness_version, model, model_version, conversation,
             transcript_text, compaction_summary, client_timestamp
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(org_id, session_id) DO UPDATE SET
-           cwd = COALESCE(excluded.cwd, sessions.cwd),
            hook_event = COALESCE(excluded.hook_event, sessions.hook_event),
            content = excluded.content,
            updated_at = excluded.updated_at,
@@ -481,7 +490,6 @@ pub(crate) fn upsert(
         params![
             org_id,
             thread_id,
-            incoming.cwd,
             incoming.hook_event,
             content,
             timestamp,
@@ -552,7 +560,6 @@ mod tests {
             session_id: Some(session_id.to_string()),
             content: content.to_string(),
             trajectory: None,
-            cwd: None,
             hook_event: None,
             timestamp: None,
             conversation: None,
@@ -563,6 +570,18 @@ mod tests {
             model_version: None,
             compaction_summary: None,
         }
+    }
+
+    fn has_column(connection: &Connection, table: &str, column: &str) -> bool {
+        let mut statement = connection
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
+        let names: Vec<String> = statement
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        names.iter().any(|name| name == column)
     }
 
     fn user_version(connection: &Connection) -> i64 {
@@ -583,7 +602,6 @@ mod tests {
                 session_id: None,
                 content: "hello".to_string(),
                 trajectory: None,
-                cwd: Some("/work".to_string()),
                 hook_event: Some("SessionStart".to_string()),
                 timestamp: None,
                 conversation: None,
@@ -606,7 +624,6 @@ mod tests {
                 session_id: Some("session-1".to_string()),
                 content: "hello\nfull transcript".to_string(),
                 trajectory: None,
-                cwd: None,
                 hook_event: Some("Stop".to_string()),
                 timestamp: None,
                 conversation: None,
@@ -623,7 +640,6 @@ mod tests {
         assert_eq!(second.session_id, "session-1");
         assert_eq!(second.thread_id.as_deref(), Some("session-1"));
         assert_eq!(second.content.as_deref(), Some("hello\nfull transcript"));
-        assert_eq!(second.cwd.as_deref(), Some("/work"));
         assert_eq!(second.hook_event.as_deref(), Some("Stop"));
         assert_eq!(second.harness.as_deref(), Some("claude_code"));
         assert_eq!(second.user_id.as_deref(), Some("user-1"));
@@ -650,7 +666,6 @@ mod tests {
                 session_id: None,
                 content: String::new(),
                 trajectory: Some(r#"{"source":"cursor"}"#.to_string()),
-                cwd: None,
                 hook_event: Some("backfill".to_string()),
                 timestamp: Some("2026-01-01T00:00:00.000Z".to_string()),
                 conversation: Some(serde_json::json!([{"role":"user","text":"hi"}])),
@@ -693,7 +708,6 @@ mod tests {
                 session_id: Some("s1".to_string()),
                 content: "huge trajectory blob".to_string(),
                 trajectory: None,
-                cwd: None,
                 hook_event: None,
                 timestamp: None,
                 conversation: None,
@@ -767,7 +781,6 @@ mod tests {
         assert!(stored.has_writes);
         assert_eq!(stored.tool_counts.get("Bash"), Some(&1));
         assert_eq!(stored.model.as_deref(), Some("claude-opus-4"));
-        assert_eq!(stored.cwd.as_deref(), Some("/Users/ada/site"));
         assert_eq!(stored.started_at, "2026-10-07T18:43:41.432Z");
         assert_eq!(stored.ended_at, "2026-10-07T18:50:00.000Z");
 
@@ -811,6 +824,7 @@ mod tests {
             .unwrap();
         migrate(&mut connection).unwrap();
         assert_eq!(user_version(&connection), SCHEMA_VERSION);
+        assert!(!has_column(&connection, "sessions", "cwd"));
         let listed = list(&connection, "default").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].prompt.as_deref(), Some("install the vercel cli"));
@@ -853,6 +867,49 @@ mod tests {
             .unwrap();
         migrate(&mut connection).unwrap();
         assert_eq!(user_version(&connection), SCHEMA_VERSION);
+        assert!(!has_column(&connection, "sessions", "cwd"));
+        let listed = list(&connection, "default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "kept");
+        assert_eq!(listed[0].prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn upgrade_from_v5_drops_cwd_and_keeps_rows() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    org_id TEXT NOT NULL, session_id TEXT NOT NULL, cwd TEXT, hook_event TEXT,
+                    content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    user_id TEXT, harness TEXT, harness_version TEXT, model TEXT,
+                    model_version TEXT, conversation TEXT, transcript_text TEXT,
+                    compaction_summary TEXT, client_timestamp TEXT,
+                    prompt TEXT, started_at TEXT, ended_at TEXT,
+                    user_turns INTEGER NOT NULL DEFAULT 0,
+                    assistant_turns INTEGER NOT NULL DEFAULT 0,
+                    tool_calls INTEGER NOT NULL DEFAULT 0,
+                    tool_counts TEXT, has_writes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (org_id, session_id)
+                );
+                PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    org_id, session_id, cwd, content, created_at, updated_at, prompt, started_at, ended_at
+                 ) VALUES (
+                    'default', 'kept', '/secret/folder', 'hello',
+                    '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z',
+                    'hello', '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z'
+                 )",
+                [],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        assert_eq!(user_version(&connection), SCHEMA_VERSION);
+        assert!(!has_column(&connection, "sessions", "cwd"));
         let listed = list(&connection, "default").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "kept");

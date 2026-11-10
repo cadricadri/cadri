@@ -1,7 +1,6 @@
 import type { SessionRow } from "./types";
 
 export type RangeKey = "all" | "1d" | "3d" | "7d" | "30d" | "custom";
-export type Chip = "all" | "memories" | "no-memories" | "writes";
 
 export type Filters = {
   range: RangeKey;
@@ -11,7 +10,6 @@ export type Filters = {
   harness: string | null;
   model: string | null;
   user: string | null;
-  chip: Chip;
 };
 
 export const RANGE_LABELS: Record<RangeKey, string> = {
@@ -26,20 +24,11 @@ export const RANGE_LABELS: Record<RangeKey, string> = {
 /** Calendar days, today included, for each quick range. */
 const RANGE_DAYS: Partial<Record<RangeKey, number>> = { "1d": 1, "3d": 3, "7d": 7, "30d": 30 };
 
-export const CHIP_LABELS: Record<Chip, string> = {
-  all: "All",
-  memories: "Generated memories",
-  "no-memories": "No memories",
-  writes: "Has writes",
-};
-
 const RANGES = Object.keys(RANGE_LABELS) as RangeKey[];
-const CHIPS = Object.keys(CHIP_LABELS) as Chip[];
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/;
 export function readFilters(params: URLSearchParams): Filters {
   const raw = params.get("range");
   const range = (raw === "24h" ? "1d" : raw) as RangeKey | null;
-  const chip = params.get("chip") as Chip | null;
   const day = (key: string) => {
     const value = params.get(key);
     return value && DAY_KEY.test(value) ? value : null;
@@ -51,15 +40,15 @@ export function readFilters(params: URLSearchParams): Filters {
     harness: params.get("harness") || null,
     model: params.get("model") || null,
     user: params.get("user") || null,
-    chip: chip && CHIPS.includes(chip) ? chip : "all",
   };
 }
 
 /** Writes `changes` into the query string; `null` or a default value removes the key. */
 export function withFilters(params: URLSearchParams, changes: Partial<Filters>): URLSearchParams {
   const next = new URLSearchParams(params);
+  next.delete("chip");
   for (const [key, value] of Object.entries(changes)) {
-    const isDefault = value === null || value === "" || (key === "range" && value === "all") || (key === "chip" && value === "all");
+    const isDefault = value === null || value === "" || (key === "range" && value === "all");
     if (isDefault) {
       next.delete(key);
     } else {
@@ -131,16 +120,7 @@ export function matchesFacets(row: SessionRow, filters: Filters): boolean {
   if (filters.user && (row.user_id ?? "") !== filters.user) {
     return false;
   }
-  switch (filters.chip) {
-    case "memories":
-      return row.memory_commits.length > 0;
-    case "no-memories":
-      return row.memory_commits.length === 0;
-    case "writes":
-      return row.has_writes;
-    default:
-      return true;
-  }
+  return true;
 }
 
 export function applyFilters(rows: SessionRow[], filters: Filters, now: number): SessionRow[] {

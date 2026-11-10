@@ -82,7 +82,6 @@ class PluginTestCase(unittest.TestCase):
         event = {
             "session_id": "s1",
             "transcript_path": str(self.transcript),
-            "cwd": "/work",
             "hook_event_name": "Stop",
         }
         return subprocess.run(
@@ -117,6 +116,7 @@ class CaptureTests(PluginTestCase):
         self.assertEqual(upload["body"]["harness"], "claude_code")
         self.assertEqual(upload["body"]["content"], '{"type":"user"}\n')
         self.assertEqual(upload["body"]["hook_event"], "Stop")
+        self.assertNotIn("cwd", upload["body"])
 
     def test_no_credentials_sends_no_header(self):
         result = self.capture()

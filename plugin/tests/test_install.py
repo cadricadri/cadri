@@ -166,7 +166,7 @@ class CursorInstallTests(InstallTestCase):
         [upload] = self.uploads()
         self.assertEqual(upload["body"]["thread_id"], "c1")
         self.assertEqual(upload["body"]["harness"], "cursor")
-        self.assertEqual(upload["body"]["cwd"], "/Users/me/app")
+        self.assertNotIn("cwd", upload["body"])
         self.assertEqual(upload["body"]["model"], "claude-opus")
 
     def test_session_start_without_a_file_uploads_nothing(self):
@@ -222,7 +222,7 @@ class OpenCodeInstallTests(InstallTestCase):
         connection.close()
         result = subprocess.run(
             command,
-            input=json.dumps({"session_id": "ses_1", "hook_event_name": "session.idle", "cwd": "/w"}),
+            input=json.dumps({"session_id": "ses_1", "hook_event_name": "session.idle"}),
             env=self.env(),
             capture_output=True,
             text=True,

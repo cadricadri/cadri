@@ -160,7 +160,6 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
         payload = {
             "thread_id": ref.thread_id,
             "content": content,
-            "cwd": ref.cwd,
             "hook_event": "backfill",
             "harness": ref.harness,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
@@ -306,7 +305,6 @@ def cmd_discover(args: argparse.Namespace) -> int:
                 "harness": ref.harness,
                 "thread_id": ref.thread_id,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
-                "cwd": ref.cwd,
             }
             for ref in refs
         ]

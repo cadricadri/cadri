@@ -12,4 +12,3 @@ class SessionRef:
     thread_id: str
     path: Path
     updated_at: float
-    cwd: str | None = None

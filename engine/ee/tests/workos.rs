@@ -2188,7 +2188,6 @@ async fn staging_signup_attempt(
             Some(json!({
                 "session_id": transcript_id,
                 "content": "signup check",
-                "cwd": "/signup",
                 "hook_event": "SignupCheck",
             })),
         ),

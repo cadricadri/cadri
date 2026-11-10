@@ -45,7 +45,6 @@ pub struct Parsed {
     pub messages: Vec<Message>,
     pub tool_calls: Vec<ToolCall>,
     pub model: Option<String>,
-    pub cwd: Option<String>,
     /// Earliest and latest timestamps seen on any line, including hidden tool output.
     span: Option<(String, String)>,
     /// A tool call came after the latest assistant text.
@@ -212,9 +211,6 @@ fn parse_claude(value: &Value, parsed: &mut Parsed) {
     if flag("isSidechain") || flag("isMeta") || flag("isCompactSummary") {
         return;
     }
-    if parsed.cwd.is_none() {
-        parsed.cwd = value.get("cwd").and_then(Value::as_str).map(str::to_string);
-    }
     let at = value.get("timestamp").and_then(normalize_time);
     parsed.saw(at.as_deref());
     let message = &value["message"];
@@ -297,14 +293,6 @@ fn parse_codex(
 ) {
     let payload_kind = payload.get("type").and_then(Value::as_str);
     match (kind, payload_kind) {
-        (Some("session_meta"), _) => {
-            if parsed.cwd.is_none() {
-                parsed.cwd = payload
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
-        }
         (Some("turn_context"), _) => {
             if let Some(model) = payload.get("model").and_then(Value::as_str) {
                 parsed.model = Some(model.to_string());
@@ -375,11 +363,6 @@ fn parse_opencode(content: &str, parsed: &mut Parsed) -> bool {
         return false;
     };
     let info = document.get("info").unwrap_or(&Value::Null);
-    parsed.cwd = info
-        .get("directory")
-        .or_else(|| info.get("cwd"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
     parsed.model = info.get("model").and_then(opencode_model);
     for entry in messages {
         let meta = entry.get("info").unwrap_or(entry);
@@ -680,7 +663,6 @@ mod tests {
         assert_eq!(names, vec!["Bash", "Write"]);
         assert!(parsed.has_writes());
         assert_eq!(parsed.model.as_deref(), Some("claude-opus-4"));
-        assert_eq!(parsed.cwd.as_deref(), Some("/Users/ada/site"));
         assert_eq!(
             parsed.started_at().as_deref(),
             Some("2026-10-07T18:43:41.432Z")
@@ -727,7 +709,6 @@ mod tests {
         assert_eq!(parsed.prompt(), Some("fix the failing test"));
         assert_eq!(roles(&parsed), vec![Role::User, Role::Assistant]);
         assert_eq!(parsed.model.as_deref(), Some("gpt-5-codex"));
-        assert_eq!(parsed.cwd.as_deref(), Some("/work/app"));
         let names: Vec<&str> = parsed
             .tool_calls
             .iter()
@@ -744,7 +725,6 @@ mod tests {
         assert_eq!(roles(&parsed), vec![Role::User, Role::Assistant]);
         assert_eq!(parsed.tool_counts().get("edit"), Some(&1));
         assert_eq!(parsed.model.as_deref(), Some("claude-sonnet-4"));
-        assert_eq!(parsed.cwd.as_deref(), Some("/work/web"));
         assert_eq!(
             parsed.started_at().as_deref(),
             Some("2026-10-01T12:00:00.000Z")
@@ -771,7 +751,6 @@ mod tests {
         assert_eq!(names, vec!["webfetch", "write"]);
         assert!(parsed.has_writes());
         assert_eq!(parsed.model.as_deref(), Some("flint-40b-free"));
-        assert_eq!(parsed.cwd.as_deref(), Some("/work/site"));
         assert_eq!(
             parsed.started_at().as_deref(),
             Some("2026-10-22T22:05:39.984Z")
