@@ -17,8 +17,17 @@ from test_plugin import PluginTestCase
 PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN))
 
+import importlib.util
+
 from shared import cadri_auth, install  # noqa: E402
-from shared.discover import codex, opencode  # noqa: E402
+from shared.discover import codex, cursor, opencode  # noqa: E402
+
+
+def load_cli():
+    spec = importlib.util.spec_from_file_location("cadri_cli", PLUGIN / "bin" / "cadri_cli.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class InstallTestCase(PluginTestCase):
@@ -168,6 +177,62 @@ class CursorInstallTests(InstallTestCase):
         self.assertEqual(upload["body"]["harness"], "cursor")
         self.assertNotIn("cwd", upload["body"])
         self.assertEqual(upload["body"]["model"], "claude-opus")
+
+    def test_stop_hook_reads_the_model_from_composer_data(self):
+        install.install_harness("cursor", self.home)
+        command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
+        folder = self.home / ".cursor/projects/Users-me-app/agent-transcripts/c3"
+        folder.mkdir(parents=True)
+        (folder / "c3.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
+        self.write_composer("c3", model_name="grok-4.7-high", model_id="grok-4.7")
+        result = self.run_hook(command, {"conversation_id": "c3", "hook_event_name": "stop"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [upload] = self.uploads()
+        self.assertEqual(upload["body"]["model"], "grok-4.7-high")
+
+    def test_backfill_sends_the_cursor_model(self):
+        thread = "c4"
+        folder = self.home / ".cursor/projects/app/agent-transcripts" / thread
+        folder.mkdir(parents=True)
+        (folder / f"{thread}.jsonl").write_text('{"role":"user","message":{"content":[]}}\n', encoding="utf-8")
+        self.write_composer(thread, model_name="", model_id="claude-opus-5-5")
+        cli = load_cli()
+        with mock.patch.object(cli, "post_session", return_value=(201, {})) as post:
+            summary = cli.backfill("http://127.0.0.1:9", 0, 10, 10_000_000)
+        self.assertEqual(summary["uploaded"], 1)
+        self.assertEqual(summary["by_harness"], {"cursor": 1})
+        payload = post.call_args.args[1]
+        self.assertEqual(payload["harness"], "cursor")
+        self.assertEqual(payload["thread_id"], thread)
+        self.assertEqual(payload["model"], "claude-opus-5-5")
+
+    def test_model_name_ignores_a_missing_or_broken_record(self):
+        self.assertIsNone(cursor.model_name(self.home, "missing"))
+        self.write_composer("bad", model_name="not-json")
+        path = cursor.state_db(self.home)
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
+            ("{not json", "composerData:bad"),
+        )
+        connection.commit()
+        connection.close()
+        self.assertIsNone(cursor.model_name(self.home, "bad"))
+
+    def write_composer(self, thread_id: str, model_name: str, model_id: str | None = None) -> None:
+        path = self.home / "Library/Application Support/Cursor/User/globalStorage/state.vscdb"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
+        config = {"modelName": model_name}
+        if model_id is not None:
+            config["selectedModels"] = [{"modelId": model_id}]
+        connection.execute(
+            "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)",
+            (f"composerData:{thread_id}", json.dumps({"modelConfig": config})),
+        )
+        connection.commit()
+        connection.close()
 
     def test_session_start_without_a_file_uploads_nothing(self):
         install.install_harness("cursor", self.home)

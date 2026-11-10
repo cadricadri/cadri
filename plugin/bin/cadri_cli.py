@@ -16,7 +16,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 from shared import cadri_auth, hooks, install, memory  # noqa: E402
-from shared.discover import detected_harnesses, discover_all  # noqa: E402
+from shared.discover import cursor, detected_harnesses, discover_all  # noqa: E402
 from shared.discover.opencode import export_session_json  # noqa: E402
 from shared.discover.types import SessionRef  # noqa: E402
 from shared.upload import post_session  # noqa: E402
@@ -164,6 +164,10 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
             "harness": ref.harness,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ref.updated_at)),
         }
+        if ref.harness == "cursor":
+            model = cursor.model_name(Path.home(), ref.thread_id)
+            if model:
+                payload["model"] = model
         try:
             status, body = post_session(base, payload)
         except (OSError, ValueError) as exc:

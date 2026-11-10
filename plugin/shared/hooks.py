@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 
 from . import cadri_auth, memory
-from .discover import opencode
+from .discover import cursor, opencode
 from .upload import post_session
 
 HARNESSES = ("claude_code", "cursor", "codex", "opencode")
@@ -93,6 +93,10 @@ def build_payload(harness: str, event: dict) -> dict | None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     model = text(event, "model")
+    if model is None and harness == "cursor":
+        # Stop hooks usually carry `model`. Backfill and older payloads do not;
+        # the transcript file never does either.
+        model = cursor.model_name(Path.home(), thread_id)
     if model:
         payload["model"] = model
     if harness == "claude_code":
