@@ -31,7 +31,6 @@ export default function SessionList() {
   const filters = readFilters(params);
   const [now, setNow] = useState(() => Date.now());
   const [sort, setSort] = useState<Sort>({ key: "end", dir: "desc" });
-  const [sort, setSort] = useState<Sort>({ key: "end", dir: "desc" });
 
   const load = useCallback(async () => {
     const id = ++request.current;
@@ -85,15 +84,6 @@ export default function SessionList() {
     void load();
     void loadCommits();
   }, [load, loadCommits]);
-
-  useEffect(() => {
-    if (!params.has("chip")) {
-      return;
-    }
-    const next = new URLSearchParams(params);
-    next.delete("chip");
-    setParams(next, { replace: true });
-  }, [params, setParams]);
 
   useEffect(() => {
     if (!params.has("chip")) {
