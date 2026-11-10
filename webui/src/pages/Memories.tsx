@@ -593,6 +593,7 @@ export default function Memories() {
                   key={`draft:${scope}:${draftDirectory}`}
                   file={{ path: draftDirectory, blob: "", content: "", blame: [] }}
                   createIn={draftDirectory}
+                  scope={scope}
                   commits={store.commits}
                   paths={store.files.map((item) => item.path)}
                   directories={store.directories}
@@ -611,6 +612,7 @@ export default function Memories() {
                 <FileView
                   key={`${scope}:${file.path}`}
                   file={file}
+                  scope={scope}
                   commits={store.commits}
                   paths={store.files.map((item) => item.path)}
                   directories={store.directories}

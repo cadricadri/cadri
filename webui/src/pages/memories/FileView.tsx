@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { Link } from "react-router";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HumanMark, RobotMark } from "../../icons";
@@ -11,6 +12,7 @@ export type FileTab = "preview" | "code";
 export function FileView({
   file,
   createIn,
+  scope,
   commits,
   paths,
   directories = [],
@@ -24,6 +26,7 @@ export function FileView({
 }: {
   file: LoadedFile;
   createIn?: string;
+  scope: "team" | "user";
   commits: MemoryCommit[];
   paths: string[];
   directories?: string[];
@@ -42,6 +45,9 @@ export function FileView({
   const [name, setName] = useState(filename);
   const [editing, setEditing] = useState(creating);
   const [blameOpen, setBlameOpen] = useState(false);
+  const [pointerOnAge, setPointerOnAge] = useState(false);
+  const [ageFocused, setAgeFocused] = useState(false);
+  const blameHover = pointerOnAge || ageFocused;
   const textRef = useRef<HTMLTextAreaElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const numbersRef = useRef<HTMLDivElement>(null);
@@ -94,6 +100,19 @@ export function FileView({
   }, [creating, editing, tab]);
 
   const blameLoaded = file.blame.length > 0;
+  const needBlame = useRef(onNeedBlame);
+  const needHistory = useRef(onNeedHistory);
+  needBlame.current = onNeedBlame;
+  needHistory.current = onNeedHistory;
+  useEffect(() => {
+    if (creating) {
+      return;
+    }
+    needHistory.current?.();
+    if (!blameLoaded) {
+      needBlame.current?.();
+    }
+  }, [creating, blameLoaded, file.path]);
   useEffect(() => {
     if (blameOpen && !creating && !blameLoaded) {
       onNeedBlame?.();
@@ -140,6 +159,11 @@ export function FileView({
     onSave(buffer, message, nextPath);
   }
 
+  const edited = creating ? null : latestBlameCommit(file, commits);
+  const blameExpanded = blameOpen || blameHover;
+  const shownTab: FileTab = blameHover && !creating ? "code" : tab;
+  const showSheet = blameOpen && !editing;
+
   return (
     <div className="memory-file">
       <div className="memory-file-head">
@@ -175,6 +199,23 @@ export function FileView({
             ) : (
               <span aria-current="page">{filename}</span>
             )}
+            {edited ? (
+              <Link
+                className="memory-edited"
+                to={commitPath(edited.id, scope)}
+                title={edited.message}
+                onMouseEnter={() => {
+                  onNeedBlame?.();
+                  onNeedHistory?.();
+                  setPointerOnAge(true);
+                }}
+                onMouseLeave={() => setPointerOnAge(false)}
+                onFocus={() => setAgeFocused(true)}
+                onBlur={() => setAgeFocused(false)}
+              >
+                (last edited <time dateTime={edited.at}>{ago(edited.at)}</time>)
+              </Link>
+            ) : null}
             {nameProblem ? <span className="memory-name-note">{nameProblem}</span> : null}
           </p>
           <div className="memory-file-actions">
@@ -202,7 +243,7 @@ export function FileView({
                 type="button"
                 role="tab"
                 id={`file-tab-${item}`}
-                aria-selected={tab === item}
+                aria-selected={shownTab === item}
                 aria-controls={`file-panel-${item}`}
                 onClick={() => onTab(item)}
               >
@@ -213,16 +254,16 @@ export function FileView({
           {blameLoaded ? <Contributors file={file} /> : null}
         </div>
       </div>
-      {tab === "preview" ? (
+      {shownTab === "preview" ? (
         <section className="memory-preview" id="file-panel-preview" role="tabpanel" aria-labelledby="file-tab-preview">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{buffer}</ReactMarkdown>
         </section>
       ) : (
         <section className="memory-edit" id="file-panel-code" role="tabpanel" aria-labelledby="file-tab-code">
-          {blameOpen ? <BlameLegend /> : null}
+          {blameExpanded ? <BlameLegend /> : null}
           <div className="memory-editor">
             <button
-              className="code-blame-bar"
+              className={blameExpanded ? "code-blame-bar is-open" : "code-blame-bar"}
               type="button"
               aria-pressed={blameOpen}
               aria-label={blameOpen ? "Hide blame" : "Show blame"}
@@ -247,11 +288,26 @@ export function FileView({
               </div>
             ) : (
               <>
-                {blameOpen ? <BlameRail railRef={railRef} file={file} buffer={buffer} commits={commits} /> : null}
+                <ExpandRail open={blameExpanded && !showSheet}>
+                  {!blameLoaded && !creating ? (
+                    <div className="blame-rail">
+                      <p className="blame-rail-loading">Loading…</p>
+                    </div>
+                  ) : (
+                    <BlameRail railRef={railRef} file={file} buffer={buffer} commits={commits} />
+                  )}
+                </ExpandRail>
                 {editing ? (
                   <CodeLines numbersRef={numbersRef} lines={lines} />
                 ) : (
-                  <div className="code-scroll">
+                  <div
+                    className="code-scroll"
+                    onScroll={(event) => {
+                      if (railRef.current) {
+                        railRef.current.scrollTop = event.currentTarget.scrollTop;
+                      }
+                    }}
+                  >
                     <CodeLines lines={lines} />
                     <pre className="code-text">{buffer.length > 0 ? buffer : " "}</pre>
                   </div>
@@ -276,6 +332,79 @@ export function FileView({
       )}
     </div>
   );
+}
+
+function latestBlameCommit(file: LoadedFile, commits: MemoryCommit[]): MemoryCommit | null {
+  if (file.blame.length === 0) {
+    return null;
+  }
+  const byId = new Map(commits.map((commit) => [commit.id, commit]));
+  let best: MemoryCommit | null = null;
+  let bestAt = Number.NEGATIVE_INFINITY;
+  const seen = new Set<string>();
+  for (const entry of file.blame) {
+    if (seen.has(entry.commit_id)) {
+      continue;
+    }
+    seen.add(entry.commit_id);
+    const commit = byId.get(entry.commit_id);
+    if (!commit) {
+      return null;
+    }
+    const at = Date.parse(commit.at);
+    if (Number.isNaN(at) || at <= bestAt) {
+      continue;
+    }
+    best = commit;
+    bestAt = at;
+  }
+  return best;
+}
+
+function commitPath(id: string, scope: "team" | "user"): string {
+  const path = `/memories/commits/${encodeURIComponent(id)}`;
+  return scope === "user" ? `${path}?scope=user` : path;
+}
+
+const blameRailMs = 180;
+
+function ExpandRail({ open, children }: { open: boolean; children: ReactNode }) {
+  const [mounted, setMounted] = useState(open);
+  const [wide, setWide] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setWide(false);
+      if (blameMotionMs() === 0) {
+        setMounted(false);
+        return;
+      }
+      const timer = window.setTimeout(() => setMounted(false), blameRailMs);
+      return () => window.clearTimeout(timer);
+    }
+    setMounted(true);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || !mounted) {
+      return;
+    }
+    if (blameMotionMs() === 0) {
+      setWide(true);
+      return;
+    }
+    const frame = requestAnimationFrame(() => setWide(true));
+    return () => cancelAnimationFrame(frame);
+  }, [open, mounted]);
+
+  if (!mounted) {
+    return null;
+  }
+  return <div className={wide ? "blame-rail-slot open" : "blame-rail-slot"}>{children}</div>;
+}
+
+function blameMotionMs(): number {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : blameRailMs;
 }
 
 function CodeLines({ lines, numbersRef }: { lines: string[]; numbersRef?: Ref<HTMLDivElement> }) {

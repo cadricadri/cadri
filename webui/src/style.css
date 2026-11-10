@@ -1182,6 +1182,16 @@ button.tree-row {
   font-size: 12px;
 }
 
+.memory-edited {
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
 .memory-sep {
   margin-right: 6px;
   color: var(--mute);
@@ -1267,7 +1277,8 @@ button.tree-row {
 }
 
 .code-blame-bar:hover,
-.code-blame-bar[aria-pressed="true"] {
+.code-blame-bar[aria-pressed="true"],
+.code-blame-bar.is-open {
   background: color-mix(in srgb, var(--pink) 28%, var(--paper));
   color: var(--ink);
 }
@@ -1312,14 +1323,41 @@ button.tree-row {
   white-space: pre;
 }
 
+.blame-rail-slot {
+  display: flex;
+  flex: none;
+  width: 0;
+  min-height: 0;
+  overflow: hidden;
+  transition: width 180ms ease;
+}
+
+.blame-rail-slot.open {
+  width: 200px;
+}
+
 .blame-rail {
   width: 200px;
+  height: 100%;
   flex: none;
   min-height: 0;
   overflow: hidden;
   padding: 8px 0;
   border-right: 1px solid var(--line);
   pointer-events: none;
+}
+
+.blame-rail-loading {
+  margin: 0;
+  padding: 0 8px;
+  color: var(--mute);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blame-rail-slot {
+    transition: none;
+  }
 }
 
 .blame-rail-group {
