@@ -263,6 +263,175 @@ async fn orgs_cannot_see_each_others_sessions() {
 }
 
 #[tokio::test]
+async fn mid_turn_transcript_uploads_update_one_session() {
+    let app = app(Arc::new(NoAuth));
+    let init = r#"{"type":"user","message":{"role":"user","content":"fix the login"},"timestamp":"2026-10-07T18:00:00.000Z"}"#;
+    let reply = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading auth.rs."}]},"timestamp":"2026-10-07T18:01:00.000Z"}"#;
+    let finished = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"Fixed the session check."}]},"timestamp":"2026-10-07T18:02:00.000Z"}"#;
+    let mid = format!("{init}\n{reply}");
+    let later = format!("{mid}\n{finished}");
+
+    let upload = |path: &str, body: Value| post_json(path, &body, &[]);
+    let (status, _, started) = send(
+        &app,
+        upload(
+            "/api/sessions",
+            json!({
+                "thread_id": "sess-live",
+                "session_id": "sess-live",
+                "content": init,
+                "hook_event": "SessionStart",
+                "harness": "claude_code"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["session_id"], "sess-live");
+    assert_eq!(started["user_turns"], 1);
+    assert_eq!(started["assistant_turns"], 0);
+
+    let (status, _, detail) = send(&app, get_request("/api/sessions/sess-live", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["messages"],
+        json!([{ "role": "user", "text": "fix the login", "at": "2026-10-07T18:00:00.000Z" }])
+    );
+    assert!(detail.get("content").is_none());
+
+    let (status, _, grown) = send(
+        &app,
+        upload(
+            "/api/sessions",
+            json!({
+                "session_id": "sess-live",
+                "content": mid,
+                "hook_event": "Stop",
+                "harness": "claude_code"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{grown}");
+    assert_eq!(grown["created_at"], started["created_at"]);
+    assert_eq!(grown["assistant_turns"], 1);
+    assert_eq!(grown["hook_event"], "Stop");
+
+    let (_, _, listed) = send(&app, get_request("/api/sessions", &[])).await;
+    let rows = listed.as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "mid-turn upload must not add a list entry: {listed}"
+    );
+    assert_eq!(rows[0]["session_id"], "sess-live");
+    assert_eq!(rows[0]["created_at"], started["created_at"]);
+    assert_eq!(rows[0]["bytes"], mid.len());
+    assert_eq!(rows[0]["event_count"], 2);
+    assert!(rows[0].get("content").is_none());
+
+    let (status, _, detail) = send(&app, get_request("/api/sessions/sess-live", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["messages"],
+        json!([
+            { "role": "user", "text": "fix the login", "at": "2026-10-07T18:00:00.000Z" },
+            { "role": "assistant", "text": "Reading auth.rs.", "at": "2026-10-07T18:01:00.000Z" }
+        ])
+    );
+
+    let (status, _, finished_row) = send(
+        &app,
+        upload(
+            "/api/transcripts",
+            json!({
+                "thread_id": "sess-live",
+                "content": later,
+                "hook_event": "Stop",
+                "harness": "cursor"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{finished_row}");
+    assert_eq!(finished_row["created_at"], started["created_at"]);
+    assert_eq!(finished_row["tool_call_count"], 1);
+    assert_eq!(finished_row["bytes"], later.len());
+
+    let (_, _, listed) = send(&app, get_request("/api/transcripts", &[])).await;
+    assert_eq!(
+        listed.as_array().unwrap().len(),
+        1,
+        "transcript alias must update the same session: {listed}"
+    );
+    assert_eq!(listed[0]["session_id"], "sess-live");
+    assert_eq!(listed[0]["bytes"], later.len());
+    assert_eq!(listed[0]["tool_call_count"], 1);
+    assert_eq!(listed[0]["prompt"], "fix the login");
+
+    let (status, _, detail) = send(&app, get_request("/api/sessions/sess-live", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(
+        detail["messages"],
+        json!([
+            { "role": "user", "text": "fix the login", "at": "2026-10-07T18:00:00.000Z" },
+            {
+                "role": "assistant",
+                "text": "Fixed the session check.",
+                "notes": ["Reading auth.rs."],
+                "at": "2026-10-07T18:01:00.000Z"
+            }
+        ])
+    );
+    assert_eq!(
+        detail["tool_calls"],
+        json!([{ "name": "Read", "at": "2026-10-07T18:02:00.000Z" }])
+    );
+    assert!(detail.get("content").is_none());
+
+    let (status, _, _) = send(
+        &app,
+        upload(
+            "/api/sessions",
+            json!({
+                "thread_id": "sess-other",
+                "content": r#"{"type":"user","message":{"role":"user","content":"other work"},"timestamp":"2026-10-07T19:00:00.000Z"}"#,
+                "hook_event": "Stop",
+                "harness": "cursor"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, _, listed) = send(&app, get_request("/api/sessions", &[])).await;
+    let mut ids: Vec<_> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["session_id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["sess-live".to_string(), "sess-other".to_string()],
+        "a new session is a second list entry; the mid-turn upload is not"
+    );
+    let live = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["session_id"] == "sess-live")
+        .unwrap();
+    assert_eq!(live["bytes"], later.len());
+    assert_eq!(live["tool_call_count"], 1);
+
+    let (status, _, detail) = send(&app, get_request("/api/sessions/sess-live", &[])).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["messages"][1]["text"], "Fixed the session check.");
+}
+
+#[tokio::test]
 async fn authenticator_headers_are_added_to_the_response() {
     let app = app(Arc::new(OrgHeaderAuth));
     let (status, headers, body) = send(&app, get_request("/api/me", &[("x-test-org", "o")])).await;

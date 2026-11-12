@@ -654,6 +654,107 @@ mod tests {
         );
     }
 
+    fn count_sessions(connection: &Connection, org_id: &str) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE org_id = ?1",
+                params![org_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A turn uploads the whole transcript again under the same id. That rewrites one row.
+    #[test]
+    fn mid_turn_uploads_rewrite_one_session_row() {
+        let connection = open_in_memory().unwrap();
+        let init = r#"{"type":"user","message":{"role":"user","content":"fix the login"},"timestamp":"2026-10-07T18:00:00.000Z"}"#;
+        let mid = format!(
+            "{init}\n{}",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading auth.rs."}]},"timestamp":"2026-10-07T18:01:00.000Z"}"#
+        );
+        let later = format!(
+            "{mid}\n{}",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read"},{"type":"text","text":"Fixed the session check."}]},"timestamp":"2026-10-07T18:02:00.000Z"}"#
+        );
+
+        let first = upsert(
+            &connection,
+            "default",
+            "user-1",
+            &incoming("sess-live", init),
+        )
+        .unwrap();
+        assert_eq!(count_sessions(&connection, "default"), 1);
+        assert_eq!(first.user_turns, 1);
+        assert_eq!(first.assistant_turns, 0);
+        assert_eq!(first.tool_call_count, 0);
+
+        std::thread::sleep(Duration::from_millis(5));
+        let second = upsert(
+            &connection,
+            "default",
+            "user-1",
+            &incoming("sess-live", &mid),
+        )
+        .unwrap();
+        assert_eq!(count_sessions(&connection, "default"), 1);
+        assert_eq!(second.created_at, first.created_at);
+        assert!(second.updated_at > first.updated_at);
+        assert_eq!(second.content.as_deref(), Some(mid.as_str()));
+        assert_eq!(second.assistant_turns, 1);
+        assert_eq!(second.tool_call_count, 0);
+        assert_eq!(list(&connection, "default").unwrap().len(), 1);
+
+        let mut continued = incoming("sess-live", &later);
+        continued.thread_id = Some("sess-live".to_string());
+        continued.session_id = None;
+        continued.hook_event = Some("Stop".to_string());
+        let third = upsert(&connection, "default", "user-1", &continued).unwrap();
+        assert_eq!(count_sessions(&connection, "default"), 1);
+        assert_eq!(third.session_id, "sess-live");
+        assert_eq!(third.created_at, first.created_at);
+        assert_eq!(third.content.as_deref(), Some(later.as_str()));
+        assert_eq!(third.prompt.as_deref(), Some("fix the login"));
+        assert_eq!(third.user_turns, 1);
+        assert_eq!(third.assistant_turns, 1);
+        assert_eq!(third.tool_call_count, 1);
+        assert_eq!(third.hook_event.as_deref(), Some("Stop"));
+
+        let listed = list(&connection, "default").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "sess-live");
+        assert!(listed[0].content.is_none());
+        assert_eq!(listed[0].bytes, later.len());
+        assert_eq!(listed[0].tool_call_count, 1);
+        let stored = get(&connection, "default", "sess-live").unwrap().unwrap();
+        assert_eq!(stored.content.as_deref(), Some(later.as_str()));
+
+        upsert(
+            &connection,
+            "default",
+            "user-1",
+            &incoming("sess-other", "a different session"),
+        )
+        .unwrap();
+        assert_eq!(count_sessions(&connection, "default"), 2);
+        let mut ids: Vec<_> = list(&connection, "default")
+            .unwrap()
+            .into_iter()
+            .map(|session| session.session_id)
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["sess-live".to_string(), "sess-other".to_string()]);
+        assert_eq!(
+            get(&connection, "default", "sess-live")
+                .unwrap()
+                .unwrap()
+                .content
+                .as_deref(),
+            Some(later.as_str())
+        );
+    }
+
     #[test]
     fn thread_id_alias_and_trajectory_fill_content() {
         let connection = open_in_memory().unwrap();
