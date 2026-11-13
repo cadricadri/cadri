@@ -78,6 +78,7 @@ cadri login [--logout]
 cadri init [--local [--start-engine]]
 cadri uninstall
 cadri discover [--json] [--days 30] [--limit 50]
+cadri discover --seed [--json] [--days 60] [--limit 100]   # smaller of the day window and the recency cap
 cadri show <thread_id>
 cadri memory context [--harness claude]   # what session start gives the agent
 cadri memory status                       # sign-in, books, pending edits, repairs

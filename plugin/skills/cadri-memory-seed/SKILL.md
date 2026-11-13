@@ -1,96 +1,74 @@
 ---
 name: cadri-memory-seed
-description: Turn the user's recent agent sessions into Cadri memories right after cadri init. Use when the Cadri install docs say to seed memory, or when the user asks to learn from past sessions into Cadri.
+description: Turn the user's recent agent sessions into Cadri memories right after cadri init. Use when the Cadri install docs say to seed memory, or when the user asks to learn from past sessions into Cadri. Finish this in the same task as install.
 ---
 
 # Seed Cadri memory from past sessions
 
-`cadri init` already uploaded recent sessions and cloned two memory books:
+`cadri init` has already uploaded recent sessions and cloned two empty memory books. You write the first lessons and publish them. Do not stop after init.
 
 - **Team book** (`cadri memory path`): shared by everyone in the team. Facts about shared code, systems, conventions, and decisions.
 - **Personal book** (`cadri memory path --scope user`): this person only. Their preferences, corrections, and ways of working.
 
-Your job is to read a batch of past sessions and write the few lessons that will make every future agent better. Fewer, sharper memories beat many vague ones.
+Use the same judgment as steady state. Read `cadri-memory/references/maintain.md` and follow it. That is what the memory keeper uses when a hook wakes it. This run is once, over past sessions, instead of over one live digest.
 
-## 1. Look at what exists
+Fewer, sharper memories beat many vague ones. Often a session contributes nothing. That is a fine outcome.
 
-```bash
-cadri memory clone && cadri memory clone --scope user
-cat "$(cadri memory path)/MEMORY.md" 2>/dev/null
-cat "$(cadri memory path --scope user)/MEMORY.md" 2>/dev/null
-```
+## 1. Tell the user, then choose the window
 
-Read any files the indexes point to before writing, so you update instead of duplicating.
+Say that seeding usually takes several minutes, and longer for a large window, before you read sessions.
 
-If `cadri memory` says git is missing, ask the user to run `xcode-select --install`, then continue.
-
-## 2. Pick sessions
+Default window: whichever set is smaller, the last 60 days or the 100 most recent sessions.
 
 ```bash
-cadri discover --json --days 30 --limit 60
+cadri discover --json --seed
 ```
 
-Choose up to 15 sessions where a human and an agent did real work. Prefer the newest, and prefer sessions with back-and-forth over one-shot prompts. Skip automated runs, empty sessions, and sessions about the Cadri install itself.
+The stderr line is the count. Seed every session in the JSON. Do not sample a subset.
 
-## 3. Read them in parallel
+If the user's install message names a tighter window, pass it and keep the same smaller-of rule:
 
-Split the sessions into batches of about five. If you can run subagents, give each batch to one subagent (run at most three at a time) and have it return candidate lessons, not file edits. Otherwise read them yourself, one batch at a time.
+- "last 10 days or 10 sessions" → `cadri discover --json --seed --days 10 --limit 10`
+- only a day count → pass `--days` and leave `--limit` at the default 100
+- only a session count → pass `--limit` and leave `--days` at the default 60
 
-Read a session with `cadri show <thread_id>`. Sessions can be large: look at the human's messages first (search for `"role":"user"` or `"type":"user"`), then read around the corrections.
+A request for a larger window than the default is the same idea: pass the numbers they named. Do not invent a tighter window they did not ask for.
 
-For each session, look for these, in priority order:
+If the command prints no sessions, tell the user there is nothing to seed yet and stop. Do not push an empty layout.
 
-1. **Corrections and mistakes.** The human said "no", "that's wrong", "I told you", or undid the agent's work. What rule would have prevented it?
-2. **Preferences.** How the human wants things done: tools, style, review habits, what to ask first, what never to do.
-3. **Durable facts.** How a system, repo, service, or deploy actually works, especially anything surprising or learned the hard way.
-4. **Procedures.** Steps that worked and will be repeated (release, deploy, debugging a known failure).
-5. **Contradictions.** Anything that disagrees with an existing memory. The newer, explicit statement from the human wins.
+## 2. Read them in parallel
 
-Write each lesson as a rule or fact that generalizes, not as a story of what happened. Drop anything a future agent could learn in seconds by reading the code.
+Split the sessions into batches of about five. Run at most three subagents at a time. Each subagent reads its batch with `cadri show <thread_id>` and returns candidate lessons, not file edits. Subagents must not edit either book and must not run `cadri memory`.
 
-Never store secrets: no keys, tokens, passwords, customer data, or personal details beyond names.
+Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections.
 
-## 4. Decide where each lesson goes
+For each session, look for these, in the order `maintain.md` cares about:
 
-- About this person (their taste, their workflow, how they like to be talked to): **personal book**.
-- About shared code, infrastructure, products, or team decisions: **team book**.
-- Unsure: personal book. Teammates should not see guesses about one person.
+1. **Corrections.** The human said the agent was wrong, or undid the work. What rule would have prevented it?
+2. **Preferences.** How this person wants things done. Personal book.
+3. **Decisions and conventions.** Why a system is shaped this way, team rules, how to ship. Team book.
+4. **Durable discoveries.** Non-obvious facts that cost real effort and will matter again.
 
-## 5. Write
+Write each lesson as a rule or fact that generalizes, not as a story of the session. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
 
-Book layout:
+## 3. You write, then one push
 
-- An empty team book already has `MEMORY.md` plus `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/` after `cadri init`. Use those top-level directories; do not invent another at the root.
-- Root `MEMORY.md` is loaded into every session: keep it a short guide to what the book holds and where. Each directory's `MEMORY.md` is that directory's index: one line per file, a relative link, and when to open it. Neither has frontmatter.
-- One Markdown file per topic. A component's notes go in `components/<name>/`. A recurring failure goes in `incidents/<pattern>/`. Each file other than a `MEMORY.md` index starts with:
+You integrate the lessons yourself. Subagent notes are not memory until you put them in the books.
 
-  ```markdown
-  ---
-  name: Code review preferences
-  description: How Nelson wants reviews written. Read before reviewing or summarizing changes.
-  ---
-  ```
+Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. A fresh install has no files yet. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/`. Do not push a scaffold of empty indexes by itself.
 
-- Keep files short. Update an existing file rather than adding a near-duplicate.
-
-Write each file through Cadri so the edit is attributed and shared at once. Put the source sessions in the commit message, never in the memory text:
+Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Then publish once:
 
 ```bash
-cat > /tmp/cadri-memory.md <<'EOF'
----
-name: ...
-description: ...
----
-...
-EOF
-cadri memory write preferences/code-review.md --scope user --file /tmp/cadri-memory.md --agent cadri-seed \
-  --session 2f1c… -m "Add code review preferences" -m "Sources: claude_code:2f1c…, cursor:7a9e…"
+cadri memory push --agent cadri-memory-seed -m "Seed memories from <N> sessions" -m "Sources: cursor:<id>, claude_code:<id>"
 ```
 
-`--session` takes the bare id of the session the memory mostly came from; the Sessions page lists the commit under that session's "Memories generated". Leave out `--scope user` for the team book. Update the directory `MEMORY.md` indexes (and the root `MEMORY.md`, if a new area appeared under an existing top-level folder) the same way once the topic files are written.
+Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of the whole push; the commit message lists the rest.
 
-Exit status 3 means someone changed the same file since your clone: run `cadri memory sync`, re-read the file, merge your change, and write again.
+`--book` defaults to both books. A book with no edits is skipped. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
 
-## 6. Report
+Do not launch `cadri-memory-keeper` for this seed. Push before you stop, so the quiet hook does not publish the files under a generic message.
 
-Tell the user how many sessions you read and list the memories you wrote, one line each, with which book they went to. Mention that they can review and edit them on the Memories page of the Cadri web app.
+## 4. Report
+
+Tell the user how many sessions you read, how long the window was, and list the memories you wrote, one line each, with which book they went to. If nothing was worth keeping, say that. They can review and edit what you wrote on the Memories page.

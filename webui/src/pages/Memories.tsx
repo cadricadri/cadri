@@ -30,8 +30,9 @@ import type { SessionRow } from "./sessions/types";
 
 type MemoryScope = "team" | "user";
 
-/** A book stays in "memories are being populated" until the oldest relevant session is this old. */
-const SEEDING_WINDOW_MS = 60 * 60 * 1000;
+/** How long after the first uploaded session an empty book still says seeding is in progress.
+ *  A full seed reads up to 100 sessions and can run well past a few minutes. */
+const SEEDING_WINDOW_MS = 2 * 60 * 60 * 1000;
 const EMPTY_BOOK_POLL_MS = 10_000;
 
 type Notice = {
@@ -118,7 +119,7 @@ export default function Memories() {
     void load();
   }, [load, scope]);
 
-  const awaitingFirstMemory = store !== null && store.tip === null;
+  const awaitingFirstMemory = store !== null && !hasTopicFile(store.files);
   useEffect(() => {
     if (!awaitingFirstMemory) {
       return;
@@ -156,7 +157,7 @@ export default function Memories() {
           return;
         }
         const tree = (await response.json()) as MemoryTree;
-        if (cancel || !tree.tip) {
+        if (cancel || !tree.tip || !hasTopicFile(tree.files)) {
           return;
         }
         const next = readStore(storeFromTree(tree, null));
@@ -275,7 +276,7 @@ export default function Memories() {
     if (filePath && store.files.some((item) => item.path === filePath)) {
       return;
     }
-    const fallback = store.files.find((item) => item.path === "README.md") ?? store.files[0];
+    const fallback = rootFile(store);
     if (!fallback && !filePath) {
       return;
     }
@@ -576,7 +577,7 @@ export default function Memories() {
             <div className="memory-workspace">
               <FileTree
                 store={store}
-                activePath={file?.path ?? null}
+                activePath={awaitingFirstMemory ? null : (file?.path ?? null)}
                 narrow={narrow}
                 changesDisabled={editing || draftDirectory !== null}
                 onToggleNarrow={() => setNarrow((value) => !value)}
@@ -588,7 +589,15 @@ export default function Memories() {
                 onMove={(from, parent) => void moveItem(from, parent)}
                 onIssue={showIssue}
               />
-              {draftDirectory !== null ? (
+              {awaitingFirstMemory ? (
+                phase ? (
+                  <EmptyBook scope={scope} phase={phase} />
+                ) : (
+                  <p className="status" role="status">
+                    Loading…
+                  </p>
+                )
+              ) : draftDirectory !== null ? (
                 <FileView
                   key={`draft:${scope}:${draftDirectory}`}
                   file={{ path: draftDirectory, blob: "", content: "", blame: [] }}
@@ -623,8 +632,6 @@ export default function Memories() {
                   onNeedBlame={() => ensureBlame(file.path)}
                   onSave={(content, message, nextPath) => void save(content, message, nextPath)}
                 />
-              ) : awaitingFirstMemory ? (
-                phase ? <EmptyBook scope={scope} phase={phase} /> : null
               ) : (
                 <p className="memory-empty">{emptyCopy}</p>
               )}
@@ -643,6 +650,14 @@ function commitsUrl(scope: MemoryScope): string {
 
 function treeUrl(scope: MemoryScope): string {
   return scope === "user" ? "/api/memories/tree?scope=user" : "/api/memories/tree";
+}
+
+/** Directory indexes are not lessons. A book of only these stays on the seeding screen. */
+function hasTopicFile(files: { path: string }[]): boolean {
+  return files.some((file) => {
+    const name = file.path.slice(file.path.lastIndexOf("/") + 1);
+    return name !== "MEMORY.md" && name !== "README.md";
+  });
 }
 
 /** What an empty book should tell the reader, from how far session upload has gotten. */
@@ -704,7 +719,16 @@ function pickFile(store: MemoryStore | null, requested: string | null): MemoryFi
   if (named) {
     return named;
   }
-  return store.files.find((item) => item.path === "README.md") ?? store.files[0] ?? null;
+  return rootFile(store) ?? null;
+}
+
+// Books seeded before the rename keep their root file as README.md.
+function rootFile(store: MemoryStore) {
+  return (
+    store.files.find((item) => item.path === "MEMORY.md") ??
+    store.files.find((item) => item.path === "README.md") ??
+    store.files[0]
+  );
 }
 
 function editorAuthor(me: Me | null): MemoryAuthor {

@@ -26,7 +26,7 @@ TEAM_AREAS: tuple[str, ...] = (
     "path-to-prod",
 )
 
-# Seeded into an empty team book. Indexes only: the lessons themselves are written later.
+# Index text for an empty team book. Init does not publish this on its own.
 TEAM_LAYOUT: tuple[tuple[str, str], ...] = (
     (
         ROOT_FILE,

@@ -621,6 +621,39 @@ class UpgradeTests(InstallTestCase):
         return (self.home / ".config/opencode/plugins/cadri.ts").read_text()
 
 
+class SeedWindowTests(unittest.TestCase):
+    def test_the_smaller_set_is_the_day_window_when_it_is_shorter(self):
+        now = 1_700_000_000.0
+        day = 24 * 60 * 60
+        recent = [self.ref(f"r{i}", now - day) for i in range(40)]
+        older = [self.ref(f"o{i}", now - 90 * day) for i in range(80)]
+        chosen, in_window, newest = cli.select_seed_sessions(older + recent, now, 60, 100)
+        self.assertEqual((in_window, newest, len(chosen)), (40, 100, 40))
+        self.assertTrue(all(item.thread_id.startswith("r") for item in chosen))
+
+    def test_the_smaller_set_is_the_recency_cap_when_the_window_is_larger(self):
+        now = 1_700_000_000.0
+        many = [self.ref(f"n{i}", now - i * 3600) for i in range(150)]
+        chosen, in_window, newest = cli.select_seed_sessions(list(reversed(many)), now, 60, 100)
+        self.assertEqual((in_window, newest, len(chosen)), (150, 100, 100))
+        self.assertEqual({item.thread_id for item in chosen}, {f"n{i}" for i in range(100)})
+
+    def test_an_override_uses_the_numbers_it_is_given(self):
+        now = 1_700_000_000.0
+        day = 24 * 60 * 60
+        refs = [self.ref(f"d{i}", now - i * day) for i in range(30)]
+        chosen, in_window, newest = cli.select_seed_sessions(refs, now, 10, 10)
+        self.assertEqual((in_window, newest, len(chosen)), (11, 10, 10))
+        self.assertEqual(cli.resolve_discover_bounds(None, None, True), (60, 100))
+        self.assertEqual(cli.resolve_discover_bounds(10, 10, True), (10, 10))
+        self.assertEqual(cli.resolve_discover_bounds(None, None, False), (30.0, 50))
+
+    def ref(self, thread_id: str, updated_at: float):
+        from cadri.discover.types import SessionRef
+
+        return SessionRef("cursor", thread_id, Path(thread_id), updated_at)
+
+
 class DetectionTests(InstallTestCase):
     def test_config_dirs_count_without_sessions(self):
         (self.home / ".cursor").mkdir()

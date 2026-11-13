@@ -37,14 +37,14 @@ function explainer(scope: MemoryScope, phase: EmptyPhase): string {
       "",
       "Cadri builds memories from your agents' sessions, and none have arrived yet.",
       "",
-      "Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri, signs this machine in, uploads recent sessions, and then writes your first memories.",
+      "Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri, signs this machine in, uploads recent sessions, and then writes your first memories. Seeding usually takes several minutes.",
     ].join("\n");
   }
   if (phase === "seeding") {
     return [
       "# Memories are being populated",
       "",
-      "Your agent is reading recent sessions and writing the lessons worth keeping into your team and personal memories. This usually takes several minutes. This page refreshes on its own.",
+      "Your agent is reading recent sessions and writing the lessons worth keeping into your team and personal memories. This usually takes several minutes, and longer when there are many sessions. This page refreshes on its own.",
       "",
       "Haven't installed Cadri on this machine yet? Paste this prompt into your agent.",
     ].join("\n");
@@ -53,7 +53,7 @@ function explainer(scope: MemoryScope, phase: EmptyPhase): string {
   return [
     `# ${title}`,
     "",
-    "If your agent didn't run the seed step, ask it to load the `cadri-memory-seed` skill and follow it. You can also upload a Markdown file from the file list.",
+    "Seeding may still be running, or it finished without a lesson worth keeping. Ask your agent to load the `cadri-memory-seed` skill if this stays empty. You can also upload a Markdown file from the file list.",
     "",
     "Paste this prompt into your agent if Cadri isn't installed on this machine yet.",
   ].join("\n");

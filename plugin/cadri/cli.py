@@ -27,6 +27,9 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 BACKFILL_WINDOW_SECONDS = 30 * 24 * 60 * 60
 BACKFILL_MAX_SESSIONS = 200
 BACKFILL_MAX_BYTES = 24 * 1024 * 1024
+# Seed from whichever set is smaller. A tighter window on `cadri discover --seed` overrides these.
+SEED_DAYS = 60
+SEED_LIMIT = 100
 HARNESS_NAMES = {
     "claude_code": "Claude Code",
     "cursor": "Cursor",
@@ -174,20 +177,19 @@ def clone_books(url: str | None) -> str:
         )
     started = time.monotonic()
     paths = []
-    seeded = False
     try:
         for scope in ("team", "user"):
             book = bk.open_book(scope, url)
             bk.ensure_clone(book)
             paths.append(str(book.path))
-            if scope == "team" and editapi.scaffold_team(book):
-                seeded = True
     except bk.MemoryFailure as exc:
         if paths:
             return f"Memory: cloned {', '.join(paths)}, then failed ({exc})"
         return f"Memory: not cloned ({exc}); run `cadri memory clone` later"
-    extra = ", and seeded the empty team book" if seeded else ""
-    return f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}{extra}"
+    return (
+        f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}. "
+        "Books stay empty until seeding writes the first memories."
+    )
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -222,8 +224,16 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(clone_books(args.url))
     if "codex" in harnesses:
         print("Codex runs new hooks only after you trust them: open Codex, type /hooks, and trust the Cadri hooks.")
-    print("Done. New sessions start with team and personal memory loaded.")
-    print("Next: load the cadri-memory-seed skill to turn these sessions into memories.")
+    chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), SEED_DAYS, SEED_LIMIT)
+    print(
+        f"Seed window: {len(chosen)} sessions "
+        f"({in_window} in the last {SEED_DAYS} days, {newest} most recent)."
+    )
+    print("Seeding usually takes several minutes. Do it in this same task, before you stop.")
+    print(
+        "Next: follow the cadri-memory-seed skill. "
+        "If the user asked for a smaller window, pass it to `cadri discover --seed`."
+    )
     return 0
 
 
@@ -246,9 +256,36 @@ def cmd_hook(args: argparse.Namespace) -> int:
     return hook_run.run(None, args.target, sys.stdin.read())
 
 
+def resolve_discover_bounds(days: float | None, limit: int | None, seed: bool) -> tuple[float, int]:
+    if seed:
+        return (SEED_DAYS if days is None else days, SEED_LIMIT if limit is None else limit)
+    return (30.0 if days is None else days, 50 if limit is None else limit)
+
+
+def select_seed_sessions(refs: list[SessionRef], now: float, days: float, limit: int) -> tuple[list[SessionRef], int, int]:
+    """The smaller of sessions in the last `days` and the `limit` most recent.
+
+    Both sets are prefixes of a newest-first list, so the smaller one is that prefix.
+    Returns (chosen, how many fall in the day window, how many the recency cap kept).
+    """
+    ordered = sorted(refs, key=lambda item: item.updated_at, reverse=True)
+    since = now - days * 24 * 60 * 60
+    in_window = [ref for ref in ordered if ref.updated_at >= since]
+    newest = ordered[: max(limit, 0)]
+    chosen = in_window if len(in_window) <= len(newest) else newest
+    return chosen, len(in_window), len(newest)
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
-    since = time.time() - args.days * 24 * 60 * 60
-    refs = [ref for ref in discover_all() if ref.updated_at >= since][: args.limit]
+    days, limit = resolve_discover_bounds(args.days, args.limit, args.seed)
+    chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), days, limit)
+    refs = chosen
+    if args.seed:
+        summary = (
+            f"seed window: {len(chosen)} sessions "
+            f"({in_window} in the last {days:g} days, {newest} most recent)"
+        )
+        print(summary, file=sys.stderr)
     if args.json:
         rows = [
             {
@@ -437,8 +474,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     discover = sub.add_parser("discover", help="List local agent sessions, newest first")
     discover.add_argument("--json", action="store_true")
-    discover.add_argument("--limit", type=int, default=50)
-    discover.add_argument("--days", type=float, default=30)
+    discover.add_argument("--seed", action="store_true", help="Sessions to seed: the smaller of the day window and the recency cap")
+    discover.add_argument("--limit", type=int, default=None, help="Recency cap (default 50, or 100 with --seed)")
+    discover.add_argument("--days", type=float, default=None, help="Day window (default 30, or 60 with --seed)")
     discover.set_defaults(func=cmd_discover)
 
     show = sub.add_parser("show", help="Print one local session")

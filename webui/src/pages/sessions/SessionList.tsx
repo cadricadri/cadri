@@ -17,6 +17,9 @@ import {
   type SessionRow,
 } from "./types";
 
+/** Matches the memories page: a full seed can run well past a few minutes. */
+const SEEDING_HINT_MS = 2 * 60 * 60 * 1000;
+
 export default function SessionList() {
   const session = useSession();
   const navigate = useNavigate();
@@ -26,10 +29,19 @@ export default function SessionList() {
   const [phase, setPhase] = useState<"loading" | "done">("loading");
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [commits, setCommits] = useState<Array<{ at: string; book: MemoryBook }>>([]);
+  const [commitsReady, setCommitsReady] = useState(false);
   const request = useRef(0);
   const seeding = rows.length === 0 && phase === "done" && status.startsWith("Seeding");
   const filters = readFilters(params);
   const [now, setNow] = useState(() => Date.now());
+  const oldestUpload = rows.reduce((oldest, row) => Math.min(oldest, Date.parse(row.created_at)), Number.POSITIVE_INFINITY);
+  const memoryPending =
+    phase === "done" &&
+    rows.length > 0 &&
+    commitsReady &&
+    commits.length === 0 &&
+    Number.isFinite(oldestUpload) &&
+    now - oldestUpload < SEEDING_HINT_MS;
   const [sort, setSort] = useState<Sort>({ key: "end", dir: "desc" });
 
   const load = useCallback(async () => {
@@ -69,6 +81,7 @@ export default function SessionList() {
   }, [session]);
 
   const loadCommits = useCallback(async () => {
+    setCommitsReady(false);
     const books: MemoryBook[] = ["team", "user"];
     const logs = await Promise.all(
       books.map((book) =>
@@ -78,6 +91,7 @@ export default function SessionList() {
       ),
     );
     setCommits(logs.flat());
+    setCommitsReady(true);
   }, [session]);
 
   useEffect(() => {
@@ -179,6 +193,12 @@ export default function SessionList() {
           <p className="status" role="status">
             {status || (phase === "loading" && rows.length === 0 ? "Loading…" : count)}
           </p>
+          {memoryPending ? (
+            <p className="hint">
+              Memories are still being written from these sessions. That usually takes several minutes. The Memories
+              page updates when they land.
+            </p>
+          ) : null}
           {rows.length > 0 ? (
             <div className="table-scroll">
               <table className="session-table">

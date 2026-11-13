@@ -1,8 +1,7 @@
-"""Writes through the server's edit API (`cadri memory write`, seeding).
+"""Writes through the server's edit API (`cadri memory write`).
 
-Steady-state agents edit files in the clone and run `cadri memory push` instead
-(see push.py). This path stays for the onboarding skills and for seeding a book
-that has no commits yet.
+Steady-state agents, including the install seed, edit files in the clone and run
+`cadri memory push` instead (see push.py).
 """
 
 from __future__ import annotations
@@ -73,7 +72,12 @@ def write(book: Book, path: str, content: str, message: str, agent: str | None, 
 
 
 def scaffold_team(book: Book) -> bool:
-    """Write the team directory indexes when the book has no commits yet. Returns whether it wrote."""
+    """Publish the team directory indexes when the book has no commits. Returns whether it wrote.
+
+    Init does not call this. An index-only commit has no lessons, and the memories
+    page keeps showing the seeding instructions until a topic file exists. The seed
+    writes indexes in the same push as the first lessons.
+    """
     if book.scope != "team" or local_head(book):
         return False
     status = commit_files(book, TEAM_LAYOUT, "Seed team memory layout", "cadri-init", session=None, quiet=True)

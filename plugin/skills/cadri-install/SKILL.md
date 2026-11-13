@@ -17,7 +17,9 @@ description: Install Cadri on this machine by following cadri.io/docs/installati
    - Every agent it lists should show where its hooks went. Report any that say "not installed" and why.
    - If Codex is listed, tell the user to open Codex, type `/hooks`, and trust the Cadri hooks.
    - If memory was skipped because git is missing, ask the user to run `xcode-select --install`, then run `cadri memory clone` and `cadri memory clone --scope user`.
-4. Tell the user their sessions are showing up on the Sessions page in Cadri.
-5. Load the `cadri-memory-seed` skill and follow it.
+4. Tell the user their sessions are showing up on the Sessions page in Cadri. The page opens as soon as the first upload lands. Seeding continues after that.
+5. Before you read any sessions, tell the user that seeding memory usually takes several minutes, and longer when the window is large. Then load the `cadri-memory-seed` skill and finish it in this same task. `cadri init` returning is not the end of the install.
+
+If the user's message names a tighter seed window, pass it through to that skill. Otherwise the default is whichever is smaller: the last 60 days, or the 100 most recent sessions.
 
 To remove Cadri's hooks and skills later: `cadri uninstall`.

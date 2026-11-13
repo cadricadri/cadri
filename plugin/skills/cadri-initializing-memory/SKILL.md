@@ -1,6 +1,6 @@
 ---
 name: cadri-initializing-memory
-description: Comprehensive guide for initializing or reorganizing agent memory. Load this skill when running /init, when the user asks you to set up your memory, or when you need guidance on creating effective memory files.
+description: Reorganize an existing Cadri memory book. Use when the user asks to restructure memory or run a deep memory init. A fresh Cadri install uses cadri-memory-seed instead.
 ---
 
 # Memory Initialization
@@ -30,7 +30,7 @@ Validation enforces these; the server also rejects a file over 20,000 characters
 - No file and directory sharing a stem (`human.md` beside `human/`). Skills live at `skills/{skill_name}/SKILL.md` and stay out of memory indexes.
 - **Team book top-level directories are fixed:** `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`. Subfolders under those are free-form.
 
-The team book from `cadri init` already has those six directories. Put a lesson in the directory a future search would look in. Do not paste it into the root `MEMORY.md`.
+Create a missing top-level directory when the first lesson needs it, in the same push as that lesson. Put a lesson in the directory a future search would look in. Do not paste it into the root `MEMORY.md`.
 
 **Budget**: keep `MEMORY.md` short — every session pays for it (Cadri trims it past about 6,000 characters). When it crowds that, move detail into an indexed child directory and leave a link — don't delete it.
 

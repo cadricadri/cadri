@@ -355,8 +355,10 @@ function InstallGate({
       <div className="panel install-panel">
         <h1>Connect your coding agents</h1>
         <p className="hint">
-          Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent will follow the
-          install docs, sign this machine in once, and backfill recent sessions.
+          Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri,
+          signs this machine in, and uploads recent sessions. Seeding memory from those sessions
+          usually takes several minutes. This page opens Cadri as soon as the first sessions arrive,
+          while seeding continues. Edit the prompt to use a smaller window.
         </p>
         <pre className="install-prompt">{INSTALL_PROMPT}</pre>
         <div className="form-actions">
