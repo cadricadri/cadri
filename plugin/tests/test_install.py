@@ -22,8 +22,9 @@ sys.path.insert(0, str(PLUGIN))
 from cadri import auth as cadri_auth  # noqa: E402
 from cadri import cli  # noqa: E402
 from cadri.discover import codex, cursor, opencode  # noqa: E402
-from cadri.install import bundles, config, legacy  # noqa: E402
+from cadri.install import bundles, config  # noqa: E402
 
+# Older hook entries named only the harness; install still recognizes and replaces them.
 LEGACY_COMMAND = "/usr/bin/python3 /opt/cadri/plugin/bin/cadri_cli.py hook {harness}"
 NODE = shutil.which("node")
 
@@ -171,8 +172,8 @@ class ClaudeInstallTests(InstallTestCase):
                 "permissions": {"allow": ["Write(~/.cadri/memory/**)", "Bash(ls:*)"]},
             },
         )
-        (self.home / ".claude/skills/maintaining-core-memory").mkdir(parents=True)
-        (self.home / ".claude/skills/maintaining-core-memory/SKILL.md").write_text("old")
+        (self.home / ".claude/skills/cadri-memory").mkdir(parents=True)
+        (self.home / ".claude/skills/cadri-memory/SKILL.md").write_text("stale fallback copy")
         [line] = self.install("claude_code")
         self.assertIn("plugin cadri installed", line)
         marketplace = self.home / ".cadri/plugins/claude"
@@ -185,7 +186,7 @@ class ClaudeInstallTests(InstallTestCase):
         self.assertNotIn("hooks", settings)
         self.assertNotIn("Write(~/.cadri/memory/**)", settings["permissions"]["allow"])
         self.assertIn("Bash(ls:*)", settings["permissions"]["allow"])
-        self.assertFalse((self.home / ".claude/skills/maintaining-core-memory").exists())
+        self.assertFalse((self.home / ".claude/skills/cadri-memory").exists())
 
         log.unlink()
         bundles.uninstall(self.home)
@@ -228,14 +229,6 @@ class ClaudeInstallTests(InstallTestCase):
         [line] = self.install("claude_code")
         self.assertIn("not installed", line)
         self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
-
-    def test_removes_paths_from_earlier_releases(self):
-        (self.home / ".claude/plugins/cadri/hooks").mkdir(parents=True)
-        self.write(".cursor/cadri-mcp.json", {})
-        legacy.remove_legacy(self.home)
-        self.assertFalse((self.home / ".claude/plugins/cadri").exists())
-        self.assertFalse((self.home / ".cursor/cadri-mcp.json").exists())
-
 
 class CursorInstallTests(InstallTestCase):
     def plugin(self) -> Path:
@@ -608,12 +601,11 @@ class OpenCodeInstallTests(InstallTestCase):
 
 
 class UpgradeTests(InstallTestCase):
-    def test_install_replaces_what_earlier_releases_wrote(self):
+    def test_install_replaces_previous_hook_entries_and_skill_copies(self):
         self.write(".claude/settings.json", {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": LEGACY_COMMAND.format(harness="claude_code")}]}]}})
         self.write(".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": LEGACY_COMMAND.format(harness="codex")}]}]}})
         self.write(".config/opencode/plugins/cadri.ts", "// cadri-managed-opencode-plugin\nexport const Old = 1\n")
-        for name in ("maintaining-core-memory", "syncing-memory-filesystem", "cadri-memory"):
-            self.write(f".agents/skills/{name}/SKILL.md", "old")
+        self.write(".agents/skills/cadri-memory/SKILL.md", "stale")
         self.install("claude_code", "codex", "cursor", "opencode")
         claude = self.read(".claude/settings.json")["hooks"]
         self.assertNotIn("SessionEnd", claude)
@@ -623,6 +615,7 @@ class UpgradeTests(InstallTestCase):
         self.assertNotIn("Old", self.plugin_text())
         skills = sorted(p.name for p in (self.home / ".agents/skills").iterdir())
         self.assertEqual(skills, sorted(bundles.SHIPPED_SKILLS))
+        self.assertNotEqual((self.home / ".agents/skills/cadri-memory/SKILL.md").read_text(), "stale")
 
     def plugin_text(self) -> str:
         return (self.home / ".config/opencode/plugins/cadri.ts").read_text()

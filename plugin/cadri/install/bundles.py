@@ -23,13 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..state import cadri_home
-from . import legacy, permissions
+from . import permissions
 from .config import (
     HARNESS_NAMES,
     InstallError,
     claude_dir,
     codex_dir,
     opencode_dir,
+    remove_tree,
     set_grouped_hooks,
     strip_cadri_hooks,
     strip_cursor_hooks,
@@ -47,8 +48,7 @@ SHIPPED_SKILLS = (
     "cadri-memory-repair",
     "cadri-install",
     "cadri-memory-seed",
-    "initializing-memory",
-    "context-doctor",
+    "cadri-initializing-memory",
 )
 KEEPER = "cadri-memory-keeper"
 KEEPER_DESCRIPTION = (
@@ -232,6 +232,14 @@ def copy_skills(dest: Path) -> list[Path]:
     return copied
 
 
+def remove_skill_copies(root: Path) -> None:
+    """Remove skill directories this install copies into a harness skills root."""
+    for name in SHIPPED_SKILLS:
+        target = root / name
+        if (target / "SKILL.md").is_file() and not target.is_symlink():
+            remove_tree(target)
+
+
 def fresh(path: Path) -> Path:
     if path.exists():
         shutil.rmtree(path)
@@ -336,7 +344,7 @@ def remove_claude_fallback(home: Path) -> bool:
     """Remove hooks, skill copies, and the keeper written outside the plugin."""
     base = claude_dir(home)
     removed = strip_cadri_hooks(base / "settings.json")
-    legacy.remove_skill_copies(base / "skills")
+    remove_skill_copies(base / "skills")
     agent = base / "agents" / f"{KEEPER}.md"
     if agent.is_file() and MARKER in agent.read_text(encoding="utf-8", errors="replace"):
         agent.unlink()
@@ -387,7 +395,6 @@ def install_codex(home: Path) -> str:
     if agent.exists() and MARKER not in agent.read_text(encoding="utf-8", errors="replace"):
         raise InstallError(f"{agent} exists and was not written by Cadri; move it aside and run cadri init again")
     write_text(agent, keeper_toml())
-    legacy.remove_skill_copies(home / ".agents" / "skills")
     copy_skills(home / ".agents" / "skills")
     note = permissions.set_codex(base / "config.toml", install=True)
     return f"Codex: hooks in {base / 'hooks.json'} (open /hooks in Codex once and trust them){note}"
@@ -443,7 +450,6 @@ INSTALLERS = {
 def install(harnesses: list[str], home: Path | None = None) -> list[str]:
     home = home or Path.home()
     write_shim()
-    legacy.remove_legacy(home)
     lines = []
     for name in harnesses:
         try:
@@ -451,7 +457,7 @@ def install(harnesses: list[str], home: Path | None = None) -> list[str]:
         except (InstallError, OSError) as exc:
             lines.append(f"{HARNESS_NAMES.get(name, name)}: not installed: {exc}")
     if "codex" not in harnesses:
-        legacy.remove_skill_copies(home / ".agents" / "skills")
+        remove_skill_copies(home / ".agents" / "skills")
     return lines
 
 
@@ -464,8 +470,7 @@ def uninstall(home: Path | None = None) -> list[str]:
                 removed.append(label)
         except (InstallError, OSError) as exc:
             removed.append(f"{label} (failed: {exc})")
-    legacy.remove_skill_copies(home / ".agents" / "skills")
-    legacy.remove_legacy(home)
+    remove_skill_copies(home / ".agents" / "skills")
     return removed
 
 

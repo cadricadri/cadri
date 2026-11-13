@@ -93,3 +93,5 @@ cadri hook <event> --harness <name>       # run by the harnesses
 ```sh
 python3 -m unittest discover -s plugin/tests
 ```
+
+Harness-level e2e on a clean macOS VM (Tart), not the host: `scripts/vm-e2e`. Directions and harness gotchas live in the sibling checkout at `cadri-cloud/memories/plugin_vm_e2e.md`.
