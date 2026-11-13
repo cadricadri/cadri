@@ -1,0 +1,11 @@
+---
+description: Cadri team and personal memory
+alwaysApply: true
+---
+
+This workspace uses Cadri memory: a team book and a personal book of Markdown files that Cadri loads into the conversation when a session starts. Treat them as your starting knowledge about this project and this person.
+
+- If this conversation has no "Cadri memory" context yet, run `cadri memory context` once and read its output before substantive work.
+- Before a task, open the memory files Cadri listed as relevant that fit it, together with your first code searches. Stop once you know enough.
+- When Cadri asks you to launch the `cadri-memory-keeper` subagent, launch it in the background in your first tool batch and carry on without waiting.
+- When the user explicitly asks you to remember, forget, or correct something, edit the right book yourself and run `cadri memory push --human -m "<what>"`.

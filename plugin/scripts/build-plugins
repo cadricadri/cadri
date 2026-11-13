@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Build each harness's Cadri bundle (Claude Code, Codex, Cursor, OpenCode) into <dest>,
+# default plugin/dist/plugins. Hooks in these bundles run "$HOME/.cadri/bin/cadri";
+# `cadri init` builds the same bundles with the absolute path of this machine's shim.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+dest="${1:-$here/dist/plugins}"
+cd "$here"
+python3 -m cadri.install.bundles "$dest"

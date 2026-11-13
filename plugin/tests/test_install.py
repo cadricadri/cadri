@@ -1,13 +1,15 @@
-"""Hook installs for each harness, and the installed hook commands run end to end."""
+"""Bundles and installs for each harness, and the installed hook commands run end to end."""
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -17,29 +19,22 @@ from test_plugin import PluginTestCase
 PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PLUGIN))
 
-import importlib.util
+from cadri import auth as cadri_auth  # noqa: E402
+from cadri import cli  # noqa: E402
+from cadri.discover import codex, cursor, opencode  # noqa: E402
+from cadri.install import bundles, config, legacy  # noqa: E402
 
-from shared import cadri_auth, install  # noqa: E402
-from shared.discover import codex, cursor, opencode  # noqa: E402
-
-
-def load_cli():
-    spec = importlib.util.spec_from_file_location("cadri_cli", PLUGIN / "bin" / "cadri_cli.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+LEGACY_COMMAND = "/usr/bin/python3 /opt/cadri/plugin/bin/cadri_cli.py hook {harness}"
+NODE = shutil.which("node")
 
 
 class InstallTestCase(PluginTestCase):
     def setUp(self):
         super().setUp()
-        patcher = mock.patch.dict(
-            os.environ,
-            {"HOME": str(self.home), "PATH": "/nonexistent"},
-        )
+        patcher = mock.patch.dict(os.environ, {"HOME": str(self.home), "PATH": "/nonexistent"})
         patcher.start()
         self.addCleanup(patcher.stop)
-        for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"):
+        for key in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "CADRI_HOME"):
             os.environ.pop(key, None)
 
     def read(self, relative: str) -> dict:
@@ -48,46 +43,160 @@ class InstallTestCase(PluginTestCase):
     def write(self, relative: str, data: object) -> Path:
         path = self.home / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        path.write_text(data if isinstance(data, str) else json.dumps(data), encoding="utf-8")
         return path
 
     def run_hook(self, command: str, event: dict, foreground: bool = True) -> subprocess.CompletedProcess:
-        env = self.env()
+        env = self.env(PATH="/usr/bin:/bin")
         if not foreground:
             env.pop("CADRI_HOOK_FOREGROUND")
-        return subprocess.run(
-            command,
-            shell=True,
-            input=json.dumps(event),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        return subprocess.run(command, shell=True, input=json.dumps(event), env=env, capture_output=True, text=True, timeout=30)
+
+    def install(self, *harnesses: str) -> list[str]:
+        return bundles.install(list(harnesses), self.home)
+
+    def fake_cli(self, name: str) -> Path:
+        """An executable `name` on PATH that records its arguments."""
+        bin_dir = self.home / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        log = self.home / f"{name}.log"
+        script = bin_dir / name
+        script.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n', encoding="utf-8")
+        script.chmod(0o755)
+        os.environ["PATH"] = str(bin_dir)
+        return log
+
+
+def hook_commands(groups: dict) -> list[dict]:
+    return [hook for entries in groups.values() for group in entries for hook in group.get("hooks", [group])]
+
+
+class BundleTests(InstallTestCase):
+    def test_release_bundles_call_the_shim_with_explicit_timeouts(self):
+        dist = self.home / "dist"
+        bundles.main([str(dist)])
+        claude = json.loads((dist / "claude/cadri/hooks/hooks.json").read_text())["hooks"]
+        codex_hooks = json.loads((dist / "codex/hooks.json").read_text())["hooks"]
+        cursor_hooks = json.loads((dist / "cursor/hooks/hooks.json").read_text())["hooks"]
+        for name, groups in (("claude", claude), ("codex", codex_hooks), ("cursor", cursor_hooks)):
+            self.assertNotIn("SessionEnd", groups)
+            self.assertNotIn("sessionEnd", groups)
+            for hook in hook_commands(groups):
+                self.assertTrue(hook["command"].startswith('"$HOME/.cadri/bin/cadri" hook '), hook)
+                self.assertTrue(hook["command"].endswith(f"--harness {name}"), hook)
+                self.assertIsInstance(hook["timeout"], int)
+        self.assertEqual(claude["PostToolUse"][0]["matcher"], "Write|Edit|MultiEdit|NotebookEdit")
+        self.assertTrue(claude["PostToolUse"][0]["hooks"][0]["async"])
+        self.assertEqual(codex_hooks["SessionStart"][0]["hooks"][0]["additionalContextLimit"], 4000)
+        self.assertEqual(set(cursor_hooks), {h.event for h in bundles.CURSOR_HOOKS})
+
+        for skills in (dist / "claude/cadri/skills", dist / "cursor/skills", dist / "codex/skills"):
+            self.assertEqual(sorted(p.name for p in skills.iterdir()), sorted(bundles.SHIPPED_SKILLS))
+        marketplace = json.loads((dist / "claude/.claude-plugin/marketplace.json").read_text())
+        self.assertEqual(marketplace["plugins"][0]["source"], "./cadri")
+        manifest = json.loads((dist / "cursor/.cursor-plugin/plugin.json").read_text())
+        for key in ("rules", "skills", "agents", "hooks"):
+            self.assertTrue((dist / "cursor" / manifest[key]).exists(), key)
+
+    def test_keeper_agents_use_each_harness_format(self):
+        dist = self.home / "dist"
+        bundles.main([str(dist)])
+        claude = (dist / "claude/cadri/agents/cadri-memory-keeper.md").read_text()
+        self.assertTrue(claude.startswith("---\nname: cadri-memory-keeper\n"))
+        self.assertIn("background: true", claude)
+        self.assertIn("`cadri:cadri-memory-repair`", claude)
+        self.assertIn("cadri memory push", claude)
+        cursor_agent = (dist / "cursor/agents/cadri-memory-keeper.md").read_text()
+        self.assertIn("is_background: true", cursor_agent)
+        role = tomllib.loads((dist / "codex/agents/cadri-memory-keeper.toml").read_text())
+        self.assertEqual(role["name"], "cadri-memory-keeper")
+        self.assertIn("cadri memory push", role["developer_instructions"])
+        opencode_agent = (dist / "opencode/agents/cadri-memory-keeper.md").read_text()
+        self.assertTrue(opencode_agent.startswith("---\n# cadri-managed"))
+        self.assertIn('resource: "~/.cadri/memory/**"', opencode_agent)
+        plugin = (dist / "opencode/cadri.ts").read_text()
+        self.assertIn('(["$HOME/.cadri/bin/cadri"] as string[])', plugin)
+        self.assertIn('expand("$HOME/.cadri/plugins/opencode/skills")', plugin)
+
+    def test_shim_runs_this_checkout(self):
+        shim = bundles.write_shim()
+        self.assertEqual(shim, self.home / ".cadri/bin/cadri")
+        self.assertTrue(os.access(shim, os.X_OK))
+        result = subprocess.run([str(shim), "--help"], capture_output=True, text=True, env=self.env(), timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("memory", result.stdout)
 
 
 class ClaudeInstallTests(InstallTestCase):
-    def test_merges_into_existing_settings_and_reinstalls_cleanly(self):
+    def command(self, event: str) -> str:
+        return self.read(".claude/settings.json")["hooks"][event][-1]["hooks"][0]["command"]
+
+    def test_without_the_cli_hooks_go_into_settings_and_uninstall_restores_them(self):
         user_hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
-        self.write(".claude/settings.json", {"model": "opus", "hooks": {"Stop": [user_hook]}})
-        install.install_harness("claude_code", self.home)
-        install.install_harness("claude_code", self.home)
+        original = {"model": "opus", "hooks": {"Stop": [user_hook]}, "permissions": {"allow": ["Bash(ls:*)"]}}
+        self.write(".claude/settings.json", original)
+        self.install("claude_code")
+        [line] = self.install("claude_code")
+        self.assertIn("hooks in", line)
         settings = self.read(".claude/settings.json")
         self.assertEqual(settings["model"], "opus")
-        self.assertEqual(set(settings["hooks"]), set(install.CLAUDE_EVENTS))
+        self.assertEqual(set(settings["hooks"]), {h.event for h in bundles.CLAUDE_HOOKS})
         self.assertEqual(settings["hooks"]["Stop"][0], user_hook)
-        for event in install.CLAUDE_EVENTS:
-            cadri = [g for g in settings["hooks"][event] if install.is_cadri_command(g["hooks"][0]["command"])]
+        for event in settings["hooks"]:
+            cadri = [g for g in settings["hooks"][event] if config.is_cadri_command(g["hooks"][0]["command"])]
             self.assertEqual(len(cadri), 1, event)
+        memory = "~/.cadri/memory"
+        self.assertEqual(settings["permissions"]["additionalDirectories"], [memory])
+        allow = settings["permissions"]["allow"]
+        self.assertIn(f"Edit({memory}/**)", allow)
+        self.assertIn(f"Read({memory}/**)", allow)
+        self.assertIn("Read(~/.cadri/state/digests/**)", allow)
+        self.assertIn("Bash(cadri memory:*)", allow)
+        self.assertNotIn(f"Write({memory}/**)", allow)
+        self.assertTrue((self.home / ".claude/skills/cadri-memory/SKILL.md").is_file())
+        keeper = (self.home / ".claude/agents/cadri-memory-keeper.md").read_text()
+        self.assertIn("`cadri-memory-repair`", keeper)
 
-        install.uninstall_all(self.home)
-        self.assertEqual(self.read(".claude/settings.json"), {"model": "opus", "hooks": {"Stop": [user_hook]}})
+        bundles.uninstall(self.home)
+        self.assertEqual(self.read(".claude/settings.json"), original)
+        self.assertFalse((self.home / ".claude/skills/cadri-memory").exists())
+        self.assertFalse((self.home / ".claude/agents/cadri-memory-keeper.md").exists())
+
+    def test_with_the_cli_installs_the_plugin_from_a_local_marketplace(self):
+        log = self.fake_cli("claude")
+        self.write(
+            ".claude/settings.json",
+            {
+                "hooks": {"Stop": [{"hooks": [{"type": "command", "command": LEGACY_COMMAND.format(harness="claude_code")}]}]},
+                "permissions": {"allow": ["Write(~/.cadri/memory/**)", "Bash(ls:*)"]},
+            },
+        )
+        (self.home / ".claude/skills/maintaining-core-memory").mkdir(parents=True)
+        (self.home / ".claude/skills/maintaining-core-memory/SKILL.md").write_text("old")
+        [line] = self.install("claude_code")
+        self.assertIn("plugin cadri installed", line)
+        marketplace = self.home / ".cadri/plugins/claude"
+        self.assertEqual(
+            log.read_text().splitlines(),
+            [f"plugin marketplace add {marketplace}", "plugin install cadri@cadri --scope user"],
+        )
+        self.assertTrue((marketplace / "cadri/hooks/hooks.json").is_file())
+        settings = self.read(".claude/settings.json")
+        self.assertNotIn("hooks", settings)
+        self.assertNotIn("Write(~/.cadri/memory/**)", settings["permissions"]["allow"])
+        self.assertIn("Bash(ls:*)", settings["permissions"]["allow"])
+        self.assertFalse((self.home / ".claude/skills/maintaining-core-memory").exists())
+
+        log.unlink()
+        bundles.uninstall(self.home)
+        self.assertEqual(log.read_text().splitlines(), ["plugin uninstall cadri@cadri --scope user", "plugin marketplace remove cadri"])
+        self.assertFalse(marketplace.exists())
+        self.assertEqual(self.read(".claude/settings.json"), {"permissions": {"allow": ["Bash(ls:*)"]}})
 
     def test_installed_command_uploads_the_session(self):
-        install.install_harness("claude_code", self.home)
-        command = self.read(".claude/settings.json")["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.install("claude_code")
         event = {"session_id": "s1", "transcript_path": str(self.transcript), "hook_event_name": "Stop"}
-        result = self.run_hook(command, event)
+        result = self.run_hook(self.command("Stop"), event)
         self.assertEqual(result.returncode, 0, result.stderr)
         [upload] = self.uploads()
         self.assertEqual(upload["body"]["thread_id"], "s1")
@@ -95,20 +204,18 @@ class ClaudeInstallTests(InstallTestCase):
         self.assertEqual(upload["body"]["content"], '{"type":"user"}\n')
 
     def test_hook_without_cadri_url_uses_the_server_init_saved(self):
-        install.install_harness("claude_code", self.home)
+        self.install("claude_code")
         cadri_auth.save_url(self.server.url)
-        command = self.read(".claude/settings.json")["hooks"]["Stop"][0]["hooks"][0]["command"]
         event = {"session_id": "s1", "transcript_path": str(self.transcript), "hook_event_name": "Stop"}
         env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin", "CADRI_HOOK_FOREGROUND": "1"}
-        result = subprocess.run(command, shell=True, input=json.dumps(event), env=env, capture_output=True, text=True)
+        result = subprocess.run(self.command("Stop"), shell=True, input=json.dumps(event), env=env, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(self.uploads()), 1)
 
     def test_detached_hook_returns_before_the_upload(self):
-        install.install_harness("claude_code", self.home)
-        command = self.read(".claude/settings.json")["hooks"]["Stop"][0]["hooks"][0]["command"]
+        self.install("claude_code")
         event = {"session_id": "s1", "transcript_path": str(self.transcript), "hook_event_name": "Stop"}
-        result = self.run_hook(command, event, foreground=False)
+        result = self.run_hook(self.command("Stop"), event, foreground=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
         deadline = time.monotonic() + 15
@@ -117,48 +224,44 @@ class ClaudeInstallTests(InstallTestCase):
         self.assertEqual(len(self.uploads()), 1)
 
     def test_invalid_settings_are_left_alone(self):
-        path = self.home / ".claude" / "settings.json"
-        path.parent.mkdir(parents=True)
-        path.write_text("{not json", encoding="utf-8")
-        with self.assertRaises(install.InstallError):
-            install.install_harness("claude_code", self.home)
+        path = self.write(".claude/settings.json", "{not json")
+        [line] = self.install("claude_code")
+        self.assertIn("not installed", line)
         self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
-
-    def test_skills_land_where_each_harness_reads_them(self):
-        install.install_skills(self.home, ["claude_code", "cursor"])
-        for root in (".claude/skills", ".agents/skills"):
-            for name in ("cadri-install", "cadri-memory", "cadri-memory-seed"):
-                self.assertTrue((self.home / root / name / "SKILL.md").is_file(), f"{root}/{name}")
-        install.uninstall_all(self.home)
-        self.assertFalse((self.home / ".agents/skills/cadri-memory").exists())
 
     def test_removes_paths_from_earlier_releases(self):
         (self.home / ".claude/plugins/cadri/hooks").mkdir(parents=True)
         self.write(".cursor/cadri-mcp.json", {})
-        install.remove_legacy(self.home)
+        legacy.remove_legacy(self.home)
         self.assertFalse((self.home / ".claude/plugins/cadri").exists())
         self.assertFalse((self.home / ".cursor/cadri-mcp.json").exists())
 
 
 class CursorInstallTests(InstallTestCase):
-    def test_keeps_other_hooks_and_removes_the_file_it_created(self):
-        install.install_harness("cursor", self.home)
-        hooks = self.read(".cursor/hooks.json")
-        self.assertEqual(hooks["version"], 1)
-        self.assertEqual(set(hooks["hooks"]), set(install.CURSOR_EVENTS))
-        install.uninstall_all(self.home)
-        self.assertFalse((self.home / ".cursor/hooks.json").exists())
+    def plugin(self) -> Path:
+        return self.home / ".cursor/plugins/local/cadri"
 
+    def command(self, event: str) -> str:
+        return json.loads((self.plugin() / "hooks/hooks.json").read_text())["hooks"][event][0]["command"]
+
+    def test_installs_a_local_plugin_and_removes_old_user_hooks(self):
         mine = {"command": "./audit.sh", "failClosed": True}
-        self.write(".cursor/hooks.json", {"version": 1, "hooks": {"stop": [mine]}})
-        install.install_harness("cursor", self.home)
-        self.assertEqual(self.read(".cursor/hooks.json")["hooks"]["stop"][0], mine)
-        install.uninstall_all(self.home)
+        old = {"command": LEGACY_COMMAND.format(harness="cursor"), "timeout": 30}
+        self.write(".cursor/hooks.json", {"version": 1, "hooks": {"stop": [mine, old], "sessionEnd": [old]}})
+        self.install("cursor")
+        self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
+        rule = (self.plugin() / "rules/cadri.mdc").read_text()
+        self.assertIn("alwaysApply: true", rule)
+        self.assertIn("cadri memory context", rule)
+        self.assertTrue((self.plugin() / "skills/cadri-memory/SKILL.md").is_file())
+        self.assertIn(str(self.home / ".cadri/bin/cadri"), self.command("stop"))
+
+        bundles.uninstall(self.home)
+        self.assertFalse(self.plugin().exists())
         self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
 
     def test_stop_hook_finds_the_session_by_conversation_id(self):
-        install.install_harness("cursor", self.home)
-        command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
+        self.install("cursor")
         folder = self.home / ".cursor/projects/Users-me-app/agent-transcripts/c1"
         folder.mkdir(parents=True)
         (folder / "c1.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
@@ -169,7 +272,7 @@ class CursorInstallTests(InstallTestCase):
             "workspace_roots": ["/Users/me/app"],
             "model": "claude-opus",
         }
-        result = self.run_hook(command, event)
+        result = self.run_hook(self.command("stop"), event)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {})
         [upload] = self.uploads()
@@ -179,16 +282,21 @@ class CursorInstallTests(InstallTestCase):
         self.assertEqual(upload["body"]["model"], "claude-opus")
 
     def test_stop_hook_reads_the_model_from_composer_data(self):
-        install.install_harness("cursor", self.home)
-        command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
+        self.install("cursor")
         folder = self.home / ".cursor/projects/Users-me-app/agent-transcripts/c3"
         folder.mkdir(parents=True)
         (folder / "c3.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
         self.write_composer("c3", model_name="grok-4.7-high", model_id="grok-4.7")
-        result = self.run_hook(command, {"conversation_id": "c3", "hook_event_name": "stop"})
+        result = self.run_hook(self.command("stop"), {"conversation_id": "c3", "hook_event_name": "stop"})
         self.assertEqual(result.returncode, 0, result.stderr)
         [upload] = self.uploads()
         self.assertEqual(upload["body"]["model"], "grok-4.7-high")
+
+    def test_stop_without_a_transcript_uploads_nothing(self):
+        self.install("cursor")
+        result = self.run_hook(self.command("stop"), {"conversation_id": "c2", "hook_event_name": "stop"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uploads(), [])
 
     def test_backfill_sends_the_cursor_model(self):
         thread = "c4"
@@ -196,7 +304,6 @@ class CursorInstallTests(InstallTestCase):
         folder.mkdir(parents=True)
         (folder / f"{thread}.jsonl").write_text('{"role":"user","message":{"content":[]}}\n', encoding="utf-8")
         self.write_composer(thread, model_name="", model_id="claude-opus-5-5")
-        cli = load_cli()
         with mock.patch.object(cli, "post_session", return_value=(201, {})) as post:
             summary = cli.backfill("http://127.0.0.1:9", 0, 10, 10_000_000)
         self.assertEqual(summary["uploaded"], 1)
@@ -209,12 +316,8 @@ class CursorInstallTests(InstallTestCase):
     def test_model_name_ignores_a_missing_or_broken_record(self):
         self.assertIsNone(cursor.model_name(self.home, "missing"))
         self.write_composer("bad", model_name="not-json")
-        path = cursor.state_db(self.home)
-        connection = sqlite3.connect(path)
-        connection.execute(
-            "UPDATE cursorDiskKV SET value = ? WHERE key = ?",
-            ("{not json", "composerData:bad"),
-        )
+        connection = sqlite3.connect(cursor.state_db(self.home))
+        connection.execute("UPDATE cursorDiskKV SET value = ? WHERE key = ?", ("{not json", "composerData:bad"))
         connection.commit()
         connection.close()
         self.assertIsNone(cursor.model_name(self.home, "bad"))
@@ -224,32 +327,52 @@ class CursorInstallTests(InstallTestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path)
         connection.execute("CREATE TABLE IF NOT EXISTS cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)")
-        config = {"modelName": model_name}
+        model_config = {"modelName": model_name}
         if model_id is not None:
-            config["selectedModels"] = [{"modelId": model_id}]
+            model_config["selectedModels"] = [{"modelId": model_id}]
         connection.execute(
             "INSERT OR REPLACE INTO cursorDiskKV (key, value) VALUES (?, ?)",
-            (f"composerData:{thread_id}", json.dumps({"modelConfig": config})),
+            (f"composerData:{thread_id}", json.dumps({"modelConfig": model_config})),
         )
         connection.commit()
         connection.close()
 
-    def test_session_start_without_a_file_uploads_nothing(self):
-        install.install_harness("cursor", self.home)
-        command = self.read(".cursor/hooks.json")["hooks"]["stop"][0]["command"]
-        result = self.run_hook(command, {"conversation_id": "c2", "hook_event_name": "stop"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.uploads(), [])
-
 
 class CodexInstallTests(InstallTestCase):
-    def test_stop_hook_uploads_the_rollout(self):
-        install.install_harness("codex", self.home)
+    def test_installs_hooks_role_skills_and_writable_root(self):
+        self.write(".codex/config.toml", 'model = "gpt-5.6"\n')
+        self.install("codex")
         hooks = self.read(".codex/hooks.json")["hooks"]
-        self.assertEqual(set(hooks), set(install.CODEX_EVENTS))
+        self.assertEqual(set(hooks), {h.event for h in bundles.CODEX_HOOKS})
+        self.assertEqual(hooks["PostToolUse"][0]["matcher"], "apply_patch")
+        role = tomllib.loads((self.home / ".codex/agents/cadri-memory-keeper.toml").read_text())
+        self.assertEqual(role["name"], "cadri-memory-keeper")
+        settings = tomllib.loads((self.home / ".codex/config.toml").read_text())
+        self.assertEqual(settings["model"], "gpt-5.6")
+        self.assertEqual(settings["sandbox_workspace_write"]["writable_roots"], [str(self.home / ".cadri/memory")])
+        self.assertTrue((self.home / ".agents/skills/cadri-memory/SKILL.md").is_file())
+
+        bundles.uninstall(self.home)
+        self.assertEqual((self.home / ".codex/config.toml").read_text(), 'model = "gpt-5.6"\n')
+        self.assertEqual(self.read(".codex/hooks.json"), {})
+        self.assertFalse((self.home / ".codex/agents/cadri-memory-keeper.toml").exists())
+        self.assertFalse((self.home / ".agents/skills/cadri-memory").exists())
+
+    def test_an_existing_sandbox_table_is_left_for_the_user(self):
+        original = '[sandbox_workspace_write]\nnetwork_access = true\n'
+        self.write(".codex/config.toml", original)
+        [line] = self.install("codex")
+        self.assertIn("add ", line)
+        self.assertIn("writable_roots", line)
+        self.assertEqual((self.home / ".codex/config.toml").read_text(), original)
+
+    def test_stop_hook_prints_json_and_uploads_the_rollout(self):
+        self.install("codex")
+        hooks = self.read(".codex/hooks.json")["hooks"]
         event = {"session_id": "019a-codex", "transcript_path": str(self.transcript), "hook_event_name": "Stop"}
         result = self.run_hook(hooks["Stop"][0]["hooks"][0]["command"], event)
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {})
         [upload] = self.uploads()
         self.assertEqual(upload["body"]["thread_id"], "019a-codex")
         self.assertEqual(upload["body"]["harness"], "codex")
@@ -260,34 +383,33 @@ class CodexInstallTests(InstallTestCase):
 
 
 class OpenCodeInstallTests(InstallTestCase):
-    def test_plugin_runs_the_hook_with_the_session_export(self):
-        install.install_harness("opencode", self.home)
-        plugin = (self.home / ".config/opencode/plugins/cadri.ts").read_text(encoding="utf-8")
-        self.assertIn(install.OPENCODE_MARKER, plugin)
-        self.assertNotIn("__CADRI_COMMAND__", plugin)
-        command = json.loads(plugin.split("const COMMAND: string[] = ", 1)[1].splitlines()[0])
-        self.assertEqual(command[-2:], ["hook", "opencode"])
+    def plugin(self) -> Path:
+        return self.home / ".config/opencode/plugins/cadri.ts"
 
+    def command(self) -> list[str]:
+        line = self.plugin().read_text().split("const COMMAND: string[] = (", 1)[1].splitlines()[0]
+        return json.loads(line.split(" as string[]", 1)[0])
+
+    def test_stop_uploads_the_session_export(self):
+        self.install("opencode")
+        self.assertEqual(self.command(), [str(self.home / ".cadri/bin/cadri")])
+        self.assertTrue((self.home / ".config/opencode/agents/cadri-memory-keeper.md").is_file())
         db = self.home / ".local/share/opencode/opencode.db"
         db.parent.mkdir(parents=True)
         connection = sqlite3.connect(db)
         with connection:
             # OpenCode 1.19's layout, including the session_message table it leaves empty.
             connection.execute("CREATE TABLE session (id TEXT, title TEXT, time_updated INTEGER)")
-            connection.execute(
-                "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
-            )
+            connection.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
             connection.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
-            connection.execute(
-                "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)"
-            )
+            connection.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
             connection.execute("INSERT INTO session VALUES ('ses_1', 'ping', 1)")
             connection.execute("INSERT INTO message VALUES ('m1', 'ses_1', 1, '{\"role\":\"user\"}')")
             connection.execute("INSERT INTO part VALUES ('p1', 'm1', 'ses_1', 1, '{\"type\":\"text\",\"text\":\"ping\"}')")
         connection.close()
         result = subprocess.run(
-            command,
-            input=json.dumps({"session_id": "ses_1", "hook_event_name": "session.idle"}),
+            [*self.command(), "hook", "stop", "--harness", "opencode"],
+            input=json.dumps({"session_id": "ses_1"}),
             env=self.env(),
             capture_output=True,
             text=True,
@@ -298,19 +420,14 @@ class OpenCodeInstallTests(InstallTestCase):
         self.assertEqual(upload["body"]["harness"], "opencode")
         content = json.loads(upload["body"]["content"])
         self.assertEqual(content["info"]["title"], "ping")
-        self.assertEqual(
-            content["messages"],
-            [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "ping"}]}],
-        )
+        self.assertEqual(content["messages"], [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "ping"}]}])
 
     def test_exports_opencode_2_sessions(self):
         db = self.home / "opencode.db"
         connection = sqlite3.connect(db)
         with connection:
             connection.execute("CREATE TABLE session_v2 (id TEXT, title TEXT, time_updated INTEGER)")
-            connection.execute(
-                "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)"
-            )
+            connection.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
             connection.execute("INSERT INTO session_v2 VALUES ('ses_2', 'pong', 1)")
             connection.execute("INSERT INTO session_message VALUES ('b', 'ses_2', 'assistant', 2, '{\"text\":\"pong\"}')")
             connection.execute("INSERT INTO session_message VALUES ('a', 'ses_2', 'user', 1, '{\"text\":\"ping\"}')")
@@ -319,20 +436,203 @@ class OpenCodeInstallTests(InstallTestCase):
         self.assertEqual(content["info"]["title"], "pong")
         self.assertEqual(content["messages"], [{"text": "ping"}, {"text": "pong"}])
 
+    def test_lets_agents_use_memory_and_uninstall_restores_the_config(self):
+        original = {"model": "opencode/x", "permission": {"external_directory": "ask", "edit": "ask"}}
+        self.write(".config/opencode/opencode.json", original)
+        self.install("opencode")
+        permission = self.read(".config/opencode/opencode.json")["permission"]
+        memory = f"{self.home / '.cadri/memory'}/*"
+        reflections = f"{self.home / '.cadri/state/digests'}/*"
+        self.assertEqual(permission["external_directory"], {"*": "ask", memory: "allow", reflections: "allow"})
+        self.assertEqual(permission["bash"], {"cadri memory *": "allow"})
+        self.assertEqual(permission["edit"], "ask")
+        bundles.uninstall(self.home)
+        self.assertEqual(self.read(".config/opencode/opencode.json"), {**original, "$schema": "https://opencode.ai/config.json"})
+
+    def test_a_plain_jsonc_config_is_edited_in_place(self):
+        self.write(".config/opencode/opencode.jsonc", '{\n  "$schema": "https://opencode.ai/config.json"\n}\n')
+        self.install("opencode")
+        self.assertFalse((self.home / ".config/opencode/opencode.json").exists())
+        permission = self.read(".config/opencode/opencode.jsonc")["permission"]
+        self.assertEqual(permission["bash"], {"cadri memory *": "allow"})
+        bundles.uninstall(self.home)
+        self.assertEqual(self.read(".config/opencode/opencode.jsonc"), {"$schema": "https://opencode.ai/config.json"})
+
+    def test_a_jsonc_config_with_comments_gets_instructions_instead_of_edits(self):
+        path = self.write(".config/opencode/opencode.jsonc", "{ // mine\n}\n")
+        [line] = self.install("opencode")
+        self.assertIn("opencode.jsonc", line)
+        self.assertIn("cadri memory *", line)
+        self.assertEqual(path.read_text(), "{ // mine\n}\n")
+
     def test_refuses_to_overwrite_a_plugin_it_did_not_write(self):
-        path = self.home / ".config/opencode/plugins/cadri.ts"
-        path.parent.mkdir(parents=True)
-        path.write_text("export const Mine = 1\n", encoding="utf-8")
-        with self.assertRaises(install.InstallError):
-            install.install_harness("opencode", self.home)
+        path = self.write(".config/opencode/plugins/cadri.ts", "export const Mine = 1\n")
+        [line] = self.install("opencode")
+        self.assertIn("not installed", line)
         self.assertEqual(path.read_text(encoding="utf-8"), "export const Mine = 1\n")
+
+    def built_plugin(self) -> tuple[Path, Path]:
+        """The OpenCode plugin wired to a fake `cadri` that logs each call; returns (plugin, log)."""
+        log = self.home / "calls.jsonl"
+        fake = self.home / "fake-cadri"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "event = sys.argv[sys.argv.index('hook') + 1]\n"
+            "payload = json.loads(sys.stdin.read() or '{}')\n"
+            f"open({str(log)!r}, 'a').write(json.dumps({{'event': event, 'payload': payload}}) + '\\n')\n"
+            "if event in ('session-start', 'prompt'):\n"
+            "    print(json.dumps({'context': 'CTX-' + event}))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        plugin = self.home / "cadri.ts"
+        plugin.write_text(bundles.opencode_plugin(str(fake), str(self.home / "skills")))
+        return plugin, log
+
+    def calls(self, log: Path, count: int) -> list[dict]:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (not log.exists() or len(log.read_text().splitlines()) < count):
+            time.sleep(0.1)
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    @unittest.skipUnless(NODE, "needs node 23 or later")
+    def test_the_v1_plugin_drives_every_hook(self):
+        plugin, log = self.built_plugin()
+        driver = self.home / "driver.mjs"
+        driver.write_text(
+            "const { default: plugin } = await import(process.argv[2])\n"
+            "const client = { session: {\n"
+            "  messages: async () => ({ data: [{ info: { role: 'assistant' }, parts: [{ type: 'text', text: 'done' }] }] }),\n"
+            "  get: async ({ path }) => ({ data: { id: path.id, parentID: path.id === 'k1' ? 's1' : undefined } }),\n"
+            "} }\n"
+            "const hooks = await plugin.server({ directory: '/work', client })\n"
+            "await hooks['chat.message']({ sessionID: 's1', agent: 'build' }, { parts: [{ type: 'text', text: 'hello' }] })\n"
+            "await hooks['chat.message']({ sessionID: 'k1', agent: 'cadri-memory-keeper' }, { parts: [{ type: 'text', text: 'reflect' }] })\n"
+            "const keeperShell = { env: {} }\n"
+            "await hooks['shell.env']({ cwd: '/work', sessionID: 'k1' }, keeperShell)\n"
+            "console.log(JSON.stringify(keeperShell.env))\n"
+            "const first = { system: [] }, second = { system: [] }\n"
+            "await hooks['experimental.chat.system.transform']({ sessionID: 's1' }, first)\n"
+            "await hooks['experimental.chat.system.transform']({ sessionID: 's1' }, second)\n"
+            "await hooks['tool.execute.after']({ tool: 'edit', sessionID: 's1', args: { filePath: '/work/a.md' } }, {})\n"
+            "await hooks.event({ event: { type: 'session.idle', properties: { sessionID: 's1' } } })\n"
+            "const shell = { env: {} }\n"
+            "await hooks['shell.env']({ cwd: '/work', sessionID: 's1' }, shell)\n"
+            "console.log(JSON.stringify(shell.env))\n"
+            "console.log(JSON.stringify([first.system, second.system]))\n"
+        )
+        result = subprocess.run([NODE, str(driver), str(plugin)], capture_output=True, text=True, timeout=60, env=self.env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        both = ["CTX-session-start", "CTX-prompt"]
+        lines = result.stdout.strip().splitlines()
+        self.assertEqual(json.loads(lines[-1]), [both, both])
+        self.assertEqual(json.loads(lines[-2]), {"CADRI_SESSION_ID": "s1", "CADRI_HARNESS": "opencode"})
+        keeper_env = {"CADRI_SESSION_ID": "k1", "CADRI_HARNESS": "opencode", "CADRI_AGENT": "cadri-memory-keeper"}
+        self.assertEqual(json.loads(lines[-3]), keeper_env)
+        calls = self.calls(log, 6)
+        main = [call for call in calls if call["payload"].get("session_id") == "s1"]
+        self.assertEqual([call["event"] for call in main[:2]], ["session-start", "prompt"])
+        self.assertEqual(main[1]["payload"]["prompt"], "hello")
+        self.assertEqual(sorted(call["event"] for call in main), ["edit", "prompt", "session-start", "stop"])
+        stop = next(call for call in main if call["event"] == "stop")
+        self.assertEqual(stop["payload"]["last_message"], "done")
+        self.assertEqual({call["payload"].get("agent") for call in main}, {None})
+        keeper = [call["payload"].get("agent") for call in calls if call["payload"].get("session_id") == "k1"]
+        self.assertEqual(keeper, ["cadri-memory-keeper", "cadri-memory-keeper"])
+
+    @unittest.skipUnless(NODE, "needs node 23 or later")
+    def test_the_v2_plugin_drives_every_hook(self):
+        node = NODE
+        log = self.home / "calls.jsonl"
+        fake = self.home / "fake-cadri"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "event = sys.argv[sys.argv.index('hook') + 1]\n"
+            "payload = json.loads(sys.stdin.read() or '{}')\n"
+            f"open({str(log)!r}, 'a').write(json.dumps({{'event': event, 'payload': payload}}) + '\\n')\n"
+            "if event in ('session-start', 'prompt'):\n"
+            "    print(json.dumps({'context': 'CTX-' + event}))\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        skills = self.home / "skills"
+        (skills / "cadri-memory").mkdir(parents=True)
+        (skills / "cadri-memory/SKILL.md").write_text("---\nname: cadri-memory\ndescription: Use memory\n---\nBody\n")
+        plugin = self.home / "cadri.ts"
+        plugin.write_text(bundles.opencode_plugin(str(fake), str(skills)))
+        driver = self.home / "driver.mjs"
+        driver.write_text(
+            "const { default: plugin } = await import(process.argv[2])\n"
+            "const hooks = {}, puts = [], skills = []\n"
+            "const handle = { dispose: async () => {} }\n"
+            "const ctx = {\n"
+            "  location: { directory: '/work' },\n"
+            "  skill: { transform: async (fn) => { fn({ get: () => undefined, add: (s) => skills.push(s.id) }); return handle } },\n"
+            "  session: {\n"
+            "    hook: async (name, fn) => { hooks[name] = fn; return handle },\n"
+            "    instructions: { entry: { put: async (e) => puts.push(e), remove: async () => {} } },\n"
+            "    context: async () => [{ role: 'assistant', parts: [{ type: 'text', text: 'done' }] }],\n"
+            "  },\n"
+            "  tool: { hook: async (name, fn) => { hooks['tool.' + name] = fn; return handle } },\n"
+            "  event: { subscribe: async function* () { yield { type: 'session.execution.succeeded', data: { sessionID: 's1' } } } },\n"
+            "}\n"
+            "const dispose = await plugin.setup(ctx)\n"
+            "const first = { sessionID: 's1', agent: 'build', system: [] }\n"
+            "const second = { sessionID: 's1', agent: 'build', system: [] }\n"
+            "hooks.context(first); hooks.context(second)\n"
+            "await hooks.prompt({ sessionID: 's1', prompt: { text: 'hello' } })\n"
+            "hooks['tool.execute.after']({ tool: 'edit', input: { filePath: '/work/a.md' }, sessionID: 's1' })\n"
+            "await new Promise((r) => setTimeout(r, 50))\n"
+            "await dispose()\n"
+            "console.log(JSON.stringify({ skills, system: [first.system, second.system], puts }))\n"
+        )
+        result = subprocess.run([node, str(driver), str(plugin)], capture_output=True, text=True, timeout=60, env=self.env())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(out["skills"], ["cadri-memory"])
+        seed = [{"type": "text", "text": "CTX-session-start"}]
+        self.assertEqual(out["system"], [seed, seed])
+        self.assertEqual(out["puts"], [{"sessionID": "s1", "key": "cadri", "value": "CTX-prompt"}])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and (not log.exists() or len(log.read_text().splitlines()) < 4):
+            time.sleep(0.1)
+        calls = [json.loads(line) for line in log.read_text().splitlines()]
+        events = sorted(call["event"] for call in calls)
+        self.assertEqual(events, ["edit", "prompt", "session-start", "stop"])
+        stop = next(call for call in calls if call["event"] == "stop")
+        self.assertEqual(stop["payload"]["last_message"], "done")
+        edit = next(call for call in calls if call["event"] == "edit")
+        self.assertEqual(edit["payload"]["paths"], ["/work/a.md"])
+
+
+class UpgradeTests(InstallTestCase):
+    def test_install_replaces_what_earlier_releases_wrote(self):
+        self.write(".claude/settings.json", {"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": LEGACY_COMMAND.format(harness="claude_code")}]}]}})
+        self.write(".codex/hooks.json", {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": LEGACY_COMMAND.format(harness="codex")}]}]}})
+        self.write(".config/opencode/plugins/cadri.ts", "// cadri-managed-opencode-plugin\nexport const Old = 1\n")
+        for name in ("maintaining-core-memory", "syncing-memory-filesystem", "cadri-memory"):
+            self.write(f".agents/skills/{name}/SKILL.md", "old")
+        self.install("claude_code", "codex", "cursor", "opencode")
+        claude = self.read(".claude/settings.json")["hooks"]
+        self.assertNotIn("SessionEnd", claude)
+        codex_hooks = self.read(".codex/hooks.json")["hooks"]
+        self.assertEqual(len(codex_hooks["Stop"]), 1)
+        self.assertNotIn("cadri_cli.py", json.dumps(codex_hooks))
+        self.assertNotIn("Old", self.plugin_text())
+        skills = sorted(p.name for p in (self.home / ".agents/skills").iterdir())
+        self.assertEqual(skills, sorted(bundles.SHIPPED_SKILLS))
+
+    def plugin_text(self) -> str:
+        return (self.home / ".config/opencode/plugins/cadri.ts").read_text()
 
 
 class DetectionTests(InstallTestCase):
     def test_config_dirs_count_without_sessions(self):
         (self.home / ".cursor").mkdir()
         (self.home / ".codex").mkdir()
-        self.assertEqual(install.installed_harnesses(self.home)[-2:], ["cursor", "codex"])
+        self.assertEqual(config.installed_harnesses(self.home)[-2:], ["cursor", "codex"])
 
 
 if __name__ == "__main__":

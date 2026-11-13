@@ -20,6 +20,7 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 git archive --format=tar --prefix=cadri-plugin/ "$commit:plugin" | tar -x -C "$work"
 printf '%s\n' "$version" >"$work/cadri-plugin/VERSION"
+"$work/cadri-plugin/scripts/build-plugins" "$work/cadri-plugin/dist/plugins" >/dev/null
 tar -czf "$work/cadri-plugin.tar.gz" -C "$work" cadri-plugin
 
 gh release create "$tag" "$work/cadri-plugin.tar.gz" \

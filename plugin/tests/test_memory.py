@@ -1,4 +1,4 @@
-"""Unit tests for the shared memory clone client, with HTTP and git mocked."""
+"""The memory books with real git: push attribution, concurrency, repair, and sync."""
 
 from __future__ import annotations
 
@@ -6,31 +6,289 @@ import io
 import json
 import os
 import subprocess
-import sys
-import tempfile
+import time
 import unittest
 import urllib.error
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-PLUGIN = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PLUGIN))
-sys.path.insert(0, str(PLUGIN / "bin"))
+from support import BASE, TOKEN, BooksTestCase, run_git
 
-import cadri_cli  # noqa: E402
-from shared import hooks, memory  # noqa: E402
+from cadri import cli
+from cadri.memory import books as bk
+from cadri.memory import edits, editapi, push, repair, sync
+from cadri.memory.layout import TEAM_LAYOUT
+from cadri.state import locked
 
-BASE = "http://127.0.0.1:8080"
-HEAD = "a" * 40
-NEW = "b" * 40
-TOKEN = "secret-token-123"
+
+def caller(session="s1", agent=None, human=None, since=None, harness="claude"):
+    return push.caller_from(session, harness, agent, human, since)
+
+
+class Logs(list):
+    def __call__(self, message):
+        self.append(message)
+
+    def text(self):
+        return "\n".join(self)
+
+
+class BookTests(BooksTestCase):
+    def test_paths_for_team_and_personal_books(self):
+        root = Path(os.environ["CADRI_HOME"]) / "memory" / "127.0.0.1-8080" / "org1"
+        self.assertEqual(self.team.path, root / "team")
+        self.assertEqual(self.user.path, root / "user-u1")
+        self.assertEqual(self.team.lock_path, root / "team.lock")
+        self.assertEqual(repair.worktree(self.team), root / "team.repair")
+        self.assertIn("app.cadri.io", bk.Book("https://app.cadri.io", "o", "u", "team").path.parts)
+
+    def test_local_books_come_from_the_cached_identity(self):
+        self.assertEqual([book.path for book in bk.local_books()], [self.team.path, self.user.path])
+        bk.identity_path(BASE).unlink()
+        self.assertEqual(bk.local_books(), [])
+
+    def test_git_never_runs_without_command_line_tools(self):
+        with mock.patch.object(bk, "git_ready", return_value=False), mock.patch("subprocess.run") as run:
+            with self.assertRaisesRegex(bk.MemoryFailure, "xcode-select --install"):
+                bk.git(self.team, "status")
+        run.assert_not_called()
+
+    def test_the_token_goes_only_to_network_commands_and_never_to_disk(self):
+        with mock.patch("subprocess.run", wraps=subprocess.run) as run:
+            bk.git(self.team, "status")
+            bk.git(self.team, "fetch", "--quiet", "origin", "main", network=True)
+        local, network = (call.args[0] for call in run.call_args_list)
+        self.assertNotIn(f"http.extraHeader=Authorization: Bearer {TOKEN}", local)
+        self.assertIn(f"http.extraHeader=Authorization: Bearer {TOKEN}", network)
+        self.write(self.team, "notes.md", "hello\n")
+        self.assertEqual(push.push_book(self.team, caller(), "Add notes", log=Logs()), 0)
+        for path in Path(os.environ["CADRI_HOME"]).rglob("*"):
+            if path.is_file():
+                self.assertNotIn(TOKEN, path.read_text(errors="ignore"), path)
+
+
+class PushTests(BooksTestCase):
+    def test_commits_only_the_callers_files_with_trailers(self):
+        self.write(self.team, "mine.md", "mine\n")
+        self.write(self.team, "theirs.md", "theirs\n")
+        edits.record(self.team, "mine.md", "s1", "main", "claude")
+        edits.record(self.team, "theirs.md", "s2", "main", "claude")
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "Save mine", log=logs), 0, logs.text())
+        self.assertEqual(self.remote_file("team", "mine.md"), "mine")
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.remote_file("team", "theirs.md")
+        message = self.remote_log("team")
+        self.assertIn("Save mine", message)
+        self.assertIn("Cadri-Author-Kind: robot", message)
+        self.assertIn("Cadri-Author-Label: Claude Code agent", message)
+        self.assertIn("Cadri-Session-Id: s1", message)
+        self.assertIn("theirs.md", push.changed_paths(self.team))
+        self.assertEqual(self.head(self.team), self.head(self.team, "origin/main"))
+
+    def test_takes_files_another_session_left_quiet_as_their_own_commit(self):
+        self.write(self.team, "mine.md", "mine\n")
+        self.write(self.team, "stale.md", "stale\n", age=600)
+        edits.record(self.team, "stale.md", "s2", "main", "codex")
+        record = edits.record_path(self.team)
+        rows = [json.loads(line) for line in record.read_text().splitlines()]
+        rows[-1]["at"] -= 600
+        record.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertEqual(push.push_book(self.team, caller(), "Save mine", log=Logs()), 0)
+        newest, older = self.remote_log("team", 2).split("\x00")[:2]
+        self.assertIn("Cadri-Session-Id: s1", older)
+        self.assertIn("Cadri-Session-Id: s2", newest)
+        self.assertIn("Left uncommitted by session s2", newest)
+        self.assertIn("Codex agent", newest)
+
+    def test_human_pushes_carry_the_users_id(self):
+        self.write(self.user, "style.md", "No emoji.\n")
+        human = push.Author("human", "u1", "me@example.com")
+        self.assertEqual(push.push_book(self.user, caller(human=human), "Remember style", log=Logs()), 0)
+        message = self.remote_log("user")
+        self.assertIn("Cadri-Author-Kind: human", message)
+        self.assertIn("Cadri-Author-Id: u1", message)
+
+    def test_team_books_reject_a_new_top_level_directory(self):
+        self.write(self.team, "scratch/note.md", "nope\n")
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "Bad area", log=logs), 1)
+        self.assertIn("top-level directories", logs.text())
+        (self.team.path / "scratch/note.md").unlink()
+        (self.team.path / "scratch").rmdir()
+        self.write(self.team, "features/flags.md", "---\nname: flags\ndescription: Feature flags\n---\nLaunchDarkly.\n")
+        self.assertEqual(push.push_book(self.team, caller(), "Add feature note", log=Logs()), 0)
+        self.assertEqual(self.remote_file("team", "features/flags.md").splitlines()[-1], "LaunchDarkly.")
+
+    def test_a_keeper_owns_its_edits_whatever_session_its_harness_reported(self):
+        self.write(self.team, "a.md", "a\n")
+        since = time.time() - 5
+        edits.record(self.team, "a.md", "child-thread", "cadri-memory-keeper", "codex")
+        keeper = caller(session="parent", agent="cadri:cadri-memory-keeper", since=since, harness="codex")
+        self.assertEqual(push.push_book(self.team, keeper, "Keep a", log=Logs()), 0)
+        message = self.remote_log("team")
+        self.assertIn("Cadri-Session-Id: parent", message)
+        self.assertIn("Codex memory keeper", message)
+
+    def test_rebases_elsewhere_when_the_server_moved_and_keeps_unrelated_edits(self):
+        self.push_from_elsewhere("team", {"other.md": "other\n"})
+        self.write(self.team, "mine.md", "mine\n")
+        edits.record(self.team, "mine.md", "s1", "main", "claude")
+        self.write(self.team, "busy.md", "half written\n")
+        edits.record(self.team, "busy.md", "s2", "main", "claude")
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "Save mine", log=logs), 0, logs.text())
+        self.assertEqual(self.remote_file("team", "other.md"), "other")
+        self.assertEqual(self.remote_file("team", "mine.md"), "mine")
+        self.assertEqual(self.head(self.team), self.head(self.team, "origin/main"))
+        self.assertEqual((self.team.path / "busy.md").read_text(), "half written\n")
+        self.assertEqual((self.team.path / "other.md").read_text(), "other\n")
+        self.assertFalse(self.team.sibling(".integrate").exists())
+
+    def test_a_conflict_is_resolved_in_the_repair_worktree_then_published(self):
+        self.push_from_elsewhere("team", {"MEMORY.md": "# Team memory\n\nDeploys happen on Thursdays.\n"})
+        self.write(self.team, "MEMORY.md", "# Team memory\n\nDeploys happen on Wednesdays.\n")
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "Change deploy day", log=logs), push.EXIT_CONFLICT)
+        self.assertIn("cadri memory push --continue --book team", logs.text())
+        self.assertTrue(repair.active(self.team))
+        self.assertEqual(repair.marker(self.team)["conflicts"], ["MEMORY.md"])
+        worktree = repair.worktree(self.team)
+        self.assertIn("<<<<<<<", (worktree / "MEMORY.md").read_text())
+        self.assertNotIn("<<<<<<<", (self.team.path / "MEMORY.md").read_text())
+        self.assertEqual(sync.quick(self.team, time.monotonic()).state, sync.REPAIR)
+
+        self.assertEqual(push.resume(self.team, log=logs), push.EXIT_CONFLICT)
+        (worktree / "MEMORY.md").write_text("# Team memory\n\nDeploys happen on Wednesdays and Thursdays.\n")
+        self.assertEqual(push.resume(self.team, log=logs), 0, logs.text())
+        self.assertIn("Wednesdays and Thursdays", self.remote_file("team", "MEMORY.md"))
+        self.assertFalse(repair.active(self.team))
+        self.assertFalse(worktree.exists())
+        self.assertEqual(self.head(self.team), self.head(self.team, "origin/main"))
+        self.assertIn("Wednesdays and Thursdays", (self.team.path / "MEMORY.md").read_text())
+
+    def test_abort_keeps_the_commit_for_later(self):
+        self.push_from_elsewhere("team", {"MEMORY.md": "theirs\n"})
+        self.write(self.team, "MEMORY.md", "mine\n")
+        self.assertEqual(push.push_book(self.team, caller(), "m", log=Logs()), push.EXIT_CONFLICT)
+        self.assertEqual(push.abort(self.team, log=Logs()), 0)
+        self.assertFalse(repair.active(self.team))
+        self.assertEqual(push.ahead_count(self.team), 1)
+
+    def test_offline_push_commits_and_the_stop_sweep_publishes_later(self):
+        self.write(self.team, "later.md", "later\n")
+        logs = Logs()
+        with mock.patch.object(bk.Book, "remote", property(lambda book: "/nonexistent/team.git")):
+            run_git(self.team.path, "remote", "set-url", "origin", "/nonexistent/team.git")
+            self.assertEqual(push.push_book(self.team, caller(), "Later", log=logs), 0)
+        self.assertIn("Cadri pushes it after this turn", logs.text())
+        self.assertEqual(push.ahead_count(self.team), 1)
+        run_git(self.team.path, "remote", "set-url", "origin", str(self.remotes / "team.git"))
+        self.assertEqual(push.sweep(self.team, "claude", log=logs), 0, logs.text())
+        self.assertEqual(self.remote_file("team", "later.md"), "later")
+
+    def test_a_rejected_push_leaves_the_edits_uncommitted(self):
+        hook = self.remotes / "team.git" / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'missing Cadri-Author-Kind trailer' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        self.write(self.team, "x.md", "x\n")
+        before = self.head(self.team)
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "x", log=logs), 1)
+        self.assertIn("rejected", logs.text())
+        self.assertEqual(self.head(self.team), before)
+        self.assertIn("x.md", push.changed_paths(self.team))
+
+    def test_oversized_or_deep_files_are_refused_before_committing(self):
+        self.write(self.team, "big.md", "x" * (push.MAX_FILE_CHARS + 1))
+        self.write(self.team, "a/b/c/deep.md", "deep\n")
+        logs = Logs()
+        self.assertEqual(push.push_book(self.team, caller(), "big", log=logs), 1)
+        self.assertIn("big.md", logs.text())
+        self.assertIn("a/b/c/deep.md", logs.text())
+        self.assertEqual(push.ahead_count(self.team), 0)
+
+    def test_sweep_commits_quiet_files_and_leaves_fresh_ones(self):
+        self.write(self.team, "quiet.md", "quiet\n", age=600)
+        self.write(self.team, "fresh.md", "fresh\n")
+        self.assertEqual(push.sweep(self.team, "cursor", log=Logs()), 0)
+        self.assertEqual(self.remote_file("team", "quiet.md"), "quiet")
+        self.assertEqual(push.changed_paths(self.team), ["fresh.md"])
+
+    def test_push_waits_for_the_book_lock(self):
+        self.write(self.team, "x.md", "x\n")
+        logs = Logs()
+        with mock.patch.object(push, "LOCK_SECONDS", 0.2), locked(self.team.lock_path):
+            self.assertEqual(push.push_book(self.team, caller(), "x", log=logs), 1)
+        self.assertIn("busy", logs.text())
+
+
+class SyncTests(BooksTestCase):
+    def quick(self, book, new):
+        with mock.patch.object(sync, "server_has_new", return_value=new):
+            return sync.quick(book, time.monotonic() + 5)
+
+    def test_up_to_date(self):
+        status = self.quick(self.team, False)
+        self.assertEqual(status.state, sync.CLEAN)
+        self.assertFalse(status.needs_background)
+        self.assertIsNotNone(bk.last_synced(self.team))
+
+    def test_fast_forwards_when_the_server_moved(self):
+        self.push_from_elsewhere("team", {"new.md": "new\n"})
+        self.assertEqual(self.quick(self.team, True).state, sync.CLEAN)
+        self.assertEqual((self.team.path / "new.md").read_text(), "new\n")
+
+    def test_offline_uses_the_local_copy(self):
+        status = self.quick(self.team, None)
+        self.assertEqual(status.state, sync.OFFLINE)
+        self.assertTrue(status.needs_background)
+
+    def test_dirty_edits_block_the_update_without_touching_them(self):
+        self.push_from_elsewhere("team", {"MEMORY.md": "theirs\n"})
+        self.write(self.team, "MEMORY.md", "mine, unsaved\n")
+        self.assertEqual(self.quick(self.team, True).state, sync.DIRTY_BLOCKED)
+        self.assertEqual((self.team.path / "MEMORY.md").read_text(), "mine, unsaved\n")
+
+    def test_local_commits_and_server_changes_are_merged_in_the_background(self):
+        self.write(self.team, "mine.md", "mine\n")
+        run_git(self.team.path, "add", "mine.md")
+        run_git(self.team.path, "commit", "--quiet", "-m", "local")
+        self.push_from_elsewhere("team", {"theirs.md": "theirs\n"})
+        status = self.quick(self.team, True)
+        self.assertEqual(status.state, sync.DIVERGED)
+        self.assertEqual(sync.full(self.team, log=Logs()), 0)
+        self.assertEqual(self.remote_file("team", "mine.md"), "mine")
+        self.assertEqual(self.head(self.team), self.head(self.team, "origin/main"))
+
+    def test_a_missing_clone_is_cloned_in_the_background(self):
+        import shutil
+
+        shutil.rmtree(self.user.path)
+        self.assertEqual(sync.quick(self.user, time.monotonic() + 5).state, sync.MISSING)
+        self.assertEqual(sync.full(self.user, log=Logs()), 0)
+        self.assertTrue((self.user.path / "MEMORY.md").exists())
+
+    def test_a_broken_clone_is_moved_aside_and_recloned(self):
+        (self.team.path / ".git" / "HEAD").write_text("garbage\n")
+        self.assertEqual(self.quick(self.team, False).state, sync.CORRUPT)
+        self.assertEqual(sync.full(self.team, log=Logs()), 0)
+        self.assertTrue((self.team.path / "MEMORY.md").exists())
+        self.assertTrue(list(self.team.org_dir.glob("team.corrupt-*")))
+
+    def test_a_busy_book_is_skipped_quickly(self):
+        with locked(self.team.lock_path):
+            started = time.monotonic()
+            self.assertEqual(sync.quick(self.team, time.monotonic() + 5).state, sync.BUSY)
+        self.assertLess(time.monotonic() - started, 2)
 
 
 class Response:
-    def __init__(self, status=200, body=None, headers=None):
+    def __init__(self, status=200, body=None):
         self.status = status
         self.body = json.dumps(body or {}).encode()
-        self.headers = headers or {}
+        self.headers = {}
 
     def read(self):
         return self.body
@@ -43,115 +301,67 @@ class Response:
 
 
 class FakeServer:
-    """Stands in for urllib.request.urlopen; records requests, answers by path."""
-
     def __init__(self, routes):
         self.routes = routes
         self.requests = []
 
     def __call__(self, request, timeout=None):
         url = request.full_url
-        self.requests.append(
-            {
-                "url": url,
-                "method": request.get_method(),
-                "headers": {k.lower(): v for k, v in request.header_items()},
-                "body": json.loads(request.data) if request.data else None,
-            }
-        )
+        self.requests.append({"url": url, "method": request.get_method(), "body": json.loads(request.data) if request.data else None})
         status, body = self.routes[url.split(BASE)[1].split("?")[0]]
         if status >= 300:
             raise urllib.error.HTTPError(url, status, "x", {}, io.BytesIO(json.dumps(body).encode()))
         return Response(status, body)
 
 
-class GitRecorder:
-    def __init__(self, head=HEAD, fail=()):
-        self.calls = []
-        self.head = head
-        self.fail = fail
+class CliTests(BooksTestCase):
+    def cli(self, *argv, stdin="", server=None):
+        out, err = io.StringIO(), io.StringIO()
+        server = server or FakeServer({"/api/memories/tip": (304, {})})
+        with redirect_stdout(out), redirect_stderr(err), mock.patch("sys.stdin", io.StringIO(stdin)), mock.patch(
+            "urllib.request.urlopen", server
+        ):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
 
-    def __call__(self, command, **kwargs):
-        self.calls.append(command)
-        code = 1 if any(f in command for f in self.fail) else 0
-        out = ""
-        if "rev-parse" in command:
-            code, out = (0, self.head + "\n") if self.head else (1, "")
-        return subprocess.CompletedProcess(command, code, out, "")
+    def test_memory_push_both_books_and_finish_the_digest(self):
+        from cadri.memory import digests
 
-
-class MemoryClientTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        env = mock.patch.dict(os.environ, {"CADRI_HOME": self.tmp.name, "CADRI_API_TOKEN": TOKEN, "CADRI_URL": BASE}, clear=False)
-        env.start()
-        self.addCleanup(env.stop)
-        ready = mock.patch.object(memory, "git_ready", return_value=True)
-        ready.start()
-        self.addCleanup(ready.stop)
-        self.team = memory.Book(BASE, "org1", "u1", "team")
-        self.user = memory.Book(BASE, "org1", "u1", "user")
-
-    def make_clone(self, book):
-        (book.path / ".git").mkdir(parents=True)
-
-    def run_cli(self, argv, server, git):
-        with mock.patch("urllib.request.urlopen", server), mock.patch("subprocess.run", git):
-            return cadri_cli.main(argv)
-
-    def test_never_runs_the_git_stub_on_a_mac_without_command_line_tools(self):
-        git = GitRecorder()
-        with mock.patch.object(memory, "git_ready", return_value=False), mock.patch("subprocess.run", git):
-            with self.assertRaisesRegex(memory.MemoryFailure, "xcode-select --install"):
-                memory.git(self.team, "fetch")
-            with mock.patch("subprocess.Popen") as popen:
-                hooks.start_memory_watcher()
-        self.assertEqual(git.calls, [])
-        popen.assert_not_called()
-
-    def test_paths_for_team_and_user_books(self):
-        root = Path(self.tmp.name) / "memory" / "127.0.0.1-8080" / "org1"
-        self.assertEqual(self.team.path, root / "team")
-        self.assertEqual(self.user.path, root / "user-u1")
-        self.assertEqual(self.team.lock_path, root / "team.lock")
-        self.assertEqual(self.team.watch_lock_path, root / "team.watch.lock")
-        self.assertEqual(self.team.remote, f"{BASE}/git/team.git")
-        self.assertEqual(self.user.remote, f"{BASE}/git/user.git")
-        self.assertEqual(memory.heartbeat_path(), Path(self.tmp.name) / "memory" / "heartbeat")
-
-    def test_default_host_directory_has_no_port_noise(self):
-        book = memory.Book("https://app.cadri.io", "o", "u", "team")
-        self.assertIn("app.cadri.io", book.path.parts)
-
-    def test_every_git_call_carries_the_auth_header_and_no_token_hits_disk(self):
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {})})
-        git = GitRecorder()
-        self.assertEqual(self.run_cli(["memory", "clone"], server, git), 0)
-        self.assertTrue(git.calls)
-        for command in git.calls:
-            self.assertEqual(command[:3], ["git", "-c", f"http.extraHeader=Authorization: Bearer {TOKEN}"])
-        clone = next(c for c in git.calls if "clone" in c)
-        self.assertNotIn(TOKEN, " ".join(clone[3:]))
-        self.make_clone(self.team)
-        self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
-        for path in Path(self.tmp.name).rglob("*"):
-            if path.is_file():
-                self.assertNotIn(TOKEN, path.read_text(errors="ignore"))
-
-    def test_write_sends_base_and_agent_and_prints_the_commit(self):
-        self.make_clone(self.team)
-        server = FakeServer(
-            {
-                "/api/me": (200, {"org_id": "org1", "user_id": "u1"}),
-                "/api/memories/commits": (200, {"commit": NEW, "tip": NEW}),
-                "/api/memories/tip": (200, {"tip": NEW}),
-            }
+        digests.save("claude", "s1", "how do we deploy?", "On Tuesdays.", 0, [])
+        claim = digests.gate("s9", now=time.time() + 3 * 3600) or self.fail("expected an orphan claim")
+        self.write(self.team, "operations.md", "Deploys need a freeze notice.\n")
+        code, _, err = self.cli(
+            "memory", "push", "--agent", "cadri-memory-keeper", "--session", "s1", "--harness", "claude",
+            "--digest", str(claim.file), "-m", "Record the deploy freeze",
         )
-        out = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO("hello\n")), mock.patch("sys.stdout", out):
-            code = self.run_cli(["memory", "write", "notes.md", "-m", "Add notes", "--agent", "bot-1"], server, GitRecorder())
+        self.assertEqual(code, 0, err)
+        self.assertIn("pushed 1 commit to the team book", err)
+        self.assertFalse(claim.directory.exists())
+        self.assertIn("Claude Code memory keeper", self.remote_log("team"))
+
+    def test_memory_push_human_uses_the_cached_identity(self):
+        self.write(self.user, "prefs.md", "Tabs.\n")
+        code, _, err = self.cli("memory", "push", "--book", "user", "--human", "-m", "Remember tabs")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Cadri-Author-Label: me@example.com", self.remote_log("user"))
+
+    def test_memory_status_and_context(self):
+        self.write(self.team, "loose.md", "loose\n")
+        code, out, _ = self.cli("memory", "status")
         self.assertEqual(code, 0)
+        self.assertIn("uncommitted files: loose.md", out)
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_ROOT": "/plugin"}):
+            code, out, _ = self.cli("memory", "context", "--harness", "claude")
+        self.assertEqual(code, 0)
+        self.assertIn("Deploys happen on Tuesdays", out)
+        self.assertIn("cadri:cadri-memory-keeper", out)
+
+    def test_write_through_the_edit_api_sends_base_agent_and_session(self):
+        head = self.head(self.team)
+        server = FakeServer({"/api/memories/commits": (200, {"commit": "c" * 40}), "/api/memories/tip": (304, {})})
+        with mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "from-env"}):
+            code, out, err = self.cli("memory", "write", "notes.md", "-m", "Add notes", "--agent", "bot-1", stdin="hello\n", server=server)
+        self.assertEqual(code, 0, err)
         post = next(r for r in server.requests if r["method"] == "POST")
         self.assertEqual(post["url"], f"{BASE}/api/memories/commits?view=tree")
         self.assertEqual(
@@ -159,181 +369,31 @@ class MemoryClientTests(unittest.TestCase):
             {
                 "message": "Add notes",
                 "changes": [{"op": "write", "path": "notes.md", "content": "hello\n"}],
-                "base": HEAD,
                 "agent": "bot-1",
+                "base": head,
+                "session_id": "from-env",
             },
-        )
-        self.assertEqual(out.getvalue().strip(), NEW)
-
-    def test_write_to_the_personal_book_uses_the_user_scope_and_omits_base_when_empty(self):
-        self.make_clone(self.user)
-        server = FakeServer(
-            {
-                "/api/me": (200, {"org_id": "org1", "user_id": "u1"}),
-                "/api/memories/commits": (200, {"commit": NEW}),
-                "/api/memories/tip": (200, {}),
-            }
-        )
-        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_AGENT_ID": "env-agent"}):
-            self.run_cli(["memory", "write", "a.md", "-m", "m", "--scope", "user"], server, GitRecorder(head=None))
-        post = next(r for r in server.requests if r["method"] == "POST")
-        self.assertEqual(post["url"], f"{BASE}/api/memories/commits?view=tree&scope=user")
-        self.assertNotIn("base", post["body"])
-        self.assertEqual(post["body"]["agent"], "env-agent")
-
-    def write_server(self):
-        return FakeServer(
-            {
-                "/api/me": (200, {"org_id": "org1", "user_id": "u1"}),
-                "/api/memories/commits": (200, {"commit": NEW}),
-                "/api/memories/tip": (200, {"tip": NEW}),
-            }
-        )
-
-    def test_write_sends_the_session_flag(self):
-        self.make_clone(self.team)
-        server = self.write_server()
-        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "from-env"}):
-            self.run_cli(["memory", "write", "a.md", "-m", "m", "--session", "sess-1"], server, GitRecorder())
-        post = next(r for r in server.requests if r["method"] == "POST")
-        self.assertEqual(post["body"]["session_id"], "sess-1")
-
-    def test_write_falls_back_to_the_session_env_and_omits_it_when_unset(self):
-        self.make_clone(self.team)
-        server = self.write_server()
-        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "from-env"}):
-            self.run_cli(["memory", "write", "a.md", "-m", "m"], server, GitRecorder())
-        post = next(r for r in server.requests if r["method"] == "POST")
-        self.assertEqual(post["body"]["session_id"], "from-env")
-
-        server = self.write_server()
-        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch.dict(os.environ, {"CADRI_SESSION_ID": ""}):
-            self.run_cli(["memory", "write", "a.md", "-m", "m"], server, GitRecorder())
-        post = next(r for r in server.requests if r["method"] == "POST")
-        self.assertNotIn("session_id", post["body"])
-
-    def test_session_start_hook_exports_the_session_id(self):
-        env_file = Path(self.tmp.name) / "claude.env"
-        with mock.patch.dict(os.environ, {"CLAUDE_ENV_FILE": str(env_file)}):
-            hooks.export_session({"session_id": "b4fb4a10-4a57"})
-            hooks.export_session({"session_id": "bad id; rm -rf /"})
-        self.assertEqual(
-            env_file.read_text(),
-            "export CADRI_SESSION_ID=b4fb4a10-4a57\nexport CADRI_HARNESS=claude_code\n",
         )
 
     def test_write_exits_3_on_a_conflict_and_lists_the_paths(self):
-        self.make_clone(self.team)
-        server = FakeServer(
-            {
-                "/api/me": (200, {"org_id": "org1", "user_id": "u1"}),
-                "/api/memories/commits": (409, {"error": "conflict", "paths": ["deploy.md"]}),
-            }
-        )
-        err = io.StringIO()
-        with mock.patch("sys.stdin", io.StringIO("x")), mock.patch("sys.stderr", err):
-            code = self.run_cli(["memory", "write", "deploy.md", "-m", "m"], server, GitRecorder())
-        self.assertEqual(code, 3)
-        self.assertIn("deploy.md", err.getvalue())
+        server = FakeServer({"/api/memories/commits": (409, {"error": "conflict", "paths": ["deploy.md"]})})
+        code, _, err = self.cli("memory", "write", "deploy.md", "-m", "m", stdin="x", server=server)
+        self.assertEqual(code, editapi.EXIT_CONFLICT)
+        self.assertIn("deploy.md", err)
 
-    def test_sync_stops_early_when_the_tip_is_unchanged(self):
-        self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (304, {})})
-        git = GitRecorder()
-        self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
-        tip = next(r for r in server.requests if r["url"].endswith("/api/memories/tip"))
-        self.assertEqual(tip["headers"]["if-none-match"], f'"{HEAD}"')
-        self.assertFalse(any("fetch" in c for c in git.calls))
-        self.assertTrue(self.team.synced_path.exists())
 
-    def test_sync_fetches_and_fast_forwards_when_the_tip_moved(self):
-        self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": NEW})})
-        git = GitRecorder()
-        self.assertEqual(self.run_cli(["memory", "sync", "--quiet"], server, git), 0)
-        self.assertTrue(any("fetch" in c for c in git.calls))
-        self.assertTrue(any("--ff-only" in c for c in git.calls))
+class ScaffoldTests(BooksTestCase):
+    seed_team = {}
 
-    def test_sync_aborts_the_rebase_and_exits_1_when_local_commits_conflict(self):
-        self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": NEW})})
-        git = GitRecorder(fail=("--ff-only",))
-        real = git.__call__
-
-        def failing(command, **kwargs):
-            if "rebase" in command and "--abort" not in command:
-                git.calls.append(command)
-                return subprocess.CompletedProcess(command, 1, "", "conflict")
-            return real(command, **kwargs)
-
-        err = io.StringIO()
-        with mock.patch("sys.stderr", err):
-            code = self.run_cli(["memory", "sync"], server, failing)
-        self.assertEqual(code, 1)
-        self.assertTrue(any("--abort" in c for c in git.calls))
-        self.assertIn("conflict", err.getvalue())
-
-    def test_sync_does_nothing_when_another_sync_holds_the_lock(self):
-        self.make_clone(self.team)
-        held = memory.SyncLock(self.team.lock_path)
-        self.addCleanup(held.release)
-        server = FakeServer({})
-        with mock.patch("urllib.request.urlopen", server), mock.patch("subprocess.run", GitRecorder()):
-            self.assertEqual(memory.sync(self.team), 0)
-        self.assertEqual(server.requests, [])
-
-    def test_watch_exits_when_the_heartbeat_is_stale_and_when_already_running(self):
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"})})
-        memory.touch_heartbeat()
-        old = 1_000_000_000
-        os.utime(memory.heartbeat_path(), (old, old))
-        sleeps = []
+    def test_scaffold_writes_team_indexes_only_when_the_book_is_empty(self):
+        server = FakeServer({"/api/memories/commits": (200, {"commit": "c" * 40}), "/api/memories/tip": (304, {})})
         with mock.patch("urllib.request.urlopen", server):
-            with mock.patch("shared.memory.sync", side_effect=AssertionError("must not sync")):
-                self.assertEqual(memory.watch(BASE, sleep=sleeps.append), 0)
-            self.assertEqual(sleeps, [])
-
-            def go_stale(seconds):
-                sleeps.append(seconds)
-                os.utime(memory.heartbeat_path(), (old, old))
-
-            os.utime(memory.heartbeat_path(), None)
-            with mock.patch("shared.memory.sync", return_value=0) as synced:
-                self.assertEqual(memory.watch(BASE, sleep=go_stale), 0)
-            self.assertEqual(len(sleeps), 1)
-            self.assertEqual(synced.call_count, 1)
-            held = memory.SyncLock(self.team.watch_lock_path)
-            self.addCleanup(held.release)
-            os.utime(memory.heartbeat_path(), None)
-            with mock.patch("shared.memory.sync", side_effect=AssertionError("must not sync")):
-                self.assertEqual(memory.watch(BASE, sleep=go_stale), 0)
-
-    def test_sync_of_an_empty_book_does_not_fetch(self):
-        self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": None, "seq": 0})})
-        git = GitRecorder(head=None)
-        self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
-        tip = next(r for r in server.requests if r["url"].endswith("/api/memories/tip"))
-        self.assertEqual(tip["headers"]["if-none-match"], '"empty"')
-        self.assertFalse(any("fetch" in c for c in git.calls))
-
-    def test_git_runs_without_an_auth_header_when_the_server_needs_none(self):
-        self.make_clone(self.team)
-        server = FakeServer({"/api/me": (200, {"org_id": "org1", "user_id": "u1"}), "/api/memories/tip": (200, {"tip": NEW})})
-        git = GitRecorder()
-        with mock.patch.dict(os.environ, {"CADRI_API_TOKEN": ""}), mock.patch(
-            "shared.cadri_auth.stored_access_token", return_value=None
-        ):
-            self.assertEqual(self.run_cli(["memory", "sync"], server, git), 0)
-        self.assertTrue(any("fetch" in c for c in git.calls))
-        self.assertFalse(any("http.extraHeader" in part for c in git.calls for part in c))
-
-    def test_detach_starts_a_new_session_and_returns_at_once(self):
-        with mock.patch("subprocess.Popen") as popen:
-            memory.detach_watcher(Path("/x/cadri_cli.py"))
-        kwargs = popen.call_args.kwargs
-        self.assertTrue(kwargs["start_new_session"])
-        self.assertEqual(popen.call_args.args[0][-2:], ["memory", "watch"])
+            self.assertFalse(editapi.scaffold_team(self.user))
+            self.assertTrue(editapi.scaffold_team(self.team))
+        post = next(request for request in server.requests if request["method"] == "POST")
+        self.assertEqual([change["path"] for change in post["body"]["changes"]], [path for path, _ in TEAM_LAYOUT])
+        self.assertEqual(post["body"]["agent"], "cadri-init")
+        self.assertNotIn("base", post["body"])
 
 
 if __name__ == "__main__":

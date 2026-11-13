@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# End-to-end test of the Cadri plugin on a clean macOS VM (Apple silicon + Tart).
+#
+#   plugin/scripts/vm-e2e prepare   once: a base VM with git and the four agent CLIs, no Cadri
+#   plugin/scripts/vm-e2e up        a fresh VM from that base, a local engine on this Mac, and
+#                                   Cadri installed from this working tree with install.sh;
+#                                   stays in the foreground until Ctrl-C, which stops both
+#   plugin/scripts/vm-e2e resume    boot an existing stopped test VM (keeps agent sign-ins),
+#                                   reinstall this working tree, and wait like `up`
+#   plugin/scripts/vm-e2e ssh [cmd] a shell (or command) in the running test VM
+#   plugin/scripts/vm-e2e stop      stop the VM and the engine from another terminal
+#
+# The engine runs without auth on this Mac; the VM reaches it at the bridge address.
+# Agents still need their own sign-in inside the VM (see `start`'s output).
+set -euo pipefail
+
+RAW="cadri-raw"
+BASE="cadri-e2e-base"
+VM="cadri-e2e"
+ENGINE_PORT=18412
+FILE_PORT=18765
+STATE="${CADRI_VM_STATE:-$HOME/.cache/cadri-vm}"
+KEY="$STATE/id_ed25519"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+mkdir -p "$STATE"
+
+say() { printf '\n== %s\n' "$*"; }
+die() { printf 'vm-e2e: %s\n' "$*" >&2; exit 1; }
+command -v tart >/dev/null || die "install Tart first: https://tart.run"
+ssh_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+
+children=()
+teardown() {
+  for pid in "${children[@]}"; do kill "$pid" 2>/dev/null || true; done
+}
+
+boot() {
+  local name="$1"
+  tart run --no-graphics "$name" >"$STATE/$name.run.log" 2>&1 &
+  children+=($!)
+  IP="$(tart ip --wait 180 "$name")"
+  HOST="${IP%.*}.1"
+  for _ in $(seq 90); do
+    nc -z -G 2 "$IP" 22 2>/dev/null && return
+    sleep 2
+  done
+  die "cannot reach $name at $IP (System Settings > Privacy & Security > Local Network for this terminal)"
+}
+
+authorize() {
+  [[ -f "$KEY" ]] || ssh-keygen -q -t ed25519 -N "" -f "$KEY"
+  KEY="$KEY" IP="$IP" expect <<'EOF' >/dev/null
+set timeout 60
+spawn ssh-copy-id -i $env(KEY).pub -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null admin@$env(IP)
+expect {
+  "assword:" { send "admin\r"; exp_continue }
+  eof
+}
+EOF
+}
+
+vm() { ssh -i "$KEY" "${ssh_opts[@]}" "admin@$IP" "$@"; }
+# Claude Code and the Cursor CLI keep sign-ins in the login keychain, which SSH sessions
+# find locked; the test VM's password is the Tart default.
+UNLOCK='security unlock-keychain -p admin login.keychain >/dev/null 2>&1'
+ENVIRON="$UNLOCK; export PATH=\$HOME/.local/bin:\$HOME/.opencode/bin:\$PATH"
+vm_env() { vm "$ENVIRON; $*"; }
+vm_tty() { ssh -t -i "$KEY" "${ssh_opts[@]}" "admin@$IP" "$@"; }
+current_ip() {
+  tart list | grep -E "^local +$VM +.*running" >/dev/null || die "$VM is not running; start it with: $0 up"
+  IP="$(tart ip "$VM")"
+  HOST="${IP%.*}.1"
+}
+
+prepare() {
+  tart list --quiet | grep -qx "$RAW" || tart clone ghcr.io/cirruslabs/macos-tahoe-vanilla:latest "$RAW"
+  tart stop "$BASE" >/dev/null 2>&1 || true
+  tart delete "$BASE" >/dev/null 2>&1 || true
+  tart clone "$RAW" "$BASE"
+  say "Booting $BASE"
+  boot "$BASE"
+  authorize
+  say "Command Line Tools (git) via softwareupdate"
+  vm 'xcode-select -p >/dev/null 2>&1 && exit 0
+      touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+      label=$(softwareupdate -l 2>/dev/null | sed -n "s/^\* Label: \(Command Line Tools.*\)$/\1/p" | sort -V | tail -1)
+      [ -n "$label" ] || { echo "no Command Line Tools in softwareupdate" >&2; exit 1; }
+      echo "installing $label"
+      echo admin | sudo -S softwareupdate -i "$label" --verbose >/tmp/clt.log 2>&1
+      rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+      git --version'
+  say "Agent CLIs"
+  vm 'set -e
+      mkdir -p ~/.local/bin
+      curl -fsSL https://claude.ai/install.sh | bash >/tmp/claude-install.log 2>&1
+      curl -fsSL https://opencode.ai/install | bash >/tmp/opencode-install.log 2>&1
+      curl -fsS https://cursor.com/install | bash >/tmp/cursor-install.log 2>&1
+      curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-aarch64-apple-darwin.tar.gz | tar -xz -C ~/.local/bin
+      mv ~/.local/bin/codex-aarch64-apple-darwin ~/.local/bin/codex
+      grep -qs ".local/bin" ~/.zprofile || printf "export PATH=\"\$HOME/.local/bin:\$HOME/.opencode/bin:\$PATH\"\n" >>~/.zprofile
+      export PATH="$HOME/.local/bin:$HOME/.opencode/bin:$PATH"
+      echo "claude $(claude --version)"; echo "codex $(codex --version)"
+      echo "cursor-agent $(cursor-agent --version)"; echo "opencode $(opencode --version)"'
+  vm 'echo admin | sudo -S shutdown -h now' >/dev/null 2>&1 || true
+  sleep 10
+  tart stop "$BASE" >/dev/null 2>&1 || true
+  say "$BASE is ready: git and the agent CLIs, no Cadri"
+}
+
+serve_tree() {
+  local serve="$STATE/serve"
+  rm -rf "$serve" && mkdir -p "$serve/cadri-plugin"
+  (cd "$root/plugin" && tar -cf - --exclude .venv --exclude __pycache__ --exclude dist --exclude .pytest_cache .) |
+    tar -x -C "$serve/cadri-plugin"
+  echo "local-$(git -C "$root" rev-parse --short HEAD)-dirty" >"$serve/cadri-plugin/VERSION"
+  tar -czf "$serve/cadri-plugin.tar.gz" -C "$serve" cadri-plugin
+  cp "$root/plugin/install.sh" "$serve/install.sh"
+  pkill -f "http.server $FILE_PORT" 2>/dev/null || true
+  python3 -m http.server "$FILE_PORT" --bind 0.0.0.0 --directory "$serve" >"$STATE/files.log" 2>&1 &
+  children+=($!)
+}
+
+engine() {
+  local bin="${CADRI_ENGINE_BIN:-${CARGO_TARGET_DIR:-$root/engine/target}/debug/cadri-engine}"
+  [[ -x "$bin" ]] || (cd "$root/engine" && cargo build --bin cadri-engine)
+  lsof -ti "tcp:$ENGINE_PORT" | xargs kill 2>/dev/null || true
+  rm -rf "$STATE/engine" && mkdir -p "$STATE/engine"
+  CADRI_DB="$STATE/engine/t.db" CADRI_MEMORIES="$STATE/engine/mem" CADRI_BIND="0.0.0.0:$ENGINE_PORT" \
+    "$bin" >"$STATE/engine.log" 2>&1 &
+  children+=($!)
+  for _ in $(seq 50); do
+    curl -fsS "http://127.0.0.1:$ENGINE_PORT/api/me" >/dev/null 2>&1 && return
+    sleep 0.2
+  done
+  die "engine did not start; see $STATE/engine.log"
+}
+
+up() {
+  tart list --quiet | grep -qx "$BASE" || die "no $BASE yet; run: $0 prepare"
+  trap 'teardown; tart stop "$VM" >/dev/null 2>&1 || true' EXIT
+  trap 'exit 130' INT TERM
+  tart stop "$VM" >/dev/null 2>&1 || true
+  tart delete "$VM" >/dev/null 2>&1 || true
+  tart clone "$BASE" "$VM"
+  say "Engine on this Mac (no auth, fresh data)"
+  engine
+  say "Booting $VM"
+  boot "$VM"
+  echo "VM at $IP; this Mac is $HOST"
+  serve_tree
+  say "install.sh from this working tree"
+  vm "curl -fsSL http://$HOST:$FILE_PORT/install.sh | env CADRI_PLUGIN_TGZ=http://$HOST:$FILE_PORT/cadri-plugin.tar.gz bash"
+  vm "grep -qs unlock-keychain ~/.zprofile || echo '$UNLOCK' >>~/.zprofile"
+  say "cadri init"
+  vm_env "cadri init --local --url http://$HOST:$ENGINE_PORT && touch ~/.cadri/trace-hooks"
+  say "ready: $VM at $IP, engine at http://127.0.0.1:$ENGINE_PORT. Ctrl-C stops both."
+  wait
+}
+
+# Reinstall this working tree into the running VM, as an upgrade would.
+sync_tree() {
+  current_ip
+  local serve="$STATE/serve"
+  rm -rf "$serve/cadri-plugin" && mkdir -p "$serve/cadri-plugin"
+  (cd "$root/plugin" && tar -cf - --exclude .venv --exclude __pycache__ --exclude dist --exclude .pytest_cache .) |
+    tar -x -C "$serve/cadri-plugin"
+  echo "local-$(git -C "$root" rev-parse --short HEAD)-dirty" >"$serve/cadri-plugin/VERSION"
+  tar -czf "$serve/cadri-plugin.tar.gz" -C "$serve" cadri-plugin
+  cp "$root/plugin/install.sh" "$serve/install.sh"
+  vm_env "curl -fsSL http://$HOST:$FILE_PORT/install.sh | env CADRI_PLUGIN_TGZ=http://$HOST:$FILE_PORT/cadri-plugin.tar.gz bash >/dev/null &&
+          cadri init --local --url http://$HOST:$ENGINE_PORT | sed -n '/Installing/,/CLI:/p'"
+}
+
+resume() {
+  # Bring back a stopped test VM without wiping agent sign-ins, then reinstall this tree.
+  tart list --quiet | grep -qx "$VM" || die "no $VM yet; run: $0 up"
+  trap 'teardown; tart stop "$VM" >/dev/null 2>&1 || true' EXIT
+  trap 'exit 130' INT TERM
+  say "Engine on this Mac"
+  engine
+  if ! tart list | grep -E "^local +$VM +.*running" >/dev/null; then
+    say "Booting existing $VM"
+    boot "$VM"
+  else
+    IP="$(tart ip "$VM")"
+    HOST="${IP%.*}.1"
+  fi
+  echo "VM at $IP; this Mac is $HOST"
+  authorize
+  serve_tree
+  sync_tree
+  say "ready: $VM at $IP, engine at http://127.0.0.1:$ENGINE_PORT. Ctrl-C stops both."
+  wait
+}
+
+case "${1:-}" in
+  prepare) prepare ;;
+  sync) sync_tree ;;
+  up) up ;;
+  resume) resume ;;
+  ssh) shift; current_ip; if [[ $# -gt 0 ]]; then vm_env "$*"; else vm_tty; fi ;;
+  stop) tart stop "$VM" 2>/dev/null || true; lsof -ti "tcp:$ENGINE_PORT" | xargs kill 2>/dev/null || true; pkill -f "http.server $FILE_PORT" || true ;;
+  *) sed -n '2,12p' "$0"; exit 2 ;;
+esac

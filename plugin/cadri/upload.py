@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from . import cadri_auth
+from . import auth as cadri_auth
 
 REFRESH_TIMEOUT_SECONDS = 5
 UPLOAD_TIMEOUT_SECONDS = 30

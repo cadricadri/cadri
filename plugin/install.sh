@@ -39,7 +39,7 @@ fetch_source() {
   if [[ -n "$self" && -f "$self" && "$(basename "$self")" == "install.sh" ]]; then
     local here
     here="$(cd "$(dirname "$self")" && pwd)"
-    if [[ -f "$here/pyproject.toml" && -d "$here/shared" ]]; then
+    if [[ -f "$here/pyproject.toml" && -f "$here/cadri/cli.py" ]]; then
       say "Installing from this checkout: $here" >&2
       printf '%s\n' "$here"
       return
@@ -80,13 +80,16 @@ copy_tree() {
   (cd "$src" && tar -cf - --exclude .venv --exclude __pycache__ --exclude .pytest_cache .) | (cd "$INSTALL_DIR" && tar -xf -)
 }
 
+# Agent hooks run $CADRI_HOME/bin/cadri by absolute path; ~/.local/bin/cadri points at it.
 write_shim() {
-  mkdir -p "$BIN_DIR"
-  cat >"$BIN_DIR/cadri" <<EOF
-#!/usr/bin/env bash
+  local shim="$CADRI_HOME/bin/cadri"
+  mkdir -p "$CADRI_HOME/bin" "$BIN_DIR"
+  cat >"$shim" <<EOF
+#!/bin/sh
 exec "$INSTALL_DIR/.venv/bin/python" "$INSTALL_DIR/bin/cadri_cli.py" "\$@"
 EOF
-  chmod +x "$BIN_DIR/cadri"
+  chmod +x "$shim"
+  ln -sf "$shim" "$BIN_DIR/cadri"
 }
 
 ensure_path() {

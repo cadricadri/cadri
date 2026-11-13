@@ -1,8 +1,0 @@
-{
-  "name": "cadri",
-  "description": "Upload Claude Code sessions to Cadri and provide Cadri install/memory skills.",
-  "version": "0.1.0",
-  "author": {
-    "name": "Cadri"
-  }
-}

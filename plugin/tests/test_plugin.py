@@ -196,7 +196,8 @@ class CaptureTests(PluginTestCase):
             timeout=30,
         )
         self.assertEqual(result.returncode, 0)
-        self.assertIn("invalid hook input", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("hook failed", (self.home / ".cadri" / "hooks.log").read_text(encoding="utf-8"))
 
 
 class LoginTests(PluginTestCase):

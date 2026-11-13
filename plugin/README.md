@@ -1,38 +1,55 @@
 # Cadri CLI and agent hooks
 
 Captures Claude Code, Cursor, Codex, and OpenCode sessions into Cadri, backfills recent ones,
-and gives agents the memory books through `cadri memory` and two skills.
+and gives agents the memory books through `cadri memory` and the skills in `skills/`.
 
 Uses **[uv](https://github.com/astral-sh/uv)** for Python. Layout:
 
 ```text
 plugin/
-  bin/cadri_cli.py       # every command, including `cadri hook <harness>`
+  bin/cadri_cli.py       # entry point; the CLI lives in cadri/cli.py
   bin/cadri              # uv shim for a source checkout
-  shared/                # auth, upload, discover/, hooks.py (hook runtime), install.py (hook installers), memory.py
-  harnesses/opencode/    # OpenCode plugin template
-  skills/                # cadri-install, cadri-memory, cadri-memory-seed
-  hooks/ .claude-plugin/ # `claude --plugin-dir ./plugin` for development
+  cadri/                 # auth, upload, capture, discover/, hooks/ (events and harness adapters),
+                         # memory/ (books, sync, push, repair, context, digests), install/ (bundles)
+  harnesses/             # per-harness manifests, the Cursor rule, and the OpenCode plugin
+  agents/                # the cadri-memory-keeper subagent, rendered per harness
+  skills/                # cadri-install, cadri-memory, cadri-memory-seed, and the memory maintenance skills
   install.sh             # served as https://cadri.io/install.sh
+  scripts/build-plugins  # build every harness bundle into dist/plugins
   scripts/release        # publish plugin/ as a GitHub release
 ```
 
-## How capture works
+## How it works
 
-`cadri init` writes one hook entry per event into each harness's own user config, pointing at
-`~/.cadri/install/.venv/bin/python …/cadri_cli.py hook <harness>`:
+Agents work with a team book and a personal book of Markdown, cloned under `~/.cadri/memory`.
+Every harness gets the same four moments:
 
-| Harness | Config | Events |
+- **Session start:** checks sign-in (and starts a browser sign-in in the background if it lapsed),
+  fast-forwards both books, and gives the agent both root `MEMORY.md` files, a tree of each book,
+  and how to use them.
+- **Each prompt:** lists memory files that look relevant and reminds the agent to read them first.
+  When recent turns are worth remembering, it asks the agent to launch the `cadri-memory-keeper`
+  subagent in the background.
+- **Each turn's end:** saves a digest of the turn for the keeper, uploads the session, and commits
+  and pushes memory edits that have gone quiet.
+- **The keeper:** edits the books from the digest and runs `cadri memory push`. A push that
+  conflicts leaves a repair worktree and printed directions; `cadri memory push --continue` finishes it.
+
+`cadri init` installs this into each harness. Every hook runs `~/.cadri/bin/cadri hook <event>
+--harness <name>` with an explicit timeout; there are no session-end hooks.
+
+| Harness | Installed as | Events |
 |---|---|---|
-| Claude Code | `~/.claude/settings.json` | SessionStart, Stop, PreCompact, SessionEnd |
-| Cursor | `~/.cursor/hooks.json` | sessionStart, stop, preCompact, sessionEnd |
-| Codex | `~/.codex/hooks.json` | SessionStart, Stop (trust them once in `/hooks`) |
-| OpenCode | `~/.config/opencode/plugins/cadri.ts` | session.created, session.idle |
+| Claude Code | plugin `cadri@cadri` from the local marketplace `~/.cadri/plugins/claude` (hooks in `~/.claude/settings.json` without the `claude` CLI) | SessionStart, UserPromptSubmit, PostToolUse, Stop, PreCompact |
+| Cursor | plugin in `~/.cursor/plugins/local/cadri` | sessionStart, beforeSubmitPrompt, postToolUse, afterFileEdit, afterAgentResponse, stop, preCompact |
+| Codex | `~/.codex/hooks.json`, `~/.codex/agents/cadri-memory-keeper.toml`, skills in `~/.agents/skills` (trust the hooks once in `/hooks`) | SessionStart, UserPromptSubmit, PostToolUse, Stop, PreCompact |
+| OpenCode | `~/.config/opencode/plugins/cadri.ts` and `agents/cadri-memory-keeper.md` | context, prompt, compaction, tool `execute.after`, session execution events |
 
-The hook reads the event from stdin, answers the harness at once, and uploads the session
-from a detached child (log: `~/.cadri/hooks.log`). Session start events also start
-the memory watcher. Entries are recognized by their `cadri_cli.py … hook` command, so
-`cadri init` replaces them and `cadri uninstall` removes only them.
+Hooks answer the harness at once and do uploads and pushes in a detached child (log:
+`~/.cadri/hooks.log`). Init also lets agents edit `~/.cadri/memory` and run `cadri memory`
+without prompting (Claude Code permissions, a Codex writable root). Hook entries are
+recognized by their `cadri … hook` command, so `cadri init` replaces them and
+`cadri uninstall` removes only them, along with the entries and files it added.
 
 ## Install
 
@@ -62,9 +79,13 @@ cadri init [--local [--start-engine]]
 cadri uninstall
 cadri discover [--json] [--days 30] [--limit 50]
 cadri show <thread_id>
-cadri memory clone|path|sync [--scope user]
+cadri memory context [--harness claude]   # what session start gives the agent
+cadri memory status                       # sign-in, books, pending edits, repairs
+cadri memory sync [--scope team|user|all]
+cadri memory push [-m "message"] [--human] [--continue | --abort]
+cadri memory clone|path [--scope user]
 cadri memory write <path> --file f.md -m "message" [--scope user]
-cadri hook claude|cursor|codex|opencode   # run by the harnesses
+cadri hook <event> --harness <name>       # run by the harnesses
 ```
 
 ## Tests

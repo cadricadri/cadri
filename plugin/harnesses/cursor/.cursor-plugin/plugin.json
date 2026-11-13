@@ -1,0 +1,14 @@
+{
+  "name": "cadri",
+  "displayName": "Cadri",
+  "description": "Team and personal memory for Cursor: loaded at session start, searched on each prompt, kept up to date by a background memory keeper.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Cadri"
+  },
+  "homepage": "https://cadri.io",
+  "rules": "rules",
+  "skills": "skills",
+  "agents": "agents",
+  "hooks": "hooks/hooks.json"
+}

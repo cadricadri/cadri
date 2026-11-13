@@ -16,8 +16,8 @@ Your job is to read a batch of past sessions and write the few lessons that will
 
 ```bash
 cadri memory clone && cadri memory clone --scope user
-cat "$(cadri memory path)/README.md" 2>/dev/null
-cat "$(cadri memory path --scope user)/README.md" 2>/dev/null
+cat "$(cadri memory path)/MEMORY.md" 2>/dev/null
+cat "$(cadri memory path --scope user)/MEMORY.md" 2>/dev/null
 ```
 
 Read any files the indexes point to before writing, so you update instead of duplicating.
@@ -60,8 +60,9 @@ Never store secrets: no keys, tokens, passwords, customer data, or personal deta
 
 Book layout:
 
-- `README.md` at the root is the index: one line per file, a relative link, and when to open it.
-- One Markdown file per topic, grouped in folders when a book grows (`projects/cadri.md`, `preferences/code-review.md`). Each file starts with:
+- An empty team book already has `MEMORY.md` plus `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/` after `cadri init`. Use those top-level directories; do not invent another at the root.
+- Root `MEMORY.md` is loaded into every session: keep it a short guide to what the book holds and where. Each directory's `MEMORY.md` is that directory's index: one line per file, a relative link, and when to open it. Neither has frontmatter.
+- One Markdown file per topic. A component's notes go in `components/<name>/`. A recurring failure goes in `incidents/<pattern>/`. Each file other than a `MEMORY.md` index starts with:
 
   ```markdown
   ---
@@ -86,7 +87,7 @@ cadri memory write preferences/code-review.md --scope user --file /tmp/cadri-mem
   --session 2f1c… -m "Add code review preferences" -m "Sources: claude_code:2f1c…, cursor:7a9e…"
 ```
 
-`--session` takes the bare id of the session the memory mostly came from; the Sessions page lists the commit under that session's "Memories generated". Leave out `--scope user` for the team book. Update `README.md` the same way once the topic files are written.
+`--session` takes the bare id of the session the memory mostly came from; the Sessions page lists the commit under that session's "Memories generated". Leave out `--scope user` for the team book. Update the directory `MEMORY.md` indexes (and the root `MEMORY.md`, if a new area appeared under an existing top-level folder) the same way once the topic files are written.
 
 Exit status 3 means someone changed the same file since your clone: run `cadri memory sync`, re-read the file, merge your change, and write again.
 

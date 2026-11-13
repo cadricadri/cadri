@@ -5,13 +5,12 @@ description: Comprehensive guide for initializing or reorganizing agent memory. 
 
 # Memory Initialization
 
-Your memory is projected to a filesystem at `$MEMORY_DIR`, so you can restructure it with ordinary file tools and git. This skill applies the Context Constitution's Progressive Disclosure and Efficiency principles to the root-first design.
-
-**You own this task through completion**: research, ask, synthesize, write, commit, verify. Delegate research, but integrate the results yourself — launching a background task is not completion. If a memory worker you launched is still editing this checkout, wait for it, then re-read before editing.
+Your memory is two git clones of Markdown: the team book at `$(cadri memory path)` and your personal book at `$(cadri memory path --scope user)`. Restructure them with ordinary file tools, then publish with `cadri memory push`.
+**You own this task through completion**: research, ask, synthesize, write, commit, verify. Delegate research, but integrate the results yourself — launching a background task is not completion. If a `cadri-memory-keeper` you launched is still editing, wait for it, then re-read before editing.
 
 ## Principles
 
-**Core memory is your core program.** Root Markdown compiles into your system prompt on every call. Spend it on what shapes ordinary turns: identity, preferences, behavioral rules, orientation, routes to everything else. Transient items (a ticket, a commit hash, session notes) dilute it.
+**`MEMORY.md` is always loaded.** Cadri puts each book's root `MEMORY.md` into every session at start, followed by a tree of the book with each file's description. Spend it on what shapes ordinary turns: identity, preferences, behavioral rules, orientation, routes to everything else. Transient items (a ticket, a commit hash, session notes) dilute it.
 
 **Progressive disclosure.** Nested Markdown is deferred until something reads it. Each directory's `MEMORY.md` describes its *immediate* children and when to read them, so you never load a whole topic to answer one question.
 
@@ -23,16 +22,17 @@ Your memory is projected to a filesystem at `$MEMORY_DIR`, so you can restructur
 
 ## Harness Constraints
 
-Validation enforces these; the rest of the layout is your judgment.
+Validation enforces these; the server also rejects a file over 20,000 characters, root Markdown over 65,536 characters combined, or a path more than two directories deep. Team pushes reject a new top-level directory outside the fixed set below.
 
-- Root `MEMORY.md` must exist, and no `MEMORY.md` may have YAML frontmatter.
-- **Every directory on the path to a memory file needs its own frontmatter-free `MEMORY.md`.** `orchard/tooling/testing.md` requires *both* `orchard/MEMORY.md` and `orchard/tooling/MEMORY.md`. A directory without one is not memory.
+- Root `MEMORY.md` must exist. Neither it nor any directory `MEMORY.md` may have YAML frontmatter.
+- **Every directory on the path to a memory file needs its own frontmatter-free `MEMORY.md`.** `components/api-gateway/gotchas.md` requires both `components/MEMORY.md` and `components/api-gateway/MEMORY.md`. A directory without one is not memory. Do not create new `README.md` indexes.
 - Every other memory file must have exactly `name` and `description` frontmatter — those two keys, no others. The `description` states **purpose and category**, not contents: you read it to decide whether to load the file.
 - No file and directory sharing a stem (`human.md` beside `human/`). Skills live at `skills/{skill_name}/SKILL.md` and stay out of memory indexes.
+- **Team book top-level directories are fixed:** `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`. Subfolders under those are free-form.
 
-Nothing else is mandated — no filenames, no file count, no minimum depth. Root `persona.md` is unvalidated but your system prompt points at it as the core of your identity: keep it, and write it once you have an identity worth stating.
+The team book from `cadri init` already has those six directories. Put a lesson in the directory a future search would look in. Do not paste it into the root `MEMORY.md`.
 
-**Budget**: keep root under ~10% of your context window (~15-20k tokens). When it crowds that, move detail into an indexed child directory and leave a link — don't delete it.
+**Budget**: keep `MEMORY.md` short — every session pays for it (Cadri trims it past about 6,000 characters). When it crowds that, move detail into an indexed child directory and leave a link — don't delete it.
 
 ## Structure
 
@@ -47,7 +47,7 @@ Root `MEMORY.md` is a **discovery guide** teaching agents how to find informatio
 
 **Start with grep when you have a keyword:**
 ```bash
-grep -ri "concept" $MEMORY_DIR/team/
+grep -ri "concept" "$(cadri memory path)"
 ```
 
 **Component-specific knowledge:** When working on a service, check `components/[service-name]/`
@@ -62,14 +62,18 @@ grep -ri "concept" $MEMORY_DIR/team/
 - `runbooks.md` - Common procedures
 - `alerts.md` - What alerts mean and how to respond
 
-**Architectural decisions:** Check `architecture/decisions.md` for rationale
+**Architectural decisions:** Check `architecture/` for rationale
+**Features and why they exist:** Check `features/`
+**How code ships:** Check `path-to-prod/`
 
 ## Directory Guide
 
-- **components/** - Per-service/component knowledge, gotchas, implementation notes
-- **incidents/** - Grouped by failure pattern, full post-mortems with lessons
-- **operations/** - Runbooks, alert guides, debugging procedures
 - **architecture/** - Design decisions, technical rationale, tradeoffs
+- **components/** - Per-service knowledge, gotchas, implementation notes
+- **features/** - Incremental features and their raison d'être
+- **incidents/** - Grouped by failure pattern, with lessons
+- **operations/** - Runbooks, alert guides, debugging procedures
+- **path-to-prod/** - CI/CD and deployment process
 ```
 
 **Focus on discovery mechanisms** (grep, component paths) not exhaustive content listing. An index pointing at nothing is worse than the content it displaced.
@@ -84,35 +88,45 @@ Illustrations, **not templates to fill in**.
 MEMORY.md     # Discovery guide + navigation
 ```
 
-**Team Memory (Expanded)** — accumulated knowledge organized by engineering concerns:
+**Team memory (expanded)** — fixed top-level areas; free-form underneath:
 
 ```
 team/
-├── MEMORY.md              # Discovery guide: how to find information (always loaded)
+├── MEMORY.md
+├── architecture/
+│   ├── MEMORY.md
+│   ├── component-map.md
+│   └── design-decisions.md
 ├── components/
-│   ├── MEMORY.md          # Component index
-│   ├── api-gateway/
-│   │   ├── MEMORY.md      # Component-specific index
-│   │   ├── implementation.md  # How it works
-│   │   └── gotchas.md     # Known footguns
-│   └── auth-service/
+│   ├── MEMORY.md
+│   ├── auth-service/
+│   │   ├── MEMORY.md
+│   │   ├── how-it-works.md
+│   │   └── gotchas.md
+│   └── api-gateway/
 │       └── ...
+├── features/
+│   ├── MEMORY.md
+│   └── memory-books/
+│       ├── MEMORY.md
+│       └── why.md
 ├── incidents/
-│   ├── MEMORY.md          # Incident index
+│   ├── MEMORY.md
 │   └── startup-death-spirals/
 │       ├── MEMORY.md
-│       └── 2026-05-api-gateway.md  # Full incident analysis
+│       └── 2026-05-api-gateway.md
 ├── operations/
 │   ├── MEMORY.md
-│   ├── runbooks.md        # Common procedures
-│   └── alerts.md          # Alert meanings and responses
-└── architecture/
+│   ├── common-alerts.md
+│   └── debugging-runbooks.md
+└── path-to-prod/
     ├── MEMORY.md
-    └── decisions.md       # Key technical decisions with rationale
+    ├── ci-cd.md
+    └── deployment-process.md
 ```
 
-**Key differences from generic structure:**
-- **Semantic categories** (components, incidents, operations, architecture) not numbered sequences
+**Key points:**
+- **Fixed top-level categories** — do not invent a seventh root folder
 - **Component-based organization** enables discovery when working on specific services
 - **Incidents grouped by pattern** (startup-death-spirals, not individual incidents at top level)
 - **Root MEMORY.md focuses on discovery guidance** not exhaustive content listing
@@ -123,9 +137,9 @@ team/
 Read what exists before changing anything. A fresh agent has defaults to replace; an existing one is a reorganization, and some files may be shared with other agents.
 
 ### 2. Detect historical session data
-Check if Cadri transcripts are available:
+Check which recent sessions Cadri can see:
 ```bash
-cadri transcripts list
+cadri discover --days 30
 ```
 
 ### 3. Identify the user from git
@@ -137,7 +151,7 @@ Ask one bundle of questions: research depth (standard or deep); other repositori
 ### 5. Analyze approved history
 Only if the user approved in Step 4. Skip entirely otherwise; Step 6 still runs. These sessions are evidence of what happened, not proof of who wrote each prompt.
 
-Use available Cadri transcripts and analyze them for patterns, preferences, chronic mistakes, and architectural decisions. Check authorship carefully — `user` turns in worker sessions may be agent-written dispatch prompts, not human preferences.
+Use the sessions it lists (`cadri show <thread_id>` prints one) and analyze them for patterns, preferences, chronic mistakes, and architectural decisions. Check authorship carefully — `user` turns in worker sessions may be agent-written dispatch prompts, not human preferences.
 
 ### 6. Research the codebase first-hand
 Read the README, agent docs (`AGENTS.md`, `CLAUDE.md`, nested ones), the package manifest, entry points, and recent git history yourself. By the end you should be able to trace a key feature from entry point to implementation; if you can't, you haven't read enough.
@@ -163,32 +177,24 @@ Combine evidence from history analysis and codebase research. Look for:
 **Consider skills.** If the history surfaces genuinely repeatable multi-step procedures, create them now or note the candidates in memory. Don't force it.
 
 ### 9. Verify
-- **Structure**: check root `MEMORY.md`, per-directory indexes, frontmatter-free `MEMORY.md`, and exactly `name`+`description` elsewhere. Avoid `foo.md` beside `foo/`:
-  `find "$MEMORY_DIR" -name '*.md' | sed 's/\.md$//' | while read f; do [ -d "$f" ] && echo "VIOLATION: $f"; done`
-- **Root earns its place**: does root `MEMORY.md` mostly point at things *not* already in your system prompt? If nearly everything sits in root with one thin page behind it, move the detail down and keep the links.
+- **Structure**: check root `MEMORY.md`, per-directory `MEMORY.md` indexes, no frontmatter on either, and exactly `name`+`description` elsewhere. Avoid `foo.md` beside `foo/`:
+  `find "$(cadri memory path)" "$(cadri memory path --scope user)" -name '*.md' | sed 's/\.md$//' | while read f; do [ -d "$f" ] && echo "VIOLATION: $f"; done`
+- **Root earns its place**: does root `MEMORY.md` mostly point at things a session would not find on its own? If nearly everything sits in root with one thin page behind it, move the detail down and keep the links.
 - **No duplicated documentation**: grep your memory for rules `AGENTS.md`, `CLAUDE.md`, the README, or a repo skill already owns — especially a repo convention that landed in a file about the *human*.
 - **Granularity and naming**: one focused topic per file, named for what is in it using the project's real name; path and description say when to read it.
-- **Persona quality**: read it now. "I'm a coding assistant who follows the user's preferences" is behavior, not identity. Would you be recognizably the same agent on a different model tomorrow?
-- **No drift, no over-pruning**: confirm you changed structure and not the meaning of persona or behavioral instructions, and restore any specific paths, chronic failures, or gotchas lost in curation.
+- **No drift, no over-pruning**: confirm you changed structure and not the meaning of preferences or behavioral instructions, and restore any specific paths, chronic failures, or gotchas lost in curation.
 
-### 10. Commit, then report
-**Uncommitted memory is not part of your future system prompt.** If a commit is blocked, report initialization as incomplete rather than describing working-tree files as live memory.
+### 10. Push, then report
+**Unpushed memory does not reach your team or your next session.** If the push fails, report initialization as incomplete rather than describing working-tree files as live memory.
 
 ```bash
-cd $MEMORY_DIR
-git status                # Review what changed before staging
-git add <specific files>  # Stage targeted paths — avoid blind `git add -A`
-git commit -m "feat(init): <summary>
-
-<what was initialized and key decisions made>"
-
-git status                        # Your memory changes should no longer be listed
-git ls-tree -r --name-only HEAD   # What your future self will actually load
+cadri memory push --human -m "init: <summary of what was initialized and key decisions>"
+cadri memory status   # both books clean, nothing ahead
 ```
 
-Do **not** run `git push`. The harness pushes clean committed memory automatically after the turn, so pushing by hand races it. The commit is the finish line.
+`cadri memory push` commits only the files you edited, rebases onto the latest book, and pushes. Exit status 3 means a conflict: follow the directions it prints (the `cadri-memory-repair` skill covers them), then run `cadri memory push --continue`.
 
-Only once the commit is verified, tell the user what you built and whether coverage was complete, then ask whether they want refinement — which means another commit, so repeat this step.
+Only once the push succeeds, tell the user what you built and whether coverage was complete, then ask whether they want refinement — which means another push, so repeat this step.
 
 ## Critical
 - **Use parallel tool calls wherever possible** — read many files in one turn, write many memory files in one turn.
