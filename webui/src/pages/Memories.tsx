@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import type { Me } from "../ee/workos";
+import { funName } from "../funNames";
 import { Page } from "../page";
 import { useSession } from "../session";
 import { applySave } from "./memories/blame";
@@ -735,7 +736,7 @@ function editorAuthor(me: Me | null): MemoryAuthor {
   if (!me) {
     return { kind: "human", user_id: "local", label: "You" };
   }
-  return { kind: "human", user_id: me.user_id, label: me.email ?? me.user_id };
+  return { kind: "human", user_id: me.user_id, label: funName(me.user_id) };
 }
 
 function readStore(store: MemoryStore): MemoryStore {

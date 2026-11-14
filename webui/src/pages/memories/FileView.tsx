@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { HumanMark, RobotMark } from "../../icons";
+import { displayAuthorName } from "../../funNames";
 import { blameGroups, type BlameGroup } from "./blame";
 import { AuthorMark } from "./AuthorMark";
 import type { LoadedFile, MemoryAuthor, MemoryCommit, MemoryFile } from "./types";
@@ -425,7 +426,10 @@ function Contributors({ file }: { file: MemoryFile }) {
     <div className="blame-contributors">
       <span className="blame-faces">
         {people.slice(0, 4).map((author) => (
-          <span key={authorKey(author)} title={author.kind === "human" ? author.label : author.id}>
+          <span
+            key={authorKey(author)}
+            title={author.kind === "human" ? displayAuthorName(author.user_id, author.label) : author.id}
+          >
             {author.kind === "human" ? <HumanMark /> : <RobotMark />}
           </span>
         ))}

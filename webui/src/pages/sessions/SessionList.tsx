@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
+import { sessionUserLabel } from "../../funNames";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { loadMemoryLog } from "../memories/books";
@@ -127,7 +128,7 @@ export default function SessionList() {
   }
 
   const meId = session.me?.user_id;
-  const userLabel = useCallback((userId: string) => (userId === meId ? "Me" : userId), [meId]);
+  const userLabel = useCallback((userId: string) => sessionUserLabel(userId, meId), [meId]);
 
   function change(changes: Partial<Filters>): void {
     setParams((current) => withFilters(current, changes), { replace: true });
@@ -186,7 +187,9 @@ export default function SessionList() {
             filters={filters}
             harnesses={distinct(rows, (row) => row.harness)}
             models={distinct(rows, (row) => row.model)}
-            users={distinct(rows, (row) => row.user_id)}
+            users={distinct(rows, (row) => row.user_id).sort((left, right) =>
+              userLabel(left).localeCompare(userLabel(right)),
+            )}
             userLabel={userLabel}
             onChange={change}
           />
@@ -206,6 +209,7 @@ export default function SessionList() {
                   <tr>
                     <th>Session ID</th>
                     <th>Agent Harness</th>
+                    <th>User</th>
                     <th>Session Prompt</th>
                     <SortHeader label="Activity" column="activity" sort={sort} onSort={toggleSort} />
                     <SortHeader label="Memories Generated" column="memories" sort={sort} onSort={toggleSort} />
@@ -224,6 +228,7 @@ export default function SessionList() {
                       <td>
                         <HarnessBadge harness={row.harness} />
                       </td>
+                      <td className="session-user">{row.user_id ? userLabel(row.user_id) : "—"}</td>
                       <td className="session-prompt">
                         {row.model ? <span className="session-model">{row.model}</span> : null}
                         <span className="session-prompt-text">{row.prompt || row.preview || "No prompt"}</span>

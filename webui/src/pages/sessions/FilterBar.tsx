@@ -8,12 +8,14 @@ function Select({
   value,
   allLabel,
   options,
+  valueLabel,
   onChange,
 }: {
   label: string;
   value: string | null;
   allLabel: string;
   options: Option[];
+  valueLabel?: (value: string) => string;
   onChange: (value: string | null) => void;
 }) {
   const known = value === null || options.some((option) => option.value === value);
@@ -27,7 +29,7 @@ function Select({
             {option.label}
           </option>
         ))}
-        {known ? null : <option value={value ?? ""}>{value}</option>}
+        {known ? null : <option value={value ?? ""}>{valueLabel ? valueLabel(value ?? "") : value}</option>}
       </select>
     </label>
   );
@@ -70,6 +72,7 @@ export function SessionFilters({
           value={filters.user}
           allLabel="All users"
           options={users.map((value) => ({ value, label: userLabel(value) }))}
+          valueLabel={userLabel}
           onChange={(user) => onChange({ user })}
         />
       </div>

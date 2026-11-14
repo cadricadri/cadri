@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
+import { funName, sessionUserLabel } from "../../funNames";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { ChatThread } from "./ChatThread";
@@ -54,7 +55,7 @@ export default function SessionDetail() {
     void load();
   }, [load]);
 
-  const userLabel = detail?.user_id ? (detail.user_id === session.me?.user_id ? "Me" : detail.user_id) : null;
+  const userLabel = detail?.user_id ? sessionUserLabel(detail.user_id, session.me?.user_id) : null;
 
   return (
     <Page
@@ -84,7 +85,10 @@ export default function SessionDetail() {
       {detail ? (
         <div className="session-detail">
           <section className="session-chat" aria-label="Conversation">
-            <ChatThread messages={detail.messages} />
+            <ChatThread
+              messages={detail.messages}
+              speaker={detail.user_id ? funName(detail.user_id) : "You"}
+            />
           </section>
           <SessionSidebar detail={detail} userLabel={userLabel} />
         </div>

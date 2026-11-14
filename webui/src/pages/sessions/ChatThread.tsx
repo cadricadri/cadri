@@ -2,7 +2,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { formatTime, type ChatMessage } from "./types";
 
-export function ChatThread({ messages }: { messages: ChatMessage[] }) {
+export function ChatThread({ messages, speaker = "You" }: { messages: ChatMessage[]; speaker?: string }) {
   if (messages.length === 0) {
     return <p className="memory-empty">This session has no messages Cadri could read.</p>;
   }
@@ -11,7 +11,7 @@ export function ChatThread({ messages }: { messages: ChatMessage[] }) {
       {messages.map((message, index) => (
         <li key={index} className={`chat-turn chat-${message.role}`}>
           <span className="chat-who">
-            {message.role === "user" ? "You" : "Agent"}
+            {message.role === "user" ? speaker : "Agent"}
             {message.at ? <time dateTime={message.at}>{formatTime(message.at)}</time> : null}
           </span>
           {message.notes?.length ? <WorkingNotes notes={message.notes} /> : null}
