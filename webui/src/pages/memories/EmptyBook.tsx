@@ -1,12 +1,30 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CopyButton, DOCS_URL, INSTALL_DOCS_URL, INSTALL_PROMPT, SEED_DOCS_URL } from "../../install";
+import {
+  CopyButton,
+  DOCS_URL,
+  INSTALL_DOCS_URL,
+  INSTALL_PROMPT,
+  JOIN_DOCS_URL,
+  JOIN_PROMPT,
+  SEED_DOCS_URL,
+} from "../../install";
 
 export type EmptyPhase = "install" | "seeding" | "empty";
+export type EmptyFlow = "install" | "join";
 
 type MemoryScope = "team" | "user";
 
-export function EmptyBook({ scope, phase }: { scope: MemoryScope; phase: EmptyPhase }) {
+export function EmptyBook({
+  scope,
+  phase,
+  flow = "install",
+}: {
+  scope: MemoryScope;
+  phase: EmptyPhase;
+  flow?: EmptyFlow;
+}) {
+  const prompt = flow === "join" ? JOIN_PROMPT : INSTALL_PROMPT;
   return (
     <div className="memory-file">
       <div className="memory-slug">
@@ -15,11 +33,11 @@ export function EmptyBook({ scope, phase }: { scope: MemoryScope; phase: EmptyPh
         </p>
       </div>
       <section className="memory-preview memory-onboarding" aria-label="INITIALIZING.md">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{explainer(scope, phase)}</ReactMarkdown>
-        <pre className="install-prompt">{INSTALL_PROMPT}</pre>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{explainer(scope, phase, flow)}</ReactMarkdown>
+        <pre className="install-prompt">{prompt}</pre>
         <div className="form-actions">
-          <CopyButton text={INSTALL_PROMPT} />
-          {links(phase).map((link) => (
+          <CopyButton text={prompt} />
+          {links(phase, flow).map((link) => (
             <a key={link.href} className="btn ghost" href={link.href} target="_blank" rel="noreferrer">
               {link.label}
             </a>
@@ -30,7 +48,10 @@ export function EmptyBook({ scope, phase }: { scope: MemoryScope; phase: EmptyPh
   );
 }
 
-function explainer(scope: MemoryScope, phase: EmptyPhase): string {
+function explainer(scope: MemoryScope, phase: EmptyPhase, flow: EmptyFlow): string {
+  if (flow === "join") {
+    return joinExplainer(phase);
+  }
   if (phase === "install") {
     return [
       "# Connect your coding agents",
@@ -59,10 +80,44 @@ function explainer(scope: MemoryScope, phase: EmptyPhase): string {
   ].join("\n");
 }
 
-function links(phase: EmptyPhase): { href: string; label: string }[] {
-  const install = { href: INSTALL_DOCS_URL, label: "Open install docs" };
+function joinExplainer(phase: EmptyPhase): string {
+  if (phase === "install") {
+    return [
+      "# Join your team's memory",
+      "",
+      "This team already has a memory book. Your sessions are not here yet.",
+      "",
+      "Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri, signs this machine in, uploads your recent sessions, and revises the shared book from what those sessions know. Your personal book starts empty. This usually takes several minutes.",
+    ].join("\n");
+  }
+  if (phase === "seeding") {
+    return [
+      "# Your sessions are being folded into the team book",
+      "",
+      "Your agent is reading the memories your team already has and revising them from your sessions. Your personal book is written in the same pass. This usually takes several minutes, and longer when the book is large. This page refreshes on its own.",
+      "",
+      "Haven't installed Cadri on this machine yet? Paste this prompt into your agent.",
+    ].join("\n");
+  }
+  return [
+    "# No personal memories yet",
+    "",
+    "The team book already has memories. Ask your agent to load the `cadri-memory-join` skill if your personal book stays empty. You can also upload a Markdown file from the file list.",
+    "",
+    "Paste this prompt into your agent if Cadri isn't installed on this machine yet.",
+  ].join("\n");
+}
+
+function links(phase: EmptyPhase, flow: EmptyFlow): { href: string; label: string }[] {
+  const install = {
+    href: flow === "join" ? JOIN_DOCS_URL : INSTALL_DOCS_URL,
+    label: flow === "join" ? "How joining works" : "Open install docs",
+  };
   if (phase === "install") {
     return [install];
+  }
+  if (flow === "join") {
+    return [install, { href: DOCS_URL, label: "Docs" }];
   }
   return [install, { href: SEED_DOCS_URL, label: "How seeding works" }, { href: DOCS_URL, label: "Docs" }];
 }

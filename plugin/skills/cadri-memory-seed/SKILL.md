@@ -1,11 +1,13 @@
 ---
 name: cadri-memory-seed
-description: Turn the user's recent agent sessions into Cadri memories right after cadri init. Use when the Cadri install docs say to seed memory, or when the user asks to learn from past sessions into Cadri. Finish this in the same task as install.
+description: Turn the user's recent agent sessions into the first Cadri memories right after cadri init, when the team book has no lessons yet. Use when the install docs say to seed memory. If the team book already has memories, use cadri-memory-join instead. Finish this in the same task as install.
 ---
 
 # Seed Cadri memory from past sessions
 
-`cadri init` has already uploaded recent sessions and cloned two empty memory books. You write the first lessons and publish them. Do not stop after init.
+`cadri init` has already uploaded recent sessions and cloned two memory books. You write the first lessons and publish them. Do not stop after init.
+
+If the team book already has a topic file — any markdown file other than `MEMORY.md` or `README.md` — it is a shared book that already has memories. Stop and load `cadri-memory-join`. That is also the skill `cadri init` names when it says the team book already has memories.
 
 - **Team book** (`cadri memory path`): shared by everyone in the team. Facts about shared code, systems, conventions, and decisions.
 - **Personal book** (`cadri memory path --scope user`): this person only. Their preferences, corrections, and ways of working.
@@ -55,7 +57,7 @@ Write each lesson as a rule or fact that generalizes, not as a story of the sess
 
 You integrate the lessons yourself. Subagent notes are not memory until you put them in the books.
 
-Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. A fresh install has no files yet. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/`. Do not push a scaffold of empty indexes by itself.
+Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. An empty team book has no topic files yet. Directory indexes may already be there; update them in the same push as the lessons. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/`. Do not push a scaffold of empty indexes by itself.
 
 Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Then publish once:
 

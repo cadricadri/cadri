@@ -13,7 +13,7 @@ plugin/
                          # memory/ (books, sync, push, repair, context, digests), install/ (bundles)
   harnesses/             # per-harness manifests, the Cursor rule, and the OpenCode plugin
   agents/                # the cadri-memory-keeper subagent, rendered per harness
-  skills/                # cadri-install, cadri-memory, cadri-memory-seed, and the memory maintenance skills
+  skills/                # cadri-install, cadri-memory, cadri-memory-seed, cadri-memory-join, and the memory maintenance skills
   install.sh             # served as https://cadri.io/install.sh
   scripts/build-plugins  # build every harness bundle into dist/plugins
   scripts/release        # publish plugin/ as a GitHub release

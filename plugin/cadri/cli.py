@@ -21,6 +21,7 @@ from .hooks.events import EVENTS
 from .install import bundles, config
 from .memory import books as bk
 from .memory import context, digests, editapi, push, repair, sync
+from .memory.layout import has_lessons
 from .upload import post_session
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -169,27 +170,60 @@ def start_local_engine() -> None:
     print(f"Started local engine (log {log}). pid={proc.stdout.strip() or 'unknown'}")
 
 
-def clone_books(url: str | None) -> str:
+def clone_books(url: str | None) -> tuple[str, bool]:
+    """Clone both books. The bool is true when the team book already has lessons."""
     if not bk.git_ready():
         return (
             "Memory: skipped, git is not installed. Run `xcode-select --install`, "
-            "then `cadri memory clone` and `cadri memory clone --scope user`."
+            "then `cadri memory clone` and `cadri memory clone --scope user`.",
+            False,
         )
     started = time.monotonic()
-    paths = []
+    paths: list[str] = []
+    team_path: Path | None = None
+    error: bk.MemoryFailure | None = None
     try:
         for scope in ("team", "user"):
             book = bk.open_book(scope, url)
             bk.ensure_clone(book)
             paths.append(str(book.path))
+            if scope == "team":
+                team_path = book.path
     except bk.MemoryFailure as exc:
-        if paths:
-            return f"Memory: cloned {', '.join(paths)}, then failed ({exc})"
-        return f"Memory: not cloned ({exc}); run `cadri memory clone` later"
-    return (
-        f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}. "
-        "Books stay empty until seeding writes the first memories."
-    )
+        error = exc
+    if not paths:
+        return (f"Memory: not cloned ({error}); run `cadri memory clone` later", False)
+    joining = team_path is not None and has_lessons(team_path)
+    if error:
+        message = f"Memory: cloned {', '.join(paths)}, then failed ({error})."
+    else:
+        message = f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}."
+    if joining:
+        message += " The team book already has memories and is shared with your team. Your personal book starts empty."
+    elif not error:
+        message += " Books stay empty until seeding writes the first memories."
+    return message, joining
+
+
+def memory_time_warning(joining: bool) -> str:
+    if joining:
+        return (
+            "Joining usually takes several minutes, and longer when the team book and the session window are both large. "
+            "Do it in this same task, before you stop."
+        )
+    return "Seeding usually takes several minutes. Do it in this same task, before you stop."
+
+
+def next_memory_step(joining: bool) -> str:
+    window = "If the user asked for a smaller window, pass it to `cadri discover --seed`."
+    if joining:
+        return (
+            "Next: follow the cadri-memory-join skill. "
+            "The team book already has memories and is shared with your teammates. "
+            "Read it and revise it from your sessions. "
+            + window
+        )
+    return "Next: follow the cadri-memory-seed skill. " + window
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -221,7 +255,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     if summary["by_harness"]:
         print("  " + ", ".join(f"{HARNESS_NAMES[k]} {v}" for k, v in summary["by_harness"].items()))
-    print(clone_books(args.url))
+    cloned, joining = clone_books(args.url)
+    print(cloned)
     if "codex" in harnesses:
         print("Codex runs new hooks only after you trust them: open Codex, type /hooks, and trust the Cadri hooks.")
     chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), SEED_DAYS, SEED_LIMIT)
@@ -229,11 +264,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         f"Seed window: {len(chosen)} sessions "
         f"({in_window} in the last {SEED_DAYS} days, {newest} most recent)."
     )
-    print("Seeding usually takes several minutes. Do it in this same task, before you stop.")
-    print(
-        "Next: follow the cadri-memory-seed skill. "
-        "If the user asked for a smaller window, pass it to `cadri discover --seed`."
-    )
+    print(memory_time_warning(joining))
+    print(next_memory_step(joining))
     return 0
 
 

@@ -1,9 +1,11 @@
 ---
 name: cadri-initializing-memory
-description: Reorganize an existing Cadri memory book. Use when the user asks to restructure memory or run a deep memory init. A fresh Cadri install uses cadri-memory-seed instead.
+description: Reorganize an existing Cadri memory book when the user asks to restructure memory or run a deep memory init. A fresh team uses cadri-memory-seed. Someone who just joined a team uses cadri-memory-join.
 ---
 
 # Memory Initialization
+
+Someone who just accepted a team invite follows `cadri-memory-join`. A brand-new team follows `cadri-memory-seed`. This skill is the reorganization the user asked for.
 
 Your memory is two git clones of Markdown: the team book at `$(cadri memory path)` and your personal book at `$(cadri memory path --scope user)`. Restructure them with ordinary file tools, then publish with `cadri memory push`.
 **You own this task through completion**: research, ask, synthesize, write, commit, verify. Delegate research, but integrate the results yourself — launching a background task is not completion. If a `cadri-memory-keeper` you launched is still editing, wait for it, then re-read before editing.

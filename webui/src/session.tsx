@@ -18,7 +18,8 @@ import {
   type AuthMode,
 } from "./auth";
 import type { InviteResult, Me, OrgResult } from "./ee/workos";
-import { CopyButton, INSTALL_DOCS_URL, INSTALL_PROMPT } from "./install";
+import { CopyButton, INSTALL_DOCS_URL, INSTALL_PROMPT, JOIN_DOCS_URL, JOIN_PROMPT } from "./install";
+import { countMySessions, hasTopicFile, onboardingDecision, sessionsReady } from "./onboarding";
 import { clearMemoryCaches, primeMemoryBook, setMemoryIdentity } from "./pages/memories/books";
 
 type WorkosModule = typeof import("./ee/workos");
@@ -30,7 +31,7 @@ type Gate =
   | { kind: "token"; message: string }
   | { kind: "redirecting" }
   | { kind: "organization" }
-  | { kind: "install"; mode: AuthMode; me: Me | null }
+  | { kind: "install"; mode: AuthMode; me: Me | null; flow: "install" | "join" }
   | { kind: "error"; message: string }
   | { kind: "app"; mode: AuthMode; me: Me | null };
 
@@ -125,8 +126,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       const me = result.kind === "ok" ? result.me : null;
       warmMemoryBooks(authHeaders("workos"), me);
+      if (me && !installSkipped()) {
+        const flow = await detectOnboarding(authHeaders("workos"), me.user_id);
+        if (cancelled) {
+          return;
+        }
+        if (flow === "ready") {
+          markInstallSkipped();
+          setGate({ kind: "app", mode: "workos", me });
+          return;
+        }
+        setGate({ kind: "install", mode: "workos", me, flow });
+        return;
+      }
       if (!installSkipped()) {
-        setGate({ kind: "install", mode: "workos", me });
+        setGate({ kind: "install", mode: "workos", me, flow: "install" });
         return;
       }
       setGate({ kind: "app", mode: "workos", me });
@@ -232,7 +246,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
             api.signIn();
           } else if (result.kind === "ok") {
             warmMemoryBooks(authHeaders("workos"), result.me);
-            setGate({ kind: "install", mode: "workos", me: result.me });
+            setGate({ kind: "install", mode: "workos", me: result.me, flow: "install" });
           }
           return result;
         }}
@@ -242,6 +256,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   if (gate.kind === "install") {
     return (
       <InstallGate
+        flow={gate.flow}
+        orgName={gate.me?.org_name ?? null}
+        userId={gate.me?.user_id ?? null}
         onReady={() => {
           markInstallSkipped();
           window.location.assign("/sessions");
@@ -308,19 +325,29 @@ function TokenGate({ message, onSubmit }: { message: string; onSubmit: (value: s
 }
 
 function InstallGate({
+  flow,
+  orgName,
+  userId,
   onReady,
   onSkip,
   headers,
 }: {
+  flow: "install" | "join";
+  orgName: string | null;
+  userId: string | null;
   onReady: () => void;
   onSkip: () => void;
   headers: () => Record<string, string>;
 }) {
   const [status, setStatus] = useState("Waiting for your agent to connect…");
+  const joining = flow === "join";
+  const prompt = joining ? JOIN_PROMPT : INSTALL_PROMPT;
+  const docsUrl = joining ? JOIN_DOCS_URL : INSTALL_DOCS_URL;
+  const team = orgName ?? "your team";
 
   useEffect(() => {
-    document.title = "Cadri · Install";
-  }, []);
+    document.title = joining ? "Cadri · Join" : "Cadri · Install";
+  }, [joining]);
 
   useEffect(() => {
     let cancelled = false;
@@ -333,8 +360,8 @@ function InstallGate({
         if (!response.ok) {
           return;
         }
-        const rows = (await response.json()) as unknown[];
-        if (Array.isArray(rows) && rows.length > 0) {
+        const rows = (await response.json()) as { user_id?: string }[];
+        if (Array.isArray(rows) && sessionsReady(rows, userId)) {
           setStatus("Sessions found — opening Cadri…");
           onReady();
         }
@@ -348,22 +375,21 @@ function InstallGate({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [headers, onReady]);
+  }, [headers, onReady, userId]);
 
   return (
     <main className="gate">
       <div className="panel install-panel">
-        <h1>Connect your coding agents</h1>
+        <h1>{joining ? `Join ${team}` : "Connect your coding agents"}</h1>
         <p className="hint">
-          Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri,
-          signs this machine in, and uploads recent sessions. Seeding memory from those sessions
-          usually takes several minutes. This page opens Cadri as soon as the first sessions arrive,
-          while seeding continues. Edit the prompt to use a smaller window.
+          {joining
+            ? `${team} already has a memory book. Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri, signs this machine in, uploads your recent sessions, and revises the shared book from what those sessions know. Your personal book starts empty. This usually takes several minutes, and longer when the book is large. This page opens Cadri as soon as your sessions arrive, while that revision continues. Edit the prompt to use a smaller window.`
+            : "Paste this prompt into Claude Code, Cursor, Codex, or OpenCode. Your agent installs Cadri, signs this machine in, and uploads recent sessions. Seeding memory from those sessions usually takes several minutes. This page opens Cadri as soon as your sessions arrive, while seeding continues. Edit the prompt to use a smaller window."}
         </p>
-        <pre className="install-prompt">{INSTALL_PROMPT}</pre>
+        <pre className="install-prompt">{prompt}</pre>
         <div className="form-actions">
-          <CopyButton text={INSTALL_PROMPT} />
-          <a className="btn ghost" href={INSTALL_DOCS_URL} target="_blank" rel="noreferrer">
+          <CopyButton text={prompt} />
+          <a className="btn ghost" href={docsUrl} target="_blank" rel="noreferrer">
             Open docs
           </a>
           <button className="btn ghost" type="button" onClick={onSkip}>
@@ -376,6 +402,33 @@ function InstallGate({
       </div>
     </main>
   );
+}
+
+async function detectOnboarding(
+  headers: Record<string, string>,
+  userId: string,
+): Promise<"ready" | "install" | "join"> {
+  try {
+    const [treeResponse, sessionResponse] = await Promise.all([
+      fetch("/api/memories/tree", { headers }),
+      fetch("/api/sessions", { headers }),
+    ]);
+    let teamHasLessons = false;
+    let mySessionCount = 0;
+    if (treeResponse.ok) {
+      const tree = (await treeResponse.json()) as { files?: { path: string }[] };
+      teamHasLessons = hasTopicFile(tree.files ?? []);
+    }
+    if (sessionResponse.ok) {
+      const rows = (await sessionResponse.json()) as { user_id?: string }[];
+      if (Array.isArray(rows)) {
+        mySessionCount = countMySessions(rows, userId);
+      }
+    }
+    return onboardingDecision({ teamHasLessons, mySessionCount });
+  } catch {
+    return "install";
+  }
 }
 
 function OrganizationGate({ onSubmit }: { onSubmit: (name: string) => Promise<OrgResult> }) {

@@ -7,6 +7,7 @@ readers accept either, writers always create `MEMORY.md`.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from .books import Book
@@ -148,6 +149,22 @@ Typical files: `ci-cd.md`, `deployment-process.md`.
 
 def is_index(name: str) -> bool:
     return name in (INDEX_FILE, LEGACY_INDEX_FILE)
+
+
+def has_lessons(root: Path) -> bool:
+    """True when `root` contains a markdown file that is not a directory index.
+
+    `MEMORY.md` and `README.md` are indexes. An index-only book is still waiting
+    for its first lesson, matching the memories page.
+    """
+    if not root.is_dir():
+        return False
+    for _dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        for name in filenames:
+            if name.endswith(".md") and not is_index(name):
+                return True
+    return False
 
 
 def index_path(directory: Path) -> Path | None:

@@ -648,6 +648,14 @@ class SeedWindowTests(unittest.TestCase):
         self.assertEqual(cli.resolve_discover_bounds(10, 10, True), (10, 10))
         self.assertEqual(cli.resolve_discover_bounds(None, None, False), (30.0, 50))
 
+    def test_init_names_the_join_skill_when_the_team_book_has_lessons(self):
+        self.assertIn("cadri-memory-join", cli.next_memory_step(True))
+        self.assertIn("shared with your teammates", cli.next_memory_step(True))
+        self.assertIn("cadri-memory-seed", cli.next_memory_step(False))
+        self.assertNotIn("cadri-memory-join", cli.next_memory_step(False))
+        self.assertIn("team book", cli.memory_time_warning(True))
+        self.assertIn("Seeding usually takes", cli.memory_time_warning(False))
+
     def ref(self, thread_id: str, updated_at: float):
         from cadri.discover.types import SessionRef
 

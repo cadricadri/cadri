@@ -27,6 +27,7 @@ import type { LoadedFile, MemoryAuthor, MemoryFile, MemoryStore, MemoryTree } fr
 import { applyCreateFile, applyCreateFolder, applyMove, applyRenameFolder, planMove, type PathIssue } from "./memories/folders";
 import { applyUpload, prepareUploads } from "./memories/upload";
 import { EmptyBook, type EmptyPhase } from "./memories/EmptyBook";
+import { hasTopicFile } from "../onboarding";
 import type { SessionRow } from "./sessions/types";
 
 type MemoryScope = "team" | "user";
@@ -53,6 +54,10 @@ export default function Memories() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [draftDirectory, setDraftDirectory] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionRow[] | null>(null);
+  const [teamLessons, setTeamLessons] = useState<boolean | null>(() => {
+    const cached = peekMemoryBook("team");
+    return cached ? hasTopicFile(cached.files) : null;
+  });
   const request = useRef(0);
   const blamedPaths = useRef(new Set<string>());
   const seenScope = useRef<MemoryScope>("team");
@@ -121,6 +126,28 @@ export default function Memories() {
   }, [load, scope]);
 
   const awaitingFirstMemory = store !== null && !hasTopicFile(store.files);
+  useEffect(() => {
+    if (scope !== "user") {
+      return;
+    }
+    let cancel = false;
+    void loadMemoryBook("team", session.headers(), null)
+      .then((book) => {
+        if (!cancel) {
+          setTeamLessons(hasTopicFile(book.files));
+        }
+      })
+      .catch(() => {
+        if (!cancel) {
+          setTeamLessons(false);
+        }
+      });
+    return () => {
+      cancel = true;
+    };
+  }, [scope, session]);
+  const joining = scope === "user" && teamLessons === true;
+  const joinPending = scope === "user" && awaitingFirstMemory && teamLessons === null;
   useEffect(() => {
     if (!awaitingFirstMemory) {
       return;
@@ -591,8 +618,12 @@ export default function Memories() {
                 onIssue={showIssue}
               />
               {awaitingFirstMemory ? (
-                phase ? (
-                  <EmptyBook scope={scope} phase={phase} />
+                joinPending ? (
+                  <p className="status" role="status">
+                    Loading…
+                  </p>
+                ) : phase ? (
+                  <EmptyBook scope={scope} phase={phase} flow={joining ? "join" : "install"} />
                 ) : (
                   <p className="status" role="status">
                     Loading…
@@ -651,14 +682,6 @@ function commitsUrl(scope: MemoryScope): string {
 
 function treeUrl(scope: MemoryScope): string {
   return scope === "user" ? "/api/memories/tree?scope=user" : "/api/memories/tree";
-}
-
-/** Directory indexes are not lessons. A book of only these stays on the seeding screen. */
-function hasTopicFile(files: { path: string }[]): boolean {
-  return files.some((file) => {
-    const name = file.path.slice(file.path.lastIndexOf("/") + 1);
-    return name !== "MEMORY.md" && name !== "README.md";
-  });
 }
 
 /** What an empty book should tell the reader, from how far session upload has gotten. */

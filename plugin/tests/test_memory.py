@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 import time
 import unittest
 import urllib.error
@@ -18,7 +19,7 @@ from support import BASE, TOKEN, BooksTestCase, run_git
 from cadri import cli
 from cadri.memory import books as bk
 from cadri.memory import edits, editapi, push, repair, sync
-from cadri.memory.layout import TEAM_LAYOUT
+from cadri.memory.layout import TEAM_LAYOUT, has_lessons
 from cadri.state import locked
 
 
@@ -394,6 +395,22 @@ class ScaffoldTests(BooksTestCase):
         self.assertEqual([change["path"] for change in post["body"]["changes"]], [path for path, _ in TEAM_LAYOUT])
         self.assertEqual(post["body"]["agent"], "cadri-init")
         self.assertNotIn("base", post["body"])
+
+
+class LessonTests(unittest.TestCase):
+    def test_indexes_are_not_lessons_and_git_metadata_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".git").mkdir()
+            (root / ".git" / "notes.md").write_text("not a lesson")
+            (root / "MEMORY.md").write_text("# Team")
+            (root / "architecture").mkdir()
+            (root / "architecture" / "MEMORY.md").write_text("# Architecture")
+            (root / "README.md").write_text("legacy index")
+            self.assertFalse(has_lessons(root))
+            self.assertFalse(has_lessons(root / "missing"))
+            (root / "architecture" / "decisions.md").write_text("---\nname: Decisions\n---\n")
+            self.assertTrue(has_lessons(root))
 
 
 if __name__ == "__main__":
