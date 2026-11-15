@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use crate::memory::types::memory_path_ok;
 
 use super::author::{required_author, Parsed};
-use super::commit::check_layout;
+use super::commit::{check_book_text, check_layout};
 use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_out, git_text, Repo};
 use super::ids::{is_hex, MAX_FILE_BYTES, ZERO};
@@ -100,7 +100,22 @@ pub(super) fn inspect(
                 ));
             }
         }
-        check_layout(entries.iter().map(|(_, path)| path.as_str()))?;
+        let mut texts = Vec::with_capacity(entries.len());
+        for (blob, path) in entries {
+            let text = if let Some(known) = snapshot.blobs.get(blob) {
+                known.as_ref()
+            } else {
+                let bytes = bodies.get(blob).ok_or_else(|| {
+                    Fail::git(format!("blob {blob} missing from cat-file --batch"))
+                })?;
+                std::str::from_utf8(bytes).map_err(|_| {
+                    Fail::api(StatusCode::BAD_REQUEST, "memory file must be utf-8 text")
+                })?
+            };
+            texts.push((path.as_str(), text));
+        }
+        check_layout(texts.iter().map(|(path, _)| *path))?;
+        check_book_text(texts)?;
     }
     Ok(())
 }

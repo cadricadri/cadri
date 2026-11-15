@@ -11,7 +11,10 @@ use crate::memory::types::{memory_path_ok, Change};
 use super::author::{is_trailer, SESSION_TRAILER};
 use super::error::Fail;
 use super::git_cli_exec::{git_ok, git_text, Repo};
-use super::ids::{is_hex, is_keep, MAX_FILE_BYTES, ZERO};
+use super::ids::{
+    is_hex, is_keep, CORE_TOO_LONG, FILE_TOO_LONG, MAX_CORE_CHARS, MAX_DEPTH, MAX_FILE_BYTES,
+    MAX_FILE_CHARS, PATH_TOO_DEEP, ZERO,
+};
 use super::snapshot::Snapshot;
 
 /// Where a file's bytes come from in a commit being built: a blob already in the
@@ -99,6 +102,56 @@ pub(super) fn check_content(path: &str, content: &str) -> Result<(), Fail> {
     }
     if is_keep(path) && !content.is_empty() {
         return Err(Fail::api(StatusCode::BAD_REQUEST, "invalid memory path"));
+    }
+    Ok(())
+}
+
+/// Size and depth of the book a commit would publish. `.keep` markers carry no text.
+pub(super) fn check_sources(
+    files: &BTreeMap<String, Source>,
+    blobs: &HashMap<String, Arc<str>>,
+) -> Result<(), Fail> {
+    let mut listed = Vec::with_capacity(files.len());
+    for (path, source) in files {
+        if is_keep(path) {
+            listed.push((path.as_str(), ""));
+            continue;
+        }
+        let text = match source {
+            Source::Text(text) => text.as_str(),
+            Source::Blob(sha) => blobs
+                .get(sha)
+                .map(Arc::as_ref)
+                .ok_or_else(|| Fail::git(format!("blob {sha} missing from snapshot")))?,
+        };
+        listed.push((path.as_str(), text));
+    }
+    check_book_text(listed)
+}
+
+/// `files` is `(path, text)` for one tree, markers included.
+pub(super) fn check_book_text<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), Fail> {
+    let mut core = 0usize;
+    for (path, text) in files {
+        let depth = path.matches('/').count();
+        if depth > MAX_DEPTH {
+            return Err(Fail::api(StatusCode::BAD_REQUEST, PATH_TOO_DEEP));
+        }
+        if is_keep(path) {
+            continue;
+        }
+        let chars = text.chars().count();
+        if chars > MAX_FILE_CHARS {
+            return Err(Fail::api(StatusCode::BAD_REQUEST, FILE_TOO_LONG));
+        }
+        if !path.contains('/') && path.ends_with(".md") {
+            core += chars;
+        }
+    }
+    if core > MAX_CORE_CHARS {
+        return Err(Fail::api(StatusCode::BAD_REQUEST, CORE_TOO_LONG));
     }
     Ok(())
 }

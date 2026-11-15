@@ -104,7 +104,7 @@ fn ui_commit_round_trip_stores_a_large_book() {
             user,
             label,
             "a long note",
-            &[write("big.md", &"a\n".repeat(20_001))],
+            &[write("big.md", &"a\n".repeat(8_000))],
         )
         .unwrap();
     assert!(long.files.iter().any(|file| file.path == "big.md"));
@@ -120,6 +120,56 @@ fn ui_commit_round_trip_stores_a_large_book() {
 
     let clash = service.commit(repo, user, label, "file", &[write("notes", "x")]);
     assert!(matches!(clash, Err(err) if err.message == "invalid memory path"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn memory_shape_limits_reject_a_deep_path_a_long_file_and_a_bloated_root() {
+    let root = temp();
+    let service = MemoryService::open_local(&root, false);
+    let repo = "org_shape_repo_0";
+    let (user, label) = author();
+
+    let deep = service.commit(repo, user, label, "deep", &[write("a/b/c/d.md", "x")]);
+    assert!(matches!(deep, Err(err) if err.message == "memory path is too deep"));
+
+    let nested = service
+        .commit(
+            repo,
+            user,
+            label,
+            "ok",
+            &[write("components/api/gotchas.md", "x")],
+        )
+        .unwrap();
+    assert!(nested
+        .files
+        .iter()
+        .any(|file| file.path == "components/api/gotchas.md"));
+
+    let long = service.commit(
+        repo,
+        user,
+        label,
+        "long",
+        &[write("notes.md", &"x".repeat(20_001))],
+    );
+    assert!(matches!(long, Err(err) if err.message == "memory file is over 20000 characters"));
+
+    let chunk = "a".repeat(20_000);
+    let core = service.commit(
+        repo,
+        user,
+        label,
+        "core",
+        &[
+            write("a.md", &chunk),
+            write("b.md", &chunk),
+            write("c.md", &chunk),
+            write("d.md", &chunk),
+        ],
+    );
+    assert!(matches!(core, Err(err) if err.message == "core memory is over 65536 characters"));
     let _ = fs::remove_dir_all(root);
 }
 

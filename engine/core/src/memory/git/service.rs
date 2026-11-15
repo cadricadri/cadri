@@ -17,8 +17,8 @@ use crate::ApiError;
 use super::author::valid_session;
 use super::bundle::parse_bundle_header;
 use super::commit::{
-    apply_changes, check_content, clean_message, commit_tree, current_sources, valid_agent,
-    CommitAuthor, Source, TreeBuilder,
+    apply_changes, check_content, check_sources, clean_message, commit_tree, current_sources,
+    valid_agent, CommitAuthor, Source, TreeBuilder,
 };
 use super::durable::{checkpoint_key, log_key, seq_of, Created, DirDurable, Durable};
 use super::error::{into_api, s3_fail, Fail};
@@ -1210,6 +1210,7 @@ fn apply_edit(
     if files == before {
         return Ok(None);
     }
+    check_sources(&files, &current.blobs)?;
     let parent = current.tip.as_deref();
     let built = builder.build(parent, &before, &files)?;
     let author = match &request.agent {
