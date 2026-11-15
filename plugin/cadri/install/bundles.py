@@ -136,6 +136,11 @@ def grouped_hooks(hooks: tuple[Hook, ...], cli: str, harness: str) -> dict:
     return result
 
 
+def mcp_config(cli: str) -> dict:
+    """The search tool. `cli` is a shell-quoted command, the same string the hooks run."""
+    return {"mcpServers": {"cadri": {"command": "sh", "args": ["-c", f"exec {cli} mcp"]}}}
+
+
 def cursor_hooks(cli: str) -> dict:
     return {
         "version": 1,
@@ -259,6 +264,7 @@ def build(harness: str, dest: Path, cli: str | None = None, installed_at: str | 
         root = dest / "cadri"
         shutil.copytree(HARNESS_FILES / "claude", root)
         write_json(root / "hooks" / "hooks.json", {"hooks": grouped_hooks(CLAUDE_HOOKS, cli, "claude")})
+        write_json(root / ".mcp.json", mcp_config(cli))
         write_text(root / "agents" / f"{KEEPER}.md", keeper_markdown("claude"))
         copy_skills(root / "skills")
         manifest = json.loads((root / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
@@ -275,6 +281,7 @@ def build(harness: str, dest: Path, cli: str | None = None, installed_at: str | 
     if harness == "cursor":
         shutil.copytree(HARNESS_FILES / "cursor", dest, dirs_exist_ok=True)
         write_json(dest / "hooks" / "hooks.json", cursor_hooks(cli))
+        write_json(dest / "mcp.json", mcp_config(cli))
         write_text(dest / "agents" / f"{KEEPER}.md", keeper_markdown("cursor"))
         copy_skills(dest / "skills")
         return dest

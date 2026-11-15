@@ -10,11 +10,11 @@ Cadri keeps two memory books on this machine as git clones:
 - **Team book** — facts, decisions, and lessons the whole team shares. Path: `cadri memory path`.
 - **Personal book** — this person's preferences and working style. Path: `cadri memory path --scope user`.
 
-Each book has a `MEMORY.md` at its root that every session loads, directories with their own `MEMORY.md` index, and topic files that start with `name` and `description` frontmatter. The Cadri plugin loads both root `MEMORY.md` files and a tree of the books at session start, and points you at likely files on each prompt. The team book's top-level directories are fixed (`architecture`, `components`, `features`, `incidents`, `operations`, `path-to-prod`, `external`); subfolders under those are free-form.
+Each book has a `MEMORY.md` at its root that every session loads, directories with their own `MEMORY.md` index, and topic files that start with `name` and `description` frontmatter. The Cadri plugin loads both root `MEMORY.md` files and a tree of the books at session start. On a prompt that matches, it asks you to call the `cadri_search` tool, which is what the user sees. The team book's top-level directories are fixed (`architecture`, `components`, `features`, `incidents`, `operations`, `path-to-prod`, `external`); subfolders under those are free-form.
 
 ## Read
 
-Follow `references/search.md`. In short: open the candidate files you were given that fit the task, follow links and directory `MEMORY.md` indexes from there, and stop once you have what you need. Treat memory as strong defaults, not proof; if something is clearly out of date, say so.
+Follow `references/search.md`. In short: when a prompt says Cadri remembered something, call `cadri_search` before other work. Then search the books with grep, the way you search a codebase. Read a directory `MEMORY.md` when you do not know the words, and when the change must fit the existing design read `architecture/MEMORY.md` and the relevant `features/` index. Read the matching lines. Read a whole file when it is an index, or when the hits show you need the whole argument. Stop once you have what you need. Treat memory as strong defaults, not proof; if something is clearly out of date, say so.
 
 ## Write
 

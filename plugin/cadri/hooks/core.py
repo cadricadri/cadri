@@ -29,7 +29,6 @@ from .events import HookInput, HookOutput
 
 SESSION_START_NETWORK_SECONDS = 1.5
 AUTH_SECONDS = 1.0
-RECALL_LIMIT = 5
 STATE_KEEP_SECONDS = 14 * 24 * 60 * 60
 
 Job = Callable[[], object]
@@ -154,16 +153,22 @@ def session_start(inp: HookInput, adapter: Adapter) -> Result:
 # --- prompt -----------------------------------------------------------------------
 
 
-def recall_block(books: list[bk.Book], prompt: str) -> str:
-    candidates = recall.search(books, prompt, limit=RECALL_LIMIT, skip={"MEMORY.md", "README.md"})  # indexes, not topics
-    if not candidates:
+def recall_block(books: list[bk.Book], prompt: str, session_id: str | None, harness: str) -> str:
+    found = recall.mentions(books, prompt)
+    count = recall.matched_files(found)
+    if count == 0:
         return ""
-    lines = ["Cadri memory files that may be relevant to this prompt:"]
-    for candidate in candidates:
-        description = f" — {candidate.description}" if candidate.description else ""
-        lines.append(f"- {candidate.book.path / candidate.path} ({candidate.book.label}){description}")
+    sentence = recall.status_line(count)
+    session = shlex.quote(session_id or "")
+    name = shlex.quote(harness)
+    request = (
+        f"{sentence}. Before any other tool, call the Cadri tool `cadri_search` "
+        f"with session {session} and harness {name}, so the user sees that sentence. "
+        f"If you cannot call it, run `cadri memory search --session {session} --harness {name}` "
+        f"and use the same sentence as the command description. Read the result, then continue."
+    )
     reminder = context.reminder()
-    return "\n".join(lines) + (f"\n\n{reminder}" if reminder else "")
+    return request + (f"\n\n{reminder}" if reminder else "")
 
 
 def keeper_task(claim: digests.Claim, session_id: str) -> str:
@@ -201,7 +206,7 @@ def prompt(inp: HookInput, adapter: Adapter) -> Result:
     text = inp.prompt or ""
     parts: list[str] = []
     if books and text:
-        block = recall_block(books, text)
+        block = recall_block(books, text, inp.session_id, adapter.name)
         if block:
             parts.append(block)
     current = session(inp)

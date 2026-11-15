@@ -96,8 +96,12 @@ class BundleTests(InstallTestCase):
         marketplace = json.loads((dist / "claude/.claude-plugin/marketplace.json").read_text())
         self.assertEqual(marketplace["plugins"][0]["source"], "./cadri")
         manifest = json.loads((dist / "cursor/.cursor-plugin/plugin.json").read_text())
-        for key in ("rules", "skills", "agents", "hooks"):
+        for key in ("rules", "skills", "agents", "hooks", "mcpServers"):
             self.assertTrue((dist / "cursor" / manifest[key]).exists(), key)
+        mcp = json.loads((dist / "cursor/mcp.json").read_text())
+        self.assertEqual(mcp["mcpServers"]["cadri"]["args"], ["-c", 'exec "$HOME/.cadri/bin/cadri" mcp'])
+        claude_mcp = json.loads((dist / "claude/cadri/.mcp.json").read_text())
+        self.assertEqual(claude_mcp["mcpServers"]["cadri"]["command"], "sh")
 
     def test_keeper_agents_use_each_harness_format(self):
         dist = self.home / "dist"

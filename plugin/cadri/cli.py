@@ -21,6 +21,8 @@ from .hooks.events import EVENTS
 from .install import bundles, config
 from .memory import books as bk
 from .memory import context, digests, editapi, push, repair, sync
+from . import mcp as mcp_server
+from .state import Session
 from .memory.layout import has_lessons
 from .upload import post_session
 
@@ -434,6 +436,23 @@ def memory_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def memory_search(args: argparse.Namespace) -> int:
+    harness = args.harness or os.environ.get("CADRI_HARNESS") or "cursor"
+    session_id = args.session or os.environ.get("CADRI_SESSION_ID")
+    prompt = args.prompt
+    if not prompt and session_id:
+        prompt = str(Session(harness, session_id).load().get("last_prompt") or "")
+    text = mcp_server.search_text(session_id, harness, prompt, args.url) if prompt else ""
+    if text:
+        print(text)
+    return 0
+
+
+def cmd_mcp(_: argparse.Namespace) -> int:
+    mcp_server.serve()
+    return 0
+
+
 def memory_sync(args: argparse.Namespace) -> int:
     status = 0
     for book in selected_books(args.scope, args.url):
@@ -452,6 +471,8 @@ def cmd_memory(args: argparse.Namespace) -> int:
             return memory_status(args)
         if action == "sync":
             return memory_sync(args)
+        if action == "search":
+            return memory_search(args)
         book = bk.open_book(args.scope, args.url)
         if action == "clone":
             bk.ensure_clone(book)
@@ -515,6 +536,9 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("thread_id")
     show.set_defaults(func=cmd_show)
 
+    mcp_cmd = sub.add_parser("mcp", help="Serve the Cadri search tool over MCP on stdio")
+    mcp_cmd.set_defaults(func=cmd_mcp)
+
     mem = sub.add_parser("memory", help="The team and personal memory books")
     mem_sub = mem.add_subparsers(dest="memory_command", required=True)
 
@@ -552,6 +576,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     child("status", "Show sync state, unpushed work, repairs, and waiting reflections")
 
+    search = child("search", "Print memories that match a prompt; print nothing when none match")
+    search.add_argument("--session", default=None, help="read that session's latest prompt (default: $CADRI_SESSION_ID)")
+    search.add_argument("--harness", default=None, help="the session's harness (default: $CADRI_HARNESS or cursor)")
+    search.add_argument("--prompt", default=None, help="search this text instead of the session's latest prompt")
+
     write = scoped("write", "Write one file through the edit API")
     write.add_argument("path")
     write.add_argument("--file", default=None, help="read content from this file instead of stdin")
@@ -565,8 +594,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {"--url", "--logout", "--no-browser"}:
-        argv = ["login", *argv]
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))

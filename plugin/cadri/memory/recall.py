@@ -1,15 +1,14 @@
-"""Find memory files that look relevant to a prompt, locally and fast.
+"""Local memory lookup for the session-start tree and the prompt hook.
 
-The prompt hook runs on every turn with a budget of a few hundred milliseconds and no
-network, so this is keyword matching over a cached index of each book: file paths,
-frontmatter descriptions, headings, and the opening text. It only has to point the
-agent at a few files worth opening; the agent reads and judges them itself.
+The tree is a cached description of each file, refreshed when the file changes.
+The prompt hook does not rank or choose files. It reads the markdown on disk and
+returns lines that contain a word from the prompt, rare words first. The agent
+reads those lines and searches further with grep.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,8 +16,10 @@ from pathlib import Path
 from ..state import write_text
 from .books import Book
 
-BODY_CHARS = 1500
 MAX_FILES = 2000
+HITS_PER_TERM = 3
+MAX_TERMS = 6
+SNIPPET_CHARS = 160
 WORD = re.compile(r"[a-z0-9]+")
 STOPWORDS = frozenset(
     """
@@ -32,25 +33,6 @@ STOPWORDS = frozenset(
     md readme memory
     """.split()
 )
-
-
-@dataclass(frozen=True)
-class Candidate:
-    book: Book
-    path: str
-    description: str
-    score: float
-
-
-def words(text: str) -> list[str]:
-    found = []
-    for word in WORD.findall(text.lower()):
-        if len(word) < 3 or word in STOPWORDS or word.isdigit():
-            continue
-        if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
-            word = word[:-1]
-        found.append(word)
-    return found
 
 
 def frontmatter(text: str) -> dict[str, str]:
@@ -87,21 +69,10 @@ def describe(text: str) -> str:
     return ""
 
 
-def entry_for(file: Path, relative: str) -> dict:
+def entry_for(file: Path, _relative: str) -> dict:
     stat = file.stat()
     text = file.read_text(encoding="utf-8", errors="replace")
-    body = strip_frontmatter(text)
-    headings = " ".join(line.lstrip("#") for line in body.splitlines() if line.startswith("#"))
-    fields = frontmatter(text)
-    return {
-        "mtime": stat.st_mtime,
-        "size": stat.st_size,
-        "description": describe(text),
-        "path": sorted(set(words(relative.replace("/", " ").replace("-", " ").replace("_", " ")))),
-        "head": sorted(set(words(headings + " " + fields.get("name", "")))),
-        "desc": sorted(set(words(fields.get("description", "")))),
-        "body": sorted(set(words(body[:BODY_CHARS]))),
-    }
+    return {"mtime": stat.st_mtime, "size": stat.st_size, "description": describe(text)}
 
 
 def index_path(book: Book) -> Path:
@@ -152,37 +123,100 @@ def build(book: Book) -> dict[str, dict]:
     return files
 
 
-WEIGHTS = (("path", 3.0), ("desc", 2.5), ("head", 1.5), ("body", 1.0))
-MIN_SCORE = 2.5
+@dataclass(frozen=True)
+class Hit:
+    book: Book
+    path: str
+    line: int
+    text: str
 
 
-def search(books: list[Book], prompt: str, limit: int = 5, skip: set[str] | None = None) -> list[Candidate]:
-    query = set(words(prompt))
-    if not query:
+@dataclass(frozen=True)
+class Mention:
+    """Lines that contain `term`. `total` counts matches not already shown under a rarer word."""
+
+    term: str
+    total: int
+    shown: tuple[Hit, ...]
+
+
+def terms(text: str) -> list[str]:
+    """Distinctive words, in order, with no stemming. Stemming would miss the word on disk."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for word in WORD.findall(text.lower()):
+        if len(word) < 3 or word in STOPWORDS or word.isdigit() or word in seen:
+            continue
+        seen.add(word)
+        found.append(word)
+    return found
+
+
+def mentions(books: list[Book], prompt: str, per_term: int = HITS_PER_TERM, max_terms: int = MAX_TERMS) -> list[Mention]:
+    """Lines in the books that contain a word from `prompt`.
+
+    Scans the files themselves, including past the opening. Words with fewer
+    matches come first, and a word with no match is left out. A line is shown
+    under the rarest word that contains it.
+    """
+    query = terms(prompt)
+    if not query or per_term < 1 or max_terms < 1:
         return []
-    corpus: list[tuple[Book, str, dict]] = []
+    patterns = {term: re.compile(rf"\b{re.escape(term)}s?\b", re.IGNORECASE) for term in query}
+    found: dict[str, list[Hit]] = {term: [] for term in query}
     for book in books:
-        for relative, entry in build(book).items():
-            if skip and relative in skip:
+        if not book.path.is_dir():
+            continue
+        for file in markdown_files(book.path):
+            relative = file.relative_to(book.path).as_posix()
+            try:
+                lines = file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
                 continue
-            corpus.append((book, relative, entry))
-    if not corpus:
-        return []
-    frequency: dict[str, int] = {}
-    for _, _, entry in corpus:
-        seen = set().union(*(entry.get(field, []) for field, _ in WEIGHTS))
-        for word in query & seen:
-            frequency[word] = frequency.get(word, 0) + 1
-    total = len(corpus)
-    scored = []
-    for book, relative, entry in corpus:
-        score = 0.0
-        for word in query:
-            if word not in frequency:
-                continue
-            idf = math.log(1 + total / frequency[word])
-            score += idf * sum(weight for field, weight in WEIGHTS if word in entry.get(field, ()))
-        if score >= MIN_SCORE:
-            scored.append(Candidate(book, relative, entry.get("description", ""), round(score, 2)))
-    scored.sort(key=lambda candidate: (-candidate.score, candidate.path))
-    return scored[:limit]
+            for number, line in enumerate(lines, start=1):
+                for term in query:
+                    if patterns[term].search(line):
+                        found[term].append(Hit(book, relative, number, line.strip()))
+    order = sorted((term for term in query if found[term]), key=lambda term: (len(found[term]), term))[:max_terms]
+    used: set[tuple[str, str, int]] = set()
+    results: list[Mention] = []
+    for term in order:
+        fresh: list[Hit] = []
+        for hit in found[term]:
+            key = (str(hit.book.path), hit.path, hit.line)
+            if key not in used:
+                fresh.append(hit)
+        if not fresh:
+            continue
+        for hit in fresh[:per_term]:
+            used.add((str(hit.book.path), hit.path, hit.line))
+        results.append(Mention(term, len(fresh), tuple(fresh[:per_term])))
+    return results
+
+
+def status_line(count: int) -> str:
+    """The sentence the user sees when a search has something to show."""
+    word = "thing" if count == 1 else "things"
+    return f"Cadri remembered {count} {word} that may help"
+
+
+def matched_files(found: list[Mention]) -> int:
+    return len({(str(hit.book.path), hit.path) for mention in found for hit in mention.shown})
+
+
+def render(books: list[Book], prompt: str) -> str:
+    """The search tool's text. Empty when nothing matched, so the caller shows nothing."""
+    found = mentions(books, prompt)
+    count = matched_files(found)
+    if count == 0:
+        return ""
+    lines = [status_line(count), ""]
+    for mention in found:
+        lines.append(f"- {mention.term}")
+        for hit in mention.shown:
+            text = hit.text if len(hit.text) <= SNIPPET_CHARS else hit.text[:SNIPPET_CHARS].rstrip() + "…"
+            lines.append(f"  {hit.book.path / hit.path}:{hit.line}: {text}")
+        extra = mention.total - len(mention.shown)
+        if extra:
+            lines.append(f"  … {extra} more for {mention.term}")
+    return "\n".join(lines)

@@ -5,13 +5,15 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
 from contextlib import redirect_stdout
 from unittest import mock
 
-from support import BooksTestCase
+from support import PLUGIN, BooksTestCase
 
 from cadri import auth, capture
 from cadri.hooks import adapters, core, run
@@ -104,12 +106,88 @@ class ClaudeTests(HookTestCase):
         self.start()
         data = self.json_hook("claude", "prompt", {"session_id": "c1", "prompt": "Why do billing retries hit the rate limits?"})
         context = data["hookSpecificOutput"]["additionalContext"]
-        self.assertIn(str(self.team.path / "components/billing.md"), context)
+        self.assertIn("Cadri remembered ", context)
+        self.assertIn("cadri_search", context)
+        self.assertIn("--session c1", context)
+        self.assertNotIn("Retries back off.", context)
         self.assertIn("batch the reads", context)
 
     def test_unrelated_prompt_adds_nothing(self):
         self.start()
         self.assertEqual(self.hook("claude", "prompt", {"session_id": "c1", "prompt": "hello"}), "")
+
+    def search_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(PLUGIN / "bin" / "cadri_cli.py"), *args],
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+            check=False,
+        )
+
+    def test_memory_search_prints_the_sentence_and_the_lines(self):
+        self.start()
+        self.hook("claude", "prompt", {"session_id": "c1", "prompt": "Why do billing retries hit the rate limits?"})
+        out = self.search_cli("memory", "search", "--session", "c1", "--harness", "claude")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(out.stdout.startswith("Cadri remembered "))
+        self.assertIn("Retries back off.", out.stdout)
+        self.assertIn(str(self.team.path / "components/billing.md"), out.stdout)
+
+    def test_memory_search_prints_nothing_when_nothing_matches(self):
+        self.start()
+        self.hook("claude", "prompt", {"session_id": "c1", "prompt": "hello"})
+        out = self.search_cli("memory", "search", "--session", "c1", "--harness", "claude")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout, "")
+
+    def test_the_search_tool_answers_over_mcp(self):
+        self.start()
+        self.hook("claude", "prompt", {"session_id": "c1", "prompt": "Why do billing retries hit the rate limits?"})
+        proc = subprocess.Popen(
+            [sys.executable, str(PLUGIN / "bin" / "cadri_cli.py"), "mcp"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=os.environ.copy(),
+        )
+        assert proc.stdin and proc.stdout
+
+        def send(message: dict) -> None:
+            body = json.dumps(message).encode()
+            proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            proc.stdin.flush()
+
+        def read() -> dict:
+            header = proc.stdout.readline()
+            self.assertTrue(header.lower().startswith(b"content-length:"), header)
+            length = int(header.split(b":", 1)[1].strip())
+            self.assertEqual(proc.stdout.readline(), b"\r\n")
+            return json.loads(proc.stdout.read(length))
+
+        try:
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+            self.assertEqual(read()["result"]["serverInfo"]["name"], "cadri")
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            names = [tool["name"] for tool in read()["result"]["tools"]]
+            self.assertEqual(names, ["cadri_search"])
+            send({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "cadri_search", "arguments": {"session": "c1", "harness": "claude"}},
+            })
+            text = read()["result"]["content"][0]["text"]
+            self.assertTrue(text.startswith("Cadri remembered "))
+            self.assertIn("Retries back off.", text)
+            send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "cadri_search", "arguments": {"prompt": "hello"}}})
+            self.assertEqual(read()["result"]["content"][0]["text"], "")
+        finally:
+            proc.stdin.close()
+            proc.stdout.close()
+            proc.terminate()
+            proc.wait(timeout=5)
 
     def test_a_turn_becomes_a_digest_and_a_correction_asks_for_the_keeper(self):
         self.start()
@@ -212,7 +290,8 @@ class CursorTests(HookTestCase):
         self.assertEqual(prompt, {"continue": True})
         first = self.json_hook("cursor", "tool-after", {**self.base, "tool_name": "Read"})
         self.assertIn("Deploys happen on Tuesdays", first["additional_context"])
-        self.assertIn("components/billing.md", first["additional_context"])
+        self.assertIn("Cadri remembered ", first["additional_context"])
+        self.assertIn("cadri_search", first["additional_context"])
         self.assertEqual(self.json_hook("cursor", "tool-after", {**self.base, "tool_name": "Read"}), {})
 
     def test_the_reply_from_after_agent_response_reaches_the_digest(self):

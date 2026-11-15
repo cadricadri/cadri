@@ -5,7 +5,7 @@ Layout under ~/.cadri/memory (or $CADRI_HOME/memory):
   <host>/<org_id>/user-<user_id>/      clone of <base>/git/user.git
   <host>/<org_id>/<book>.lock          held around every git operation on the clone
   <host>/<org_id>/<book>.edits.jsonl   which session edited which file (see edits.py)
-  <host>/<org_id>/<book>.index.json    recall index (see recall.py)
+  <host>/<org_id>/<book>.index.json    file descriptions for the session-start tree (see recall.py)
   <host>/<org_id>/<book>.repair/       scratch worktree while a push conflict is resolved
   <host>/<org_id>/<book>.repair.json   marker for that repair
 

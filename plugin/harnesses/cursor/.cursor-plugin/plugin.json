@@ -10,5 +10,6 @@
   "rules": "rules",
   "skills": "skills",
   "agents": "agents",
-  "hooks": "hooks/hooks.json"
+  "hooks": "hooks/hooks.json",
+  "mcpServers": "mcp.json"
 }
