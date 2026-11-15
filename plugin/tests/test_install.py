@@ -657,6 +657,8 @@ class SeedWindowTests(unittest.TestCase):
         self.assertIn("shared with your teammates", cli.next_memory_step(True))
         self.assertIn("cadri-memory-seed", cli.next_memory_step(False))
         self.assertNotIn("cadri-memory-join", cli.next_memory_step(False))
+        self.assertIn("clone both books", cli.next_memory_step(None))
+        self.assertIn("Memory is not cloned yet", cli.memory_time_warning(None))
         self.assertIn("team book", cli.memory_time_warning(True))
         self.assertIn("Seeding usually takes", cli.memory_time_warning(False))
 

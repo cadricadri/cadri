@@ -27,10 +27,9 @@ from .memory.layout import has_lessons
 from .upload import post_session
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-BACKFILL_WINDOW_SECONDS = 30 * 24 * 60 * 60
-BACKFILL_MAX_SESSIONS = 200
 BACKFILL_MAX_BYTES = 24 * 1024 * 1024
-# Seed from whichever set is smaller. A tighter window on `cadri discover --seed` overrides these.
+# Seed from whichever set is smaller. Init uploads that same set. A tighter window on
+# `cadri discover --seed` overrides these.
 SEED_DAYS = 60
 SEED_LIMIT = 100
 HARNESS_NAMES = {
@@ -101,8 +100,7 @@ def read_session_content(ref: SessionRef) -> str:
         raise CliError(f"could not read {ref.path}: {exc}") from exc
 
 
-def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict:
-    sessions = [ref for ref in discover_all() if ref.updated_at >= since][:max_sessions]
+def upload_sessions(base: str, sessions: list[SessionRef], max_bytes: int) -> dict:
     uploaded = skipped = errors = bytes_used = 0
     by_harness: dict[str, int] = {}
     for ref in sessions:
@@ -155,6 +153,11 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
     }
 
 
+def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict:
+    sessions = [ref for ref in discover_all() if ref.updated_at >= since][:max_sessions]
+    return upload_sessions(base, sessions, max_bytes)
+
+
 def start_local_engine() -> None:
     repo = PLUGIN_ROOT.parent
     engine_dir = repo / "engine"
@@ -172,17 +175,22 @@ def start_local_engine() -> None:
     print(f"Started local engine (log {log}). pid={proc.stdout.strip() or 'unknown'}")
 
 
-def clone_books(url: str | None) -> tuple[str, bool]:
-    """Clone both books. The bool is true when the team book already has lessons."""
+def clone_books(url: str | None) -> tuple[str, bool | None]:
+    """Clone both books.
+
+    The bool is true when the team book already has lessons. None means the books
+    are not cloned, so init must not name a seed or join skill yet.
+    """
     if not bk.git_ready():
         return (
             "Memory: skipped, git is not installed. Run `xcode-select --install`, "
             "then `cadri memory clone` and `cadri memory clone --scope user`.",
-            False,
+            None,
         )
     started = time.monotonic()
     paths: list[str] = []
     team_path: Path | None = None
+    user_path: Path | None = None
     error: bk.MemoryFailure | None = None
     try:
         for scope in ("team", "user"):
@@ -191,23 +199,35 @@ def clone_books(url: str | None) -> tuple[str, bool]:
             paths.append(str(book.path))
             if scope == "team":
                 team_path = book.path
+            else:
+                user_path = book.path
     except bk.MemoryFailure as exc:
         error = exc
     if not paths:
-        return (f"Memory: not cloned ({error}); run `cadri memory clone` later", False)
+        return (f"Memory: not cloned ({error}); run `cadri memory clone` later", None)
     joining = team_path is not None and has_lessons(team_path)
+    personal_has_lessons = user_path is not None and has_lessons(user_path)
     if error:
         message = f"Memory: cloned {', '.join(paths)}, then failed ({error})."
     else:
         message = f"Memory: cloned in {time.monotonic() - started:.1f}s to {', '.join(paths)}."
     if joining:
-        message += " The team book already has memories and is shared with your team. Your personal book starts empty."
+        message += " The team book already has memories and is shared with your team."
+        if personal_has_lessons:
+            message += " The personal book already has memories; revise them."
+        elif user_path is not None:
+            message += " Your personal book starts empty."
     elif not error:
-        message += " Books stay empty until seeding writes the first memories."
+        if personal_has_lessons:
+            message += " The team book has no lessons yet. The personal book already has memories; revise them."
+        else:
+            message += " Books stay empty until seeding writes the first memories."
     return message, joining
 
 
-def memory_time_warning(joining: bool) -> str:
+def memory_time_warning(joining: bool | None) -> str:
+    if joining is None:
+        return "Memory is not cloned yet. Clone both books, then seed or join in this same task, before you stop."
     if joining:
         return (
             "Joining usually takes several minutes, and longer when the team book and the session window are both large. "
@@ -216,13 +236,19 @@ def memory_time_warning(joining: bool) -> str:
     return "Seeding usually takes several minutes. Do it in this same task, before you stop."
 
 
-def next_memory_step(joining: bool) -> str:
+def next_memory_step(joining: bool | None) -> str:
+    if joining is None:
+        return (
+            "Next: clone both books (`cadri memory clone` and `cadri memory clone --scope user`). "
+            "Then look at the team book. A markdown file other than MEMORY.md or README.md means "
+            "follow the cadri-memory-join skill. Otherwise follow the cadri-memory-seed skill."
+        )
     window = "If the user asked for a smaller window, pass it to `cadri discover --seed`."
     if joining:
         return (
             "Next: follow the cadri-memory-join skill. "
             "The team book already has memories and is shared with your teammates. "
-            "Read it and revise it from your sessions. "
+            "Read it and revise it from your sessions. Read the personal book too, and revise it when it already has memories. "
             + window
         )
     return "Next: follow the cadri-memory-seed skill. " + window
@@ -249,8 +275,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     for line in bundles.install(harnesses):
         print(f"  {line}")
     print(f"  CLI: {bundles.shim_path()}")
-    print(f"Uploading the last 30 days of sessions to {base}…")
-    summary = backfill(base, time.time() - BACKFILL_WINDOW_SECONDS, BACKFILL_MAX_SESSIONS, BACKFILL_MAX_BYTES)
+    chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), SEED_DAYS, SEED_LIMIT)
+    print(
+        f"Uploading {len(chosen)} sessions "
+        f"({in_window} in the last {SEED_DAYS} days, {newest} most recent) to {base}…"
+    )
+    summary = upload_sessions(base, chosen, BACKFILL_MAX_BYTES)
     print(
         f"  uploaded {summary['uploaded']} sessions ({summary['bytes'] // 1024} KiB); "
         f"skipped {summary['skipped']}; errors {summary['errors']}"
@@ -261,11 +291,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(cloned)
     if "codex" in harnesses:
         print("Codex runs new hooks only after you trust them: open Codex, type /hooks, and trust the Cadri hooks.")
-    chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), SEED_DAYS, SEED_LIMIT)
-    print(
-        f"Seed window: {len(chosen)} sessions "
-        f"({in_window} in the last {SEED_DAYS} days, {newest} most recent)."
-    )
     print(memory_time_warning(joining))
     print(next_memory_step(joining))
     return 0

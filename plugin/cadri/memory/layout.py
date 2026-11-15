@@ -43,7 +43,7 @@ it is loaded into every session. Details live in the directories below.
 - [components](components/MEMORY.md) — one directory per service or module
 - [features](features/MEMORY.md) — incremental features and why they exist
 - [incidents](incidents/MEMORY.md) — failures grouped by pattern, and the lesson
-- [operations](operations/MEMORY.md) — how to ship, debug, and respond
+- [operations](operations/MEMORY.md) — live debugging, alerts, and runbooks
 - [path-to-prod](path-to-prod/MEMORY.md) — CI/CD and how code reaches production
 - [external](external/MEMORY.md) — customers, their expectations, API definitions, and SLAs
 
@@ -59,8 +59,8 @@ go in the personal book.
 Decisions that are hard to recover from the code: what the pieces are, and why they are
 shaped this way. Point at components instead of restating how they work.
 
-Typical files here: `component-map.md`, `design-decisions.md`. Subfolders are fine when a
-topic needs room.
+Typical files here: `component-map.md`, `design-decisions.md`. One subfolder under this
+directory is fine when a topic needs room.
 """,
     ),
     (
@@ -112,7 +112,7 @@ features/
         """# Incidents
 
 Group failures that share a cause (`incidents/startup-death-spirals/…`), not one file per
-date at this level. Say what broke, why, and what to do differently. Link the component it
+date at this level. Name the failure pattern and the lesson. Link the component it
 belongs to.
 
 Example:
@@ -122,7 +122,7 @@ incidents/
 ├── MEMORY.md
 └── startup-death-spirals/
     ├── MEMORY.md
-    └── 2026-05-api-gateway.md
+    └── api-gateway.md
 ```
 """,
     ),

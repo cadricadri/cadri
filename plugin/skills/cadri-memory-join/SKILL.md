@@ -5,10 +5,10 @@ description: Revise an existing shared team memory book from this person's recen
 
 # Join a team memory book
 
-`cadri init` has already uploaded this person's recent sessions and cloned two books. The team book already belongs to the team. Your job is to revise it from what these sessions know, and to write this person's personal book. Do not stop after init. Do not load `cadri-memory-seed` — that skill writes the first lessons into an empty team book.
+`cadri init` cloned both books and uploaded the seed window for the Sessions page: the smaller of the last 60 days and the 100 most recent sessions. `cadri show` reads the local session, so you read that same window from disk, including a session the upload skipped for size. The team book already belongs to the team. Revise it from what these sessions know, and write or revise this person's personal book. Do not stop after init. Do not load `cadri-memory-seed` — that skill writes the first lessons into an empty team book. This task writes the books itself. The steady-state rule that the memory keeper does the writing does not apply here.
 
 - **Team book** (`cadri memory path`): shared with people who are already using it. Facts about shared code, systems, conventions, and decisions. Expect substantial edits wherever these sessions overlap that book.
-- **Personal book** (`cadri memory path --scope user`): this person only, and it starts empty. Their preferences, corrections, and ways of working.
+- **Personal book** (`cadri memory path --scope user`): this person only. Their preferences, corrections, and ways of working. On a first join it has no lessons. When it already has files, revise those.
 
 Use the same judgment as steady state. Read `cadri-memory/references/maintain.md` and follow it, including where a fact goes and how files are shaped. This run is once, over past sessions plus the book that is already there.
 
@@ -28,7 +28,7 @@ cadri memory sync
 
 Read the team book's root `MEMORY.md`, then each directory `MEMORY.md`, so you know the map. Then read the topic files those indexes point at when the sessions are likely to touch them. On a team whose history covers the same systems, that is most of the book.
 
-The personal book is empty. You will create it in the write pass.
+Read the personal book the same way when it has files. When it has no lessons, you create it in the write pass.
 
 ## 3. Choose the window
 
@@ -77,13 +77,13 @@ Subagent notes are not memory until you put them in the books. Re-read a file im
 
 **Team book.** Revise files that already cover the topic. Rewrite a section the sessions show is stale. Merge a duplicate instead of adding a second file. Add a file only when no existing file owns the fact, and update that directory's `MEMORY.md` in the same pass. Keep a teammate's lesson unless the sessions show it is wrong. Root `MEMORY.md` stays a short discovery guide.
 
-**Personal book.** Create the files this person needs, including `MEMORY.md`. Preferences and corrections go here even when the same sessions also change the team book.
+**Personal book.** If it already has files, revise them and do not add a second file for the same fact. If it has no lessons, create the files this person needs, including `MEMORY.md`. Preferences and corrections go here even when the same sessions also change the team book.
 
 Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Edit the files in the clones with your file tools.
 
 ## 6. One push
 
-Publish once, after the edits:
+Publish once, after the edits, when a file changed. When nothing was worth keeping, do not push.
 
 ```bash
 cadri memory push --agent cadri-memory-join -m "Join: revise team memory from <N> sessions" -m "Sources: cursor:<id>, claude_code:<id>"
@@ -91,9 +91,9 @@ cadri memory push --agent cadri-memory-join -m "Join: revise team memory from <N
 
 Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of the whole push; the commit message lists the rest.
 
-`--book` defaults to both books. A book with no edits is skipped. This push lands on a branch your teammates already have. Exit status 3 means a conflict: follow `cadri-memory-repair`, keep both sides unless one clearly replaces the other, then `cadri memory push --continue`.
+`--book` defaults to both books. A book with no edits is skipped. This push lands on the shared branch your teammates already have. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
 
-Do not launch `cadri-memory-keeper` for this pass. Push before you stop, so the quiet hook does not publish the files under a generic message.
+Do not launch `cadri-memory-keeper` for this pass. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
 
 ## 7. Report
 

@@ -152,9 +152,31 @@ fn memory_shape_limits_reject_a_deep_path_a_long_file_and_a_bloated_root() {
         user,
         label,
         "long",
-        &[write("notes.md", &"x".repeat(20_001))],
+        &[write("notes.md", &"x".repeat(65_537))],
     );
-    assert!(matches!(long, Err(err) if err.message == "memory file is over 20000 characters"));
+    assert!(matches!(long, Err(err) if err.message == "memory file is over 65536 characters"));
+
+    let root_memory = service.commit(
+        repo,
+        user,
+        label,
+        "root",
+        &[write("MEMORY.md", &"m".repeat(3_001))],
+    );
+    assert!(
+        matches!(root_memory, Err(err) if err.message == "root MEMORY.md is over 3000 characters")
+    );
+
+    let fits = service
+        .commit(
+            repo,
+            user,
+            label,
+            "fits",
+            &[write("notes.md", &"n".repeat(65_536))],
+        )
+        .unwrap();
+    assert!(fits.files.iter().any(|file| file.path == "notes.md"));
 
     let chunk = "a".repeat(20_000);
     let core = service.commit(

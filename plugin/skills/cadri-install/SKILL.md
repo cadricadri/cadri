@@ -16,13 +16,13 @@ description: Install Cadri on this machine by following cadri.io/docs/installati
 3. Read the summary `cadri init` prints:
    - Every agent it lists should show where its hooks went. Report any that say "not installed" and why.
    - If Codex is listed, tell the user to open Codex, type `/hooks`, and trust the Cadri hooks.
-   - If memory was skipped because git is missing, explain to the user that git is necessary as Cadri's internal memory storage uses git, and ask the user to run `xcode-select --install`, then run `cadri memory clone` and `cadri memory clone --scope user`.
+   - If memory was skipped because git is missing, or init says the books were not cloned, explain that git is Cadri's memory storage and ask the user to run `xcode-select --install` when git is missing. Then run `cadri memory clone` and `cadri memory clone --scope user`. Do not seed until both clones exist.
 4. Tell the user their sessions are showing up on the Sessions page in Cadri, and print a link for the user link to see past sessions at https://app.cadri.io/sessions . The page opens as soon as this person's sessions arrive. Memory work continues after that.
-5. Before you read any sessions, tell the user this usually takes several minutes, and longer when the window is large. Explain that cadri is learning from the user's previous sessions to build a memory. When `cadri init` names `cadri-memory-join`, also say you will read the team book they are joining, so a large book takes longer. Then load the skill `cadri init` named and finish it in this same task. `cadri init` returning is not the end of the install.
-   - `cadri-memory-join` — the team book already has memories. Revise that shared book from these sessions, and write the personal book.
+5. Before you read any sessions, tell the user this usually takes several minutes, and longer when the window is large. Explain that cadri is learning from the user's previous sessions to build a memory. When `cadri init` names `cadri-memory-join`, also say you will read the team book they are joining, so a large book takes longer. When init names one skill, load that skill and finish it in this same task. When init tells you to clone first, clone, then choose the skill below. `cadri init` returning is not the end of the install.
+   - `cadri-memory-join` — the team book already has memories. Revise that shared book from these sessions, and write or revise the personal book.
    - `cadri-memory-seed` — the team book has no lessons yet. Write the first ones.
 
-If git was missing and you clone afterwards, choose from the clone: a markdown file in the team book other than `MEMORY.md` or `README.md` means `cadri-memory-join`.
+If init said the books were not cloned, clone them first. Then choose: a markdown file in the team book other than `MEMORY.md` or `README.md` means `cadri-memory-join`. Otherwise `cadri-memory-seed`. Load that skill and finish it in this same task.
 
 If the user's message names a tighter window, pass it through to that skill. Otherwise the default is whichever is smaller: the last 60 days, or the 100 most recent sessions.
 

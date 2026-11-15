@@ -1,13 +1,16 @@
 //! Path and object-id helpers shared across the memory git modules.
 
 pub(super) const MAX_FILE_BYTES: usize = 1024 * 1024;
-/// Per-file cap, counted in Unicode scalar values. Matches the memory skills.
-pub(super) const MAX_FILE_CHARS: usize = 20_000;
-/// Combined size of root `*.md` files (the always-loaded index).
+/// Per-file cap, counted in Unicode scalar values. Root `MEMORY.md` is smaller.
+pub(super) const MAX_FILE_CHARS: usize = 65_536;
+/// The always-loaded book index. Session start shows this many characters.
+pub(super) const MAX_ROOT_MEMORY_CHARS: usize = 3_000;
+/// Combined size of root `*.md` files other than `MEMORY.md`.
 pub(super) const MAX_CORE_CHARS: usize = 65_536;
 /// Directories between the book root and a file. `components/api/gotchas.md` is 2.
 pub(super) const MAX_DEPTH: usize = 2;
-pub(super) const FILE_TOO_LONG: &str = "memory file is over 20000 characters";
+pub(super) const FILE_TOO_LONG: &str = "memory file is over 65536 characters";
+pub(super) const ROOT_MEMORY_TOO_LONG: &str = "root MEMORY.md is over 3000 characters";
 pub(super) const CORE_TOO_LONG: &str = "core memory is over 65536 characters";
 pub(super) const PATH_TOO_DEEP: &str = "memory path is too deep";
 pub(super) const ZERO: &str = "0000000000000000000000000000000000000000";

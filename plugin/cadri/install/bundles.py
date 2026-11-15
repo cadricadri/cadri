@@ -49,7 +49,6 @@ SHIPPED_SKILLS = (
     "cadri-install",
     "cadri-memory-seed",
     "cadri-memory-join",
-    "cadri-initializing-memory",
 )
 KEEPER = "cadri-memory-keeper"
 KEEPER_DESCRIPTION = (

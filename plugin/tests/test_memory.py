@@ -204,10 +204,13 @@ class PushTests(BooksTestCase):
     def test_oversized_or_deep_files_are_refused_before_committing(self):
         self.write(self.team, "big.md", "x" * (push.MAX_FILE_CHARS + 1))
         self.write(self.team, "a/b/c/deep.md", "deep\n")
+        self.write(self.team, "MEMORY.md", "m" * (push.MAX_ROOT_MEMORY_CHARS + 1))
         logs = Logs()
         self.assertEqual(push.push_book(self.team, caller(), "big", log=logs), 1)
         self.assertIn("big.md", logs.text())
         self.assertIn("a/b/c/deep.md", logs.text())
+        self.assertIn("MEMORY.md", logs.text())
+        self.assertIn("3000", logs.text())
         self.assertEqual(push.ahead_count(self.team), 0)
 
     def test_sweep_commits_quiet_files_and_leaves_fresh_ones(self):

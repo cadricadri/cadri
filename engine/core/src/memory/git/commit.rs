@@ -13,7 +13,7 @@ use super::error::Fail;
 use super::git_cli_exec::{git_ok, git_text, Repo};
 use super::ids::{
     is_hex, is_keep, CORE_TOO_LONG, FILE_TOO_LONG, MAX_CORE_CHARS, MAX_DEPTH, MAX_FILE_BYTES,
-    MAX_FILE_CHARS, PATH_TOO_DEEP, ZERO,
+    MAX_FILE_CHARS, MAX_ROOT_MEMORY_CHARS, PATH_TOO_DEEP, ROOT_MEMORY_TOO_LONG, ZERO,
 };
 use super::snapshot::Snapshot;
 
@@ -143,6 +143,12 @@ pub(super) fn check_book_text<'a>(
             continue;
         }
         let chars = text.chars().count();
+        if path == "MEMORY.md" {
+            if chars > MAX_ROOT_MEMORY_CHARS {
+                return Err(Fail::api(StatusCode::BAD_REQUEST, ROOT_MEMORY_TOO_LONG));
+            }
+            continue;
+        }
         if chars > MAX_FILE_CHARS {
             return Err(Fail::api(StatusCode::BAD_REQUEST, FILE_TOO_LONG));
         }

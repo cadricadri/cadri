@@ -5,9 +5,9 @@ description: Turn the user's recent agent sessions into the first Cadri memories
 
 # Seed Cadri memory from past sessions
 
-`cadri init` has already uploaded recent sessions and cloned two memory books. You write the first lessons and publish them. Do not stop after init.
+`cadri init` cloned two memory books and uploaded the seed window for the Sessions page: the smaller of the last 60 days and the 100 most recent sessions. `cadri show` reads the local session, so you seed that same window from disk, including a session the upload skipped because it hit the size cap. You write the first lessons and publish them. Do not stop after init. This task writes the books itself. The steady-state rule that the memory keeper does the writing does not apply here.
 
-If the team book already has a topic file — any markdown file other than `MEMORY.md` or `README.md` — it is a shared book that already has memories. Stop and load `cadri-memory-join`. That is also the skill `cadri init` names when it says the team book already has memories.
+If the team book already has a topic file — any markdown file other than `MEMORY.md` or `README.md` — it is a shared book that already has memories. Stop and load `cadri-memory-join`. That is also the skill `cadri init` names when it says the team book already has memories. If init said the books were not cloned, clone them before this check.
 
 - **Team book** (`cadri memory path`): shared by everyone in the team. Facts about shared code, systems, conventions, and decisions.
 - **Personal book** (`cadri memory path --scope user`): this person only. Their preferences, corrections, and ways of working.
@@ -57,9 +57,11 @@ Write each lesson as a rule or fact that generalizes, not as a story of the sess
 
 You integrate the lessons yourself. Subagent notes are not memory until you put them in the books.
 
-Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. An empty team book has no topic files yet. Directory indexes may already be there; update them in the same push as the lessons. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Do not push a scaffold of empty indexes by itself.
+A new book has no files. Init does not publish a scaffold. Create the root `MEMORY.md` and each directory's `MEMORY.md` in the same push as the lessons that need them. Do not push a scaffold of empty indexes by itself. If a book already has files, read the root `MEMORY.md`, the directory indexes, and the topic files you will change, so you update a file instead of adding a near-duplicate.
 
-Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Then publish once:
+Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`.
+
+Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Publish once when a file changed. When nothing was worth keeping, leave the books untouched and do not push.
 
 ```bash
 cadri memory push --agent cadri-memory-seed -m "Seed memories from <N> sessions" -m "Sources: cursor:<id>, claude_code:<id>"
@@ -69,7 +71,7 @@ Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset 
 
 `--book` defaults to both books. A book with no edits is skipped. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
 
-Do not launch `cadri-memory-keeper` for this seed. Push before you stop, so the quiet hook does not publish the files under a generic message.
+Do not launch `cadri-memory-keeper` for this seed. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
 
 ## 4. Report
 

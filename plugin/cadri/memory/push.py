@@ -26,7 +26,8 @@ EXIT_CONFLICT = 3
 QUIET_SECONDS = 120
 LOCK_SECONDS = 30
 PUSH_ATTEMPTS = 3
-MAX_FILE_CHARS = 20_000
+MAX_FILE_CHARS = 65_536
+MAX_ROOT_MEMORY_CHARS = 3_000
 MAX_DEPTH = 2
 NETWORK_ERRORS = (
     "could not resolve host",
@@ -156,6 +157,11 @@ def problems(book: Book, paths: list[str]) -> list[str]:
             continue
         except OSError as exc:
             found.append(f"{path}: {exc}")
+            continue
+        if path == "MEMORY.md" and len(text) > MAX_ROOT_MEMORY_CHARS:
+            found.append(
+                f"{path}: {len(text)} characters (root MEMORY.md limit {MAX_ROOT_MEMORY_CHARS})"
+            )
             continue
         if len(text) > MAX_FILE_CHARS:
             found.append(f"{path}: {len(text)} characters (limit {MAX_FILE_CHARS}); split it")

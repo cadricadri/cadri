@@ -20,7 +20,7 @@ It lists each book's state: clean, unpushed commits, a repair in progress (with 
 `cadri memory push` printed the worktree path and the conflicted files, for example `~/.cadri/memory/<host>/<org>/team.repair`. In that worktree, for each conflicted file:
 
 1. Read the whole file, including both sides between `<<<<<<<`, `=======`, and `>>>>>>>`.
-2. Write the merged result: keep every fact from both sides unless one side clearly replaces the other, follow the writing rules in the `cadri-memory` skill's `references/maintain.md`, and remove every conflict marker.
+2. Write the merged result. Keep a fact from either side when both can be true. When one side replaces the other, keep the replacement and drop the old line. Apply the file rules and "How to write it" in `cadri-memory/references/maintain.md`. Skip that file's instruction to load this skill; you are already here. Remove every conflict marker.
 3. Keep the frontmatter valid: `MEMORY.md` indexes have none; every other file has exactly `name` and `description`.
 
 Then continue from anywhere:

@@ -20,7 +20,8 @@ from .sync import Status
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 SKILLS = PLUGIN_ROOT / "skills"
 BUDGET = 9000
-ROOT_FILE_SHARE = 3200
+# Root MEMORY.md is capped at 3,000 characters. Show that much unless the budget is tighter.
+ROOT_FILE_SHARE = 3000
 TREE_PER_DIR = (12, 6, 3, 0)
 
 

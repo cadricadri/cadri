@@ -18,10 +18,11 @@ Follow `references/search.md`. In short: when a prompt says Cadri remembered som
 
 ## Write
 
-Most memory upkeep is done by the `cadri-memory-keeper` subagent, in the background, when the Cadri plugin asks you to launch it. The keeper decides *what* is worth keeping by reading the turn digest against `references/maintain.md` — not by keyword rules. Often it changes nothing. Write yourself only when:
+Most memory upkeep is done by the `cadri-memory-keeper` subagent, in the background, when the Cadri plugin asks you to launch it. The keeper decides *what* is worth keeping by reading the turn digest against `references/maintain.md` — not by keyword rules. Often it changes nothing. The first memories after install are written by `cadri-memory-seed` or `cadri-memory-join`, in that task, not by the keeper. Write yourself only when:
 
-- the user explicitly asks you to remember, forget, or correct something; or
-- you are the keeper.
+- the user explicitly asks you to remember, forget, or correct something
+- you are the keeper
+- you are following `cadri-memory-seed` or `cadri-memory-join`
 
 Follow `references/maintain.md`. Edit the files in the book directly with targeted edits, then publish:
 
