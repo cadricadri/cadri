@@ -79,7 +79,7 @@ Subagent notes are not memory until you put them in the books. Re-read a file im
 
 **Personal book.** Create the files this person needs, including `MEMORY.md`. Preferences and corrections go here even when the same sessions also change the team book.
 
-Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/`. Edit the files in the clones with your file tools.
+Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Edit the files in the clones with your file tools.
 
 ## 6. One push
 

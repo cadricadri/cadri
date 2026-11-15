@@ -30,7 +30,7 @@ Validation enforces these; the server also rejects a file over 20,000 characters
 - **Every directory on the path to a memory file needs its own frontmatter-free `MEMORY.md`.** `components/api-gateway/gotchas.md` requires both `components/MEMORY.md` and `components/api-gateway/MEMORY.md`. A directory without one is not memory. Do not create new `README.md` indexes.
 - Every other memory file must have exactly `name` and `description` frontmatter — those two keys, no others. The `description` states **purpose and category**, not contents: you read it to decide whether to load the file.
 - No file and directory sharing a stem (`human.md` beside `human/`). Skills live at `skills/{skill_name}/SKILL.md` and stay out of memory indexes.
-- **Team book top-level directories are fixed:** `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`. Subfolders under those are free-form.
+- **Team book top-level directories are fixed:** `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, `external/`. Subfolders under those are free-form.
 
 Create a missing top-level directory when the first lesson needs it, in the same push as that lesson. Put a lesson in the directory a future search would look in. Do not paste it into the root `MEMORY.md`.
 
@@ -67,6 +67,7 @@ grep -ri "concept" "$(cadri memory path)"
 **Architectural decisions:** Check `architecture/` for rationale
 **Features and why they exist:** Check `features/`
 **How code ships:** Check `path-to-prod/`
+**Customers, contracts, and SLAs:** Check `external/`
 
 ## Directory Guide
 
@@ -76,6 +77,7 @@ grep -ri "concept" "$(cadri memory path)"
 - **incidents/** - Grouped by failure pattern, with lessons
 - **operations/** - Runbooks, alert guides, debugging procedures
 - **path-to-prod/** - CI/CD and deployment process
+- **external/** - Customers who use the product, their expectations, API definitions, and SLAs
 ```
 
 **Focus on discovery mechanisms** (grep, component paths) not exhaustive content listing. An index pointing at nothing is worse than the content it displaced.
@@ -121,14 +123,19 @@ team/
 │   ├── MEMORY.md
 │   ├── common-alerts.md
 │   └── debugging-runbooks.md
-└── path-to-prod/
+├── path-to-prod/
+│   ├── MEMORY.md
+│   ├── ci-cd.md
+│   └── deployment-process.md
+└── external/
     ├── MEMORY.md
-    ├── ci-cd.md
-    └── deployment-process.md
+    ├── customers.md
+    ├── api-definitions.md
+    └── slas.md
 ```
 
 **Key points:**
-- **Fixed top-level categories** — do not invent a seventh root folder
+- **Fixed top-level categories** — do not invent an eighth root folder
 - **Component-based organization** enables discovery when working on specific services
 - **Incidents grouped by pattern** (startup-death-spirals, not individual incidents at top level)
 - **Root MEMORY.md focuses on discovery guidance** not exhaustive content listing

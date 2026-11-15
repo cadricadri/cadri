@@ -29,6 +29,7 @@ Top-level directories are fixed. Do not invent a new one at the root; put new ma
 | `incidents/` | Failure patterns and the lesson |
 | `operations/` | Live debugging, alerts, runbooks |
 | `path-to-prod/` | CI/CD and how code reaches production |
+| `external/` | Customers who use the product, their expectations, API definitions, and SLAs |
 
 Example shape (create files only when you have something to say):
 
@@ -59,10 +60,15 @@ team/
 │   ├── MEMORY.md
 │   ├── common-alerts.md
 │   └── debugging-runbooks.md
-└── path-to-prod/
+├── path-to-prod/
+│   ├── MEMORY.md
+│   ├── ci-cd.md
+│   └── run-tests-locally.md
+└── external/
     ├── MEMORY.md
-    ├── ci-cd.md
-    └── deployment-process.md
+    ├── customers.md
+    ├── api-definitions.md
+    └── slas.md
 ```
 
 Rules for files:

@@ -57,7 +57,7 @@ Write each lesson as a rule or fact that generalizes, not as a story of the sess
 
 You integrate the lessons yourself. Subagent notes are not memory until you put them in the books.
 
-Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. An empty team book has no topic files yet. Directory indexes may already be there; update them in the same push as the lessons. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, and `path-to-prod/`. Do not push a scaffold of empty indexes by itself.
+Read both books first (`MEMORY.md`, then the directory indexes) so you update a file instead of adding a near-duplicate. An empty team book has no topic files yet. Directory indexes may already be there; update them in the same push as the lessons. Create what the lessons need, including each directory's `MEMORY.md`, in this same pass. Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Do not push a scaffold of empty indexes by itself.
 
 Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Then publish once:
 

@@ -25,6 +25,7 @@ TEAM_AREAS: tuple[str, ...] = (
     "incidents",
     "operations",
     "path-to-prod",
+    "external",
 )
 
 # Index text for an empty team book. Init does not publish this on its own.
@@ -44,6 +45,7 @@ it is loaded into every session. Details live in the directories below.
 - [incidents](incidents/MEMORY.md) — failures grouped by pattern, and the lesson
 - [operations](operations/MEMORY.md) — how to ship, debug, and respond
 - [path-to-prod](path-to-prod/MEMORY.md) — CI/CD and how code reaches production
+- [external](external/MEMORY.md) — customers, their expectations, API definitions, and SLAs
 
 A fact that belongs to one component lives under `components/<name>/`, linked from that
 directory's `MEMORY.md`. Do not copy it into this file. Preferences that are one person's
@@ -142,6 +144,17 @@ How code gets from a change to production: CI, review, deploy, rollback. Keep th
 shape here; component-specific deploy quirks live under that component.
 
 Typical files: `ci-cd.md`, `deployment-process.md`.
+""",
+    ),
+    (
+        "external/MEMORY.md",
+        """# External
+
+Who uses the product, what they expect of it, and the contracts that bind it: API
+definitions and SLAs. Point at a component when the detail is how that service implements
+the contract.
+
+Typical files: `customers.md`, `api-definitions.md`, `slas.md`.
 """,
     ),
 )

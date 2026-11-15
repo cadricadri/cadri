@@ -10,7 +10,7 @@ Cadri keeps two memory books on this machine as git clones:
 - **Team book** — facts, decisions, and lessons the whole team shares. Path: `cadri memory path`.
 - **Personal book** — this person's preferences and working style. Path: `cadri memory path --scope user`.
 
-Each book has a `MEMORY.md` at its root that every session loads, directories with their own `MEMORY.md` index, and topic files that start with `name` and `description` frontmatter. The Cadri plugin loads both root `MEMORY.md` files and a tree of the books at session start, and points you at likely files on each prompt. The team book's top-level directories are fixed (`architecture`, `components`, `features`, `incidents`, `operations`, `path-to-prod`); subfolders under those are free-form.
+Each book has a `MEMORY.md` at its root that every session loads, directories with their own `MEMORY.md` index, and topic files that start with `name` and `description` frontmatter. The Cadri plugin loads both root `MEMORY.md` files and a tree of the books at session start, and points you at likely files on each prompt. The team book's top-level directories are fixed (`architecture`, `components`, `features`, `incidents`, `operations`, `path-to-prod`, `external`); subfolders under those are free-form.
 
 ## Read
 
