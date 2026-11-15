@@ -16,9 +16,9 @@ description: Install Cadri on this machine by following cadri.io/docs/installati
 3. Read the summary `cadri init` prints:
    - Every agent it lists should show where its hooks went. Report any that say "not installed" and why.
    - If Codex is listed, tell the user to open Codex, type `/hooks`, and trust the Cadri hooks.
-   - If memory was skipped because git is missing, ask the user to run `xcode-select --install`, then run `cadri memory clone` and `cadri memory clone --scope user`.
-4. Tell the user their sessions are showing up on the Sessions page in Cadri. The page opens as soon as this person's sessions arrive. Memory work continues after that.
-5. Before you read any sessions, tell the user this usually takes several minutes, and longer when the window is large. When `cadri init` names `cadri-memory-join`, also say you will read the team book they are joining, so a large book takes longer. Then load the skill `cadri init` named and finish it in this same task. `cadri init` returning is not the end of the install.
+   - If memory was skipped because git is missing, explain to the user that git is necessary as Cadri's internal memory storage uses git, and ask the user to run `xcode-select --install`, then run `cadri memory clone` and `cadri memory clone --scope user`.
+4. Tell the user their sessions are showing up on the Sessions page in Cadri, and print a link for the user link to see past sessions at https://app.cadri.io/sessions . The page opens as soon as this person's sessions arrive. Memory work continues after that.
+5. Before you read any sessions, tell the user this usually takes several minutes, and longer when the window is large. Explain that cadri is learning from the user's previous sessions to build a memory. When `cadri init` names `cadri-memory-join`, also say you will read the team book they are joining, so a large book takes longer. Then load the skill `cadri init` named and finish it in this same task. `cadri init` returning is not the end of the install.
    - `cadri-memory-join` — the team book already has memories. Revise that shared book from these sessions, and write the personal book.
    - `cadri-memory-seed` — the team book has no lessons yet. Write the first ones.
 
