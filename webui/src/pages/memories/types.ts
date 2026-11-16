@@ -48,7 +48,7 @@ export type FileChange = {
 };
 
 export type CommitDetail = MemoryCommit & {
-  book: "team" | "user";
+  book: "team" | "personal";
   changes: FileChange[];
 };
 

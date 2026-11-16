@@ -1,11 +1,17 @@
 ---
 name: cadri-memory-repair
-description: Resolve a Cadri memory push conflict or a memory book that will not sync. Load only when `cadri memory push` or the Cadri plugin reports a conflict or repair; not for routine memory reads or edits.
+description: Resolves a Cadri memory push conflict or a memory book that will not sync. Use when cadri memory push or the Cadri plugin reports a conflict or a repair. Routine memory reads and edits stay on cadri-memory.
 ---
 
 # Repairing a Cadri memory book
 
 A memory book is a git clone shared by every agent session on this machine. Cadri resolves conflicts in a separate scratch worktree so the shared clone stays usable while you work. Never resolve conflicts in the shared clone, and never run `git push`, `git reset`, `git stash`, or `git rebase` there yourself.
+
+**Input.** `cadri memory push` printed a worktree path and the conflicted files, or `cadri memory status` shows a repair in progress or a clone that needs re-cloning.
+
+**Stop.** The conflict needs the user's judgment. Abort, then tell them which files conflict and what each side says.
+
+**Output.** What you resolved, which files, and anything you left for the user.
 
 ## See what is wrong
 
@@ -26,7 +32,7 @@ It lists each book's state: clean, unpushed commits, a repair in progress (with 
 Then continue from anywhere:
 
 ```bash
-cadri memory push --continue --book team    # or --book user
+cadri memory push --continue --book team    # or --book personal
 ```
 
 It checks for leftover markers, finishes the rebase, pushes, and moves the shared clone to the result. If it reports more conflicts (the next commit in the rebase, or the server moved again), resolve those the same way and run it again.
@@ -37,12 +43,10 @@ It checks for leftover markers, finishes the rebase, pushes, and moves the share
 cadri memory push --abort --book team
 ```
 
-The unpushed commits stay in the shared clone, and Cadri retries them later. Use this when the conflict needs the user's judgment: tell the user which files conflict and what each side says.
+The unpushed commits stay in the shared clone, and Cadri retries them later. Use this when the conflict needs the user's judgment.
 
 ## Other problems
 
 - **Book missing or unreadable:** `cadri memory sync --scope team` clones it again; an unreadable clone is moved aside first, never deleted.
 - **Not signed in:** ask the user to run `cadri login`, or to open the sign-in link Cadri showed.
 - **Server not reachable:** nothing to repair; commits are pushed once it is.
-
-Report what you resolved, which files, and anything you left for the user.

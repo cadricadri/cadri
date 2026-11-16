@@ -1,6 +1,6 @@
 ---
 name: cadri-memory
-description: Use the team's and this person's Cadri memory. Load when you need the full procedure for searching memory, when the user asks you to remember or forget something, or when you edit memory files yourself.
+description: Searches the Cadri team and personal memory books, and edits them when the user asks to remember, forget, or correct something. Use when a prompt says Cadri remembered something, or when editing memory files. First memories after install are cadri-memory-seed or cadri-memory-join. A push conflict is cadri-memory-repair.
 ---
 
 # Cadri memory
@@ -8,7 +8,7 @@ description: Use the team's and this person's Cadri memory. Load when you need t
 Cadri keeps two memory books on this machine as git clones:
 
 - **Team book** — facts, decisions, and lessons the whole team shares. Path: `cadri memory path`.
-- **Personal book** — this person's preferences and working style. Path: `cadri memory path --scope user`.
+- **Personal book** — this person's preferences and working style. Path: `cadri memory path --scope personal`.
 
 Each book has a `MEMORY.md` at its root that every session loads, directories with their own `MEMORY.md` index, and topic files that start with `name` and `description` frontmatter. The Cadri plugin loads both root `MEMORY.md` files and a tree of the books at session start. On a prompt that matches, it asks you to call the `cadri_search` tool, which is what the user sees. The team book's top-level directories are fixed (`architecture`, `components`, `features`, `incidents`, `operations`, `path-to-prod`, `external`); subfolders under those are free-form.
 

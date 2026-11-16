@@ -12,12 +12,14 @@ import {
   loadMemoryBlame,
   loadMemoryBook,
   loadMemoryLog,
+  memoryScopeFromParam,
   peekMemoryBook,
   prefetchBlobs,
   rememberMemoryBook,
   rememberText,
   setMemoryIdentity,
   storeFromTree,
+  type MemoryScope,
 } from "./memories/books";
 import { changesBetween, type MemoryChange } from "./memories/changes";
 import { CommitLog } from "./memories/CommitLog";
@@ -29,8 +31,6 @@ import { applyUpload, prepareUploads } from "./memories/upload";
 import { EmptyBook, type EmptyPhase } from "./memories/EmptyBook";
 import { hasTopicFile } from "../onboarding";
 import type { SessionRow } from "./sessions/types";
-
-type MemoryScope = "team" | "user";
 
 /** How long after the first uploaded session an empty book still says seeding is in progress.
  *  A full seed reads up to 100 sessions and can run well past a few minutes. */
@@ -65,7 +65,7 @@ export default function Memories() {
   const tabParam = params.get("tab");
   const tab: FileTab = tabParam === "code" || tabParam === "blame" ? "code" : "preview";
   const committed = params.get("view") === "committed";
-  const scope: MemoryScope = params.get("scope") === "user" ? "user" : "team";
+  const scope: MemoryScope = memoryScopeFromParam(params.get("scope"));
   const picked = pickFile(store, filePath);
   const file: LoadedFile | null = picked && picked.content !== null ? { ...picked, content: picked.content } : null;
   const pending = picked && picked.content === null ? picked : null;
@@ -127,7 +127,7 @@ export default function Memories() {
 
   const awaitingFirstMemory = store !== null && !hasTopicFile(store.files);
   useEffect(() => {
-    if (scope !== "user") {
+    if (scope !== "personal") {
       return;
     }
     let cancel = false;
@@ -146,8 +146,8 @@ export default function Memories() {
       cancel = true;
     };
   }, [scope, session]);
-  const joining = scope === "user" && teamLessons === true;
-  const joinPending = scope === "user" && awaitingFirstMemory && teamLessons === null;
+  const joining = scope === "personal" && teamLessons === true;
+  const joinPending = scope === "personal" && awaitingFirstMemory && teamLessons === null;
   useEffect(() => {
     if (!awaitingFirstMemory) {
       return;
@@ -354,7 +354,7 @@ export default function Memories() {
       if (nextScope === "team") {
         next.delete("scope");
       } else {
-        next.set("scope", "user");
+        next.set("scope", "personal");
       }
       return next;
     });
@@ -563,7 +563,7 @@ export default function Memories() {
   }
 
   const emptyCopy =
-    scope === "user"
+    scope === "personal"
       ? "Your memories are empty. Upload a file to start."
       : "This repo is empty. Upload a file to start.";
   const phase = awaitingFirstMemory ? bookPhase(scope, sessions, session.me) : null;
@@ -577,7 +577,7 @@ export default function Memories() {
           <button type="button" aria-pressed={scope === "team"} onClick={() => showScope("team")}>
             Team
           </button>
-          <button type="button" aria-pressed={scope === "user"} onClick={() => showScope("user")}>
+          <button type="button" aria-pressed={scope === "personal"} onClick={() => showScope("personal")}>
             Me
           </button>
         </div>
@@ -677,11 +677,11 @@ export default function Memories() {
 }
 
 function commitsUrl(scope: MemoryScope): string {
-  return scope === "user" ? "/api/memories/commits?view=tree&scope=user" : "/api/memories/commits?view=tree";
+  return scope === "personal" ? "/api/memories/commits?view=tree&scope=personal" : "/api/memories/commits?view=tree";
 }
 
 function treeUrl(scope: MemoryScope): string {
-  return scope === "user" ? "/api/memories/tree?scope=user" : "/api/memories/tree";
+  return scope === "personal" ? "/api/memories/tree?scope=personal" : "/api/memories/tree";
 }
 
 /** What an empty book should tell the reader, from how far session upload has gotten. */
@@ -689,7 +689,7 @@ function bookPhase(scope: MemoryScope, sessions: SessionRow[] | null, me: Me | n
   if (!sessions) {
     return null;
   }
-  const relevant = scope === "user" && me ? sessions.filter((row) => row.user_id === me.user_id) : sessions;
+  const relevant = scope === "personal" && me ? sessions.filter((row) => row.user_id === me.user_id) : sessions;
   if (relevant.length === 0) {
     return "install";
   }

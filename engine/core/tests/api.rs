@@ -727,7 +727,7 @@ async fn personal_memories_are_a_separate_book() {
     let sam = [("x-test-org", "org-a"), ("x-test-user", "sam")];
     let other = [("x-test-org", "org-b"), ("x-test-user", "ada")];
 
-    let (status, _, body) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    let (status, _, body) = send(&app, get_request("/api/memories?scope=personal", &ada)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["files"].as_array().unwrap().len(), 0);
     assert_eq!(body["commits"].as_array().unwrap().len(), 0);
@@ -738,7 +738,7 @@ async fn personal_memories_are_a_separate_book() {
     });
     let (status, _, saved) = send(
         &app,
-        post_json("/api/memories/commits?scope=user", &note, &ada),
+        post_json("/api/memories/commits?scope=personal", &note, &ada),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
@@ -749,17 +749,17 @@ async fn personal_memories_are_a_separate_book() {
     let (_, _, team_named) = send(&app, get_request("/api/memories?scope=team", &ada)).await;
     assert_eq!(team_named["files"].as_array().unwrap().len(), 0);
 
-    let (_, _, sam_book) = send(&app, get_request("/api/memories?scope=user", &sam)).await;
+    let (_, _, sam_book) = send(&app, get_request("/api/memories?scope=personal", &sam)).await;
     assert_eq!(sam_book["files"].as_array().unwrap().len(), 0);
-    let (_, _, ada_again) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    let (_, _, ada_again) = send(&app, get_request("/api/memories?scope=personal", &ada)).await;
     assert_eq!(ada_again["files"][0]["content"], "hello");
-    let (_, _, other_book) = send(&app, get_request("/api/memories?scope=user", &other)).await;
+    let (_, _, other_book) = send(&app, get_request("/api/memories?scope=personal", &other)).await;
     assert_eq!(other_book["files"].as_array().unwrap().len(), 0);
 
     let (status, _, emptied) = send(
         &app,
         post_json(
-            "/api/memories/commits?scope=user",
+            "/api/memories/commits?scope=personal",
             &json!({
                 "message": "Remove the note",
                 "changes": [{ "op": "delete", "path": "notes.md" }]
@@ -778,7 +778,7 @@ async fn personal_memories_are_a_separate_book() {
     let (status, _, rejected) = send(
         &app,
         post_json(
-            "/api/memories/commits?scope=user",
+            "/api/memories/commits?scope=personal",
             &json!({
                 "message": "escape",
                 "changes": [{ "op": "write", "path": "../secret", "content": "x" }]
@@ -793,7 +793,7 @@ async fn personal_memories_are_a_separate_book() {
     let (status, _, defaulted) = send(
         &app,
         post_json(
-            "/api/memories/commits?scope=user",
+            "/api/memories/commits?scope=personal",
             &json!({ "changes": [{ "op": "write", "path": "a.md", "content": "x" }] }),
             &ada,
         ),
@@ -801,14 +801,18 @@ async fn personal_memories_are_a_separate_book() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(defaulted["files"][0]["content"], "x");
-    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=personal", &ada)).await;
     assert_eq!(log["commits"][0]["message"], "Update memory");
 }
 
 async fn post_edit(app: &Router, body: Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
     let (status, _, reply) = send(
         app,
-        post_json("/api/memories/commits?view=tree&scope=user", &body, headers),
+        post_json(
+            "/api/memories/commits?view=tree&scope=personal",
+            &body,
+            headers,
+        ),
     )
     .await;
     (status, reply)
@@ -898,7 +902,7 @@ async fn an_agent_edit_is_authored_as_a_robot_over_http() {
 
     let (status, saved) = post_edit(&app, note("claude-code-7f3a"), &ada).await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=user", &ada)).await;
+    let (_, _, log) = send(&app, get_request("/api/memories/log?scope=personal", &ada)).await;
     assert_eq!(log["commits"].as_array().unwrap().len(), 1);
     assert_eq!(
         log["commits"][0]["author"],
@@ -907,7 +911,7 @@ async fn an_agent_edit_is_authored_as_a_robot_over_http() {
     assert_eq!(log["commits"][0]["id"], saved["commit"]);
     let (_, _, blame) = send(
         &app,
-        get_request("/api/memories/blame?scope=user&path=a.md", &ada),
+        get_request("/api/memories/blame?scope=personal&path=a.md", &ada),
     )
     .await;
     assert_eq!(blame["blame"][0]["author"]["kind"], "robot");
@@ -1032,7 +1036,10 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
 
     let (status, _, _) = send(
         &app,
-        get_request(&format!("/api/memories/commits/{commit}?scope=user"), &ada),
+        get_request(
+            &format!("/api/memories/commits/{commit}?scope=personal"),
+            &ada,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1050,20 +1057,20 @@ async fn memory_directories_round_trip_and_cannot_match_a_file() {
     });
     let (status, _, saved) = send(
         &app,
-        post_json("/api/memories/commits?scope=user", &folder, &ada),
+        post_json("/api/memories/commits?scope=personal", &folder, &ada),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     assert_eq!(saved["directories"], json!(["notes"]));
     assert_eq!(saved["files"].as_array().unwrap().len(), 0);
 
-    let (_, _, again) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    let (_, _, again) = send(&app, get_request("/api/memories?scope=personal", &ada)).await;
     assert_eq!(again["directories"], json!(["notes"]));
 
     let (status, _, rejected) = send(
         &app,
         post_json(
-            "/api/memories/commits?scope=user",
+            "/api/memories/commits?scope=personal",
             &json!({
                 "message": "Clash",
                 "changes": [{ "op": "write", "path": "notes", "content": "x" }]
@@ -1075,7 +1082,7 @@ async fn memory_directories_round_trip_and_cannot_match_a_file() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(rejected["error"], "invalid memory path");
 
-    let (_, _, kept) = send(&app, get_request("/api/memories?scope=user", &ada)).await;
+    let (_, _, kept) = send(&app, get_request("/api/memories?scope=personal", &ada)).await;
     assert_eq!(kept["directories"], json!(["notes"]));
 }
 

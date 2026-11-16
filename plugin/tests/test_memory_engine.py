@@ -102,12 +102,12 @@ class MemoryEngineTests(unittest.TestCase):
         self.assertEqual((book.path / name).read_text(), "ours and theirs\n")
 
     def test_personal_book_is_a_separate_clone(self):
-        code, path, err = self.cli("path", "--scope", "user")
+        code, path, err = self.cli("path", "--scope", "personal")
         self.assertEqual(code, 0, err)
         user_path = Path(path)
         self.assertTrue(user_path.name.startswith("user-"))
         (user_path / f"me-{self.suffix}.md").write_text("x\n")
-        self.assertEqual(self.cli("push", "--book", "user", "-m", "mine")[0], 0)
+        self.assertEqual(self.cli("push", "--book", "personal", "-m", "mine")[0], 0)
         self.assertFalse((user_path.parent / "team" / f"me-{self.suffix}.md").exists())
 
     def test_edit_api_write_still_works(self):

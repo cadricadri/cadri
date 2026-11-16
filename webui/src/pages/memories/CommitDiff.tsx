@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from "react-router";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { sessionLink, shortId } from "../sessions/types";
+import { memoryScopeFromParam, type MemoryScope } from "./books";
 import { AuthorMark } from "./AuthorMark";
 import { diffLines, diffStats, type DiffLine } from "./diff";
 import type { CommitDetail, FileChange } from "./types";
@@ -13,14 +14,14 @@ export default function CommitDiff() {
   const session = useSession();
   const { id = "" } = useParams();
   const [params] = useSearchParams();
-  const scope = params.get("scope") === "user" ? "user" : "team";
+  const scope: MemoryScope = memoryScopeFromParam(params.get("scope"));
   const [detail, setDetail] = useState<CommitDetail | null>(null);
   const [status, setStatus] = useState("Loading…");
   const request = useRef(0);
 
   const load = useCallback(async () => {
     const call = ++request.current;
-    const query = scope === "user" ? "?scope=user" : "";
+    const query = scope === "personal" ? "?scope=personal" : "";
     try {
       const response = await fetch(`/api/memories/commits/${encodeURIComponent(id)}${query}`, { headers: session.headers() });
       if (call !== request.current) {
@@ -32,7 +33,7 @@ export default function CommitDiff() {
       }
       if (response.status === 404 || response.status === 400) {
         setDetail(null);
-        setStatus(`No commit ${shortId(id)} in the ${scope === "user" ? "personal" : "team"} book.`);
+        setStatus(`No commit ${shortId(id)} in the ${scope === "personal" ? "personal" : "team"} book.`);
         return;
       }
       if (!response.ok) {
@@ -54,7 +55,7 @@ export default function CommitDiff() {
     void load();
   }, [load]);
 
-  const historyLink = scope === "user" ? "/?scope=user&view=committed" : "/?view=committed";
+  const historyLink = scope === "personal" ? "/?scope=personal&view=committed" : "/?view=committed";
 
   return (
     <Page
@@ -77,7 +78,7 @@ export default function CommitDiff() {
             <p className="commit-message">{detail.message || "Update memory"}</p>
             <div className="commit-meta">
               <AuthorMark author={detail.author} />
-              <span>{detail.book === "user" ? "Personal book" : "Team book"}</span>
+              <span>{detail.book === "team" ? "Team book" : "Personal book"}</span>
               <time dateTime={detail.at}>{when.format(new Date(detail.at))}</time>
               <code title={detail.id}>{detail.id}</code>
             </div>
@@ -102,11 +103,11 @@ export default function CommitDiff() {
   );
 }
 
-function FileDiff({ change, scope }: { change: FileChange; scope: "team" | "user" }) {
+function FileDiff({ change, scope }: { change: FileChange; scope: MemoryScope }) {
   const lines = diffLines(change.before, change.after);
   const { added, removed } = diffStats(lines);
   const state = change.before === null ? "added" : change.after === null ? "deleted" : "modified";
-  const fileLink = `/?${new URLSearchParams(scope === "user" ? { scope: "user", file: change.path } : { file: change.path })}`;
+  const fileLink = `/?${new URLSearchParams(scope === "personal" ? { scope: "personal", file: change.path } : { file: change.path })}`;
   return (
     <section className="diff-file">
       <header className="diff-file-head">

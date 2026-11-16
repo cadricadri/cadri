@@ -39,13 +39,13 @@ class BookTests(BooksTestCase):
     def test_paths_for_team_and_personal_books(self):
         root = Path(os.environ["CADRI_HOME"]) / "memory" / "127.0.0.1-8080" / "org1"
         self.assertEqual(self.team.path, root / "team")
-        self.assertEqual(self.user.path, root / "user-u1")
+        self.assertEqual(self.personal.path, root / "user-u1")
         self.assertEqual(self.team.lock_path, root / "team.lock")
         self.assertEqual(repair.worktree(self.team), root / "team.repair")
         self.assertIn("app.cadri.io", bk.Book("https://app.cadri.io", "o", "u", "team").path.parts)
 
     def test_local_books_come_from_the_cached_identity(self):
-        self.assertEqual([book.path for book in bk.local_books()], [self.team.path, self.user.path])
+        self.assertEqual([book.path for book in bk.local_books()], [self.team.path, self.personal.path])
         bk.identity_path(BASE).unlink()
         self.assertEqual(bk.local_books(), [])
 
@@ -104,10 +104,10 @@ class PushTests(BooksTestCase):
         self.assertIn("Codex agent", newest)
 
     def test_human_pushes_carry_the_users_id(self):
-        self.write(self.user, "style.md", "No emoji.\n")
+        self.write(self.personal, "style.md", "No emoji.\n")
         human = push.Author("human", "u1", "me@example.com")
-        self.assertEqual(push.push_book(self.user, caller(human=human), "Remember style", log=Logs()), 0)
-        message = self.remote_log("user")
+        self.assertEqual(push.push_book(self.personal, caller(human=human), "Remember style", log=Logs()), 0)
+        message = self.remote_log("personal")
         self.assertIn("Cadri-Author-Kind: human", message)
         self.assertIn("Cadri-Author-Id: u1", message)
 
@@ -269,10 +269,10 @@ class SyncTests(BooksTestCase):
     def test_a_missing_clone_is_cloned_in_the_background(self):
         import shutil
 
-        shutil.rmtree(self.user.path)
-        self.assertEqual(sync.quick(self.user, time.monotonic() + 5).state, sync.MISSING)
-        self.assertEqual(sync.full(self.user, log=Logs()), 0)
-        self.assertTrue((self.user.path / "MEMORY.md").exists())
+        shutil.rmtree(self.personal.path)
+        self.assertEqual(sync.quick(self.personal, time.monotonic() + 5).state, sync.MISSING)
+        self.assertEqual(sync.full(self.personal, log=Logs()), 0)
+        self.assertTrue((self.personal.path / "MEMORY.md").exists())
 
     def test_a_broken_clone_is_moved_aside_and_recloned(self):
         (self.team.path / ".git" / "HEAD").write_text("garbage\n")
@@ -344,10 +344,10 @@ class CliTests(BooksTestCase):
         self.assertIn("Claude Code memory keeper", self.remote_log("team"))
 
     def test_memory_push_human_uses_the_cached_identity(self):
-        self.write(self.user, "prefs.md", "Tabs.\n")
-        code, _, err = self.cli("memory", "push", "--book", "user", "--human", "-m", "Remember tabs")
+        self.write(self.personal, "prefs.md", "Tabs.\n")
+        code, _, err = self.cli("memory", "push", "--book", "personal", "--human", "-m", "Remember tabs")
         self.assertEqual(code, 0, err)
-        self.assertIn("Cadri-Author-Label: me@example.com", self.remote_log("user"))
+        self.assertIn("Cadri-Author-Label: me@example.com", self.remote_log("personal"))
 
     def test_memory_status_and_context(self):
         self.write(self.team, "loose.md", "loose\n")
@@ -392,7 +392,7 @@ class ScaffoldTests(BooksTestCase):
     def test_scaffold_writes_team_indexes_only_when_the_book_is_empty(self):
         server = FakeServer({"/api/memories/commits": (200, {"commit": "c" * 40}), "/api/memories/tip": (304, {})})
         with mock.patch("urllib.request.urlopen", server):
-            self.assertFalse(editapi.scaffold_team(self.user))
+            self.assertFalse(editapi.scaffold_team(self.personal))
             self.assertTrue(editapi.scaffold_team(self.team))
         post = next(request for request in server.requests if request["method"] == "POST")
         self.assertEqual([change["path"] for change in post["body"]["changes"]], [path for path, _ in TEAM_LAYOUT])

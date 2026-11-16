@@ -14,7 +14,7 @@ export function CommitLog({
   onOpen,
 }: {
   commits: MemoryCommit[];
-  scope: "team" | "user";
+  scope: "team" | "personal";
   onOpen: (path: string) => void;
 }) {
   const ordered = useMemo(
@@ -34,7 +34,7 @@ export function CommitLog({
             <AuthorMark author={commit.author} sessionId={commit.session_id} />
             <span className="memory-commit-when">
               <time dateTime={commit.at}>{timeFormat.format(new Date(commit.at))}</time>
-              <Link className="memory-commit-diff" to={`/memories/commits/${commit.id}${scope === "user" ? "?scope=user" : ""}`}>
+              <Link className="memory-commit-diff" to={`/memories/commits/${commit.id}${scope === "personal" ? "?scope=personal" : ""}`}>
                 View diff
               </Link>
             </span>

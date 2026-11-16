@@ -307,6 +307,10 @@ mod tests {
             "/git/{book}/{path}"
         );
         assert_eq!(
+            route_template("/git/personal.git/objects/aa/bb"),
+            "/git/{book}/{path}"
+        );
+        assert_eq!(
             route_template("/git/user.git/objects/aa/bb"),
             "/git/{book}/{path}"
         );

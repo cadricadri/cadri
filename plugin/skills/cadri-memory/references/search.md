@@ -13,7 +13,7 @@ On a prompt whose words appear in a book, Cadri prints matching lines, rare word
 2. **Search for a word you can name, and read the lines.** Run grep across both books:
 
    ```bash
-   grep -n -C 2 -r --include='*.md' --exclude-dir=.git -e 'term' -- "$(cadri memory path)" "$(cadri memory path --scope user)"
+   grep -n -C 2 -r --include='*.md' --exclude-dir=.git -e 'term' -- "$(cadri memory path)" "$(cadri memory path --scope personal)"
    ```
 
    Pick a distinctive word: a component, a flow, `sequence`. When the lines answer the question, stop. When a hit is the right passage and you need the surrounding argument, read that range. Read a whole file when it is a `MEMORY.md` index, or when the hits show the argument is the whole file.

@@ -2,7 +2,9 @@
 
 Layout under ~/.cadri/memory (or $CADRI_HOME/memory):
   <host>/<org_id>/team/                clone of <base>/git/team.git
-  <host>/<org_id>/user-<user_id>/      clone of <base>/git/user.git
+  <host>/<org_id>/user-<user_id>/      clone of <base>/git/personal.git
+                                       (the directory keeps the user- prefix so
+                                       clones from before the personal rename still open)
   <host>/<org_id>/<book>.lock          held around every git operation on the clone
   <host>/<org_id>/<book>.edits.jsonl   which session edited which file (see edits.py)
   <host>/<org_id>/<book>.index.json    file descriptions for the session-start tree (see recall.py)
@@ -58,15 +60,22 @@ def host_dir_name(base: str) -> str:
     return safe_part(host)
 
 
+def canonical_scope(scope: str) -> str:
+    """`user` is the previous name of the personal book."""
+    return "personal" if scope == "user" else scope
+
+
 class Book:
     """One book of one signed-in identity: where it lives and how to reach it."""
 
     def __init__(self, base: str, org_id: str, user_id: str, scope: str):
-        if scope not in ("team", "user"):
-            raise MemoryFailure(f"unknown scope {scope!r}; use team or user")
+        scope = canonical_scope(scope)
+        if scope not in ("team", "personal"):
+            raise MemoryFailure(f"unknown scope {scope!r}; use team or personal")
         self.base = base
         self.scope = scope
         self.user_id = user_id
+        # The folder prefix stays `user-` so an existing clone still opens.
         self.name = "team" if scope == "team" else f"user-{safe_part(user_id)}"
         self.label = "team" if scope == "team" else "personal"
         self.org_dir = memory_root() / host_dir_name(base) / safe_part(org_id)
@@ -77,11 +86,12 @@ class Book:
 
     @property
     def remote(self) -> str:
-        return f"{self.base}/git/{self.scope}.git"
+        name = "team.git" if self.scope == "team" else "personal.git"
+        return f"{self.base}/git/{name}"
 
     @property
     def query(self) -> str:
-        return "?scope=user" if self.scope == "user" else ""
+        return "" if self.scope == "team" else "?scope=personal"
 
     def sibling(self, suffix: str) -> Path:
         return self.org_dir / f"{self.name}{suffix}"
@@ -143,7 +153,7 @@ def identity(base: str, timeout: float = REQUEST_TIMEOUT, refresh: bool = False)
 
 
 def books_for(base: str, ident: dict) -> list[Book]:
-    return [Book(base, ident["org_id"], ident["user_id"], scope) for scope in ("team", "user")]
+    return [Book(base, ident["org_id"], ident["user_id"], scope) for scope in ("team", "personal")]
 
 
 def local_books(base: str | None = None) -> list[Book]:

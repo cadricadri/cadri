@@ -30,7 +30,8 @@ pub fn memory_repo_id(org_id: &str, scope: &str, user_id: &str) -> Option<String
     let org = sanitize_id(org_id)?;
     match scope {
         "team" => Some(format!("{org}_repo_0")),
-        "user" => {
+        // `user` is the previous name of the personal book. Same repo id either way.
+        "personal" | "user" => {
             let user = sanitize_id(user_id)?;
             Some(format!("{org}_{user}_repo_0"))
         }
@@ -80,16 +81,20 @@ mod tests {
             Some("org_01ABC_repo_0")
         );
         assert_eq!(
-            memory_repo_id("org_01ABC", "user", "user_01ADA").as_deref(),
+            memory_repo_id("org_01ABC", "personal", "user_01ADA").as_deref(),
             Some("org_01ABC_user_01ADA_repo_0")
+        );
+        assert_eq!(
+            memory_repo_id("org_01ABC", "user", "user_01ADA"),
+            memory_repo_id("org_01ABC", "personal", "user_01ADA")
         );
         assert_eq!(
             memory_repo_id("default", "team", "").as_deref(),
             Some("default_repo_0")
         );
         assert_ne!(
-            memory_repo_id("org_a", "user", "ada"),
-            memory_repo_id("org_b", "user", "ada")
+            memory_repo_id("org_a", "personal", "ada"),
+            memory_repo_id("org_b", "personal", "ada")
         );
         assert!(memory_repo_id("org/a", "team", "").is_none());
         assert!(memory_repo_id("org_a", "other", "ada").is_none());

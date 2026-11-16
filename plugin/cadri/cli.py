@@ -184,7 +184,7 @@ def clone_books(url: str | None) -> tuple[str, bool | None]:
     if not bk.git_ready():
         return (
             "Memory: skipped, git is not installed. Run `xcode-select --install`, "
-            "then `cadri memory clone` and `cadri memory clone --scope user`.",
+            "then `cadri memory clone` and `cadri memory clone --scope personal`.",
             None,
         )
     started = time.monotonic()
@@ -193,7 +193,7 @@ def clone_books(url: str | None) -> tuple[str, bool | None]:
     user_path: Path | None = None
     error: bk.MemoryFailure | None = None
     try:
-        for scope in ("team", "user"):
+        for scope in ("team", "personal"):
             book = bk.open_book(scope, url)
             bk.ensure_clone(book)
             paths.append(str(book.path))
@@ -239,7 +239,7 @@ def memory_time_warning(joining: bool | None) -> str:
 def next_memory_step(joining: bool | None) -> str:
     if joining is None:
         return (
-            "Next: clone both books (`cadri memory clone` and `cadri memory clone --scope user`). "
+            "Next: clone both books (`cadri memory clone` and `cadri memory clone --scope personal`). "
             "Then look at the team book. A markdown file other than MEMORY.md or README.md means "
             "follow the cadri-memory-join skill. Otherwise follow the cadri-memory-seed skill."
         )
@@ -377,7 +377,8 @@ def err(message: str) -> None:
 
 
 def selected_books(scope: str, url: str | None) -> list[bk.Book]:
-    scopes = ("team", "user") if scope == "all" else (scope,)
+    scope = bk.canonical_scope(scope)
+    scopes = ("team", "personal") if scope == "all" else (scope,)
     found = {book.scope: book for book in bk.local_books(url)}
     if all(name in found for name in scopes):
         return [found[name] for name in scopes]
@@ -573,19 +574,20 @@ def build_parser() -> argparse.ArgumentParser:
         parser.set_defaults(func=cmd_memory)
         return parser
 
-    def scoped(name: str, help_text: str, choices=("team", "user"), default="team") -> argparse.ArgumentParser:
+    def scoped(name: str, help_text: str, choices=("team", "personal"), default="team") -> argparse.ArgumentParser:
         parser = child(name, help_text)
-        parser.add_argument("--scope", choices=list(choices), default=default)
+        # `user` is accepted and mapped to personal so older commands still run.
+        parser.add_argument("--scope", choices=list(choices), default=default, type=bk.canonical_scope)
         return parser
 
     scoped("clone", "Clone the book if missing, otherwise sync; print the path")
     scoped("path", "Print the clone path (cloning first if missing)")
-    scoped("sync", "Bring the clone up to date and publish unpushed commits", ("team", "user", "all"), "all").add_argument(
+    scoped("sync", "Bring the clone up to date and publish unpushed commits", ("team", "personal", "all"), "all").add_argument(
         "--quiet", action="store_true"
     )
 
     push_cmd = child("push", "Commit your memory edits and push them")
-    push_cmd.add_argument("--book", choices=["team", "user", "all"], default="all")
+    push_cmd.add_argument("--book", choices=["team", "personal", "all"], default="all", type=bk.canonical_scope)
     push_cmd.add_argument("-m", "--message", action="append", help="commit message; repeat for more paragraphs")
     push_cmd.add_argument("--human", action="store_true", help="the user asked for this change; commit as them")
     push_cmd.add_argument("--agent", default=None, help="who is pushing (default: main agent)")

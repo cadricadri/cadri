@@ -41,7 +41,7 @@ class BooksTestCase(unittest.TestCase):
     """A signed-in identity with team and personal books cloned from bare remotes."""
 
     seed_team = {"MEMORY.md": "# Team memory\n\nDeploys happen on Tuesdays.\n"}
-    seed_user = {"MEMORY.md": "# Personal memory\n\nPrefers short answers.\n"}
+    seed_personal = {"MEMORY.md": "# Personal memory\n\nPrefers short answers.\n"}
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -53,7 +53,7 @@ class BooksTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.remotes = self.tmp / "remotes"
-        for scope, files in (("team", self.seed_team), ("user", self.seed_user)):
+        for scope, files in (("team", self.seed_team), ("personal", self.seed_personal)):
             bare = self.remotes / f"{scope}.git"
             bare.mkdir(parents=True)
             run_git(bare, "init", "--quiet", "--bare", "--initial-branch=main")
@@ -65,8 +65,8 @@ class BooksTestCase(unittest.TestCase):
         self.addCleanup(remote.stop)
         write_json(bk.identity_path(BASE), {"org_id": "org1", "user_id": "u1", "email": "me@example.com", "checked_at": time.time()})
         self.team = bk.Book(BASE, "org1", "u1", "team")
-        self.user = bk.Book(BASE, "org1", "u1", "user")
-        for book in (self.team, self.user):
+        self.personal = bk.Book(BASE, "org1", "u1", "personal")
+        for book in (self.team, self.personal):
             bk.ensure_clone(book)
 
     def elsewhere(self, scope: str) -> Path:

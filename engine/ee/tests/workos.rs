@@ -2835,7 +2835,7 @@ async fn workos_agent_edits_land_in_the_callers_book_as_a_robot() {
         }
         body
     };
-    let uri = "/api/memories/commits?view=tree&scope=user";
+    let uri = "/api/memories/commits?view=tree&scope=personal";
     let (status, _, saved) = send(
         &app,
         request(Method::POST, uri, &ada_h, Some(edit("one\n", None))),
@@ -2843,12 +2843,12 @@ async fn workos_agent_edits_land_in_the_callers_book_as_a_robot() {
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
     let first = saved["commit"].as_str().unwrap().to_string();
-    let (_, _, log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    let (_, _, log) = send(&app, get_with("/api/memories/log?scope=personal", &ada_h)).await;
     assert_eq!(
         log["commits"][0]["author"],
         json!({ "kind": "robot", "id": "claude-code-7f3a" })
     );
-    let (_, _, sam_book) = send(&app, get_with("/api/memories?scope=user", &sam_h)).await;
+    let (_, _, sam_book) = send(&app, get_with("/api/memories?scope=personal", &sam_h)).await;
     assert_eq!(sam_book["files"].as_array().unwrap().len(), 0);
 
     // Ada's commit is not a base in Sam's book.
@@ -2915,14 +2915,15 @@ async fn workos_token_isolates_team_and_personal_books() {
         &app,
         request(
             Method::POST,
-            "/api/memories/commits?scope=user&user_id=user_sam",
+            "/api/memories/commits?scope=personal&user_id=user_sam",
             &ada_h,
             Some(personal),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{saved}");
-    let (_, _, personal_log) = send(&app, get_with("/api/memories/log?scope=user", &ada_h)).await;
+    let (_, _, personal_log) =
+        send(&app, get_with("/api/memories/log?scope=personal", &ada_h)).await;
     let ada_commit = personal_log["commits"][0]["id"]
         .as_str()
         .unwrap()
@@ -2930,24 +2931,33 @@ async fn workos_token_isolates_team_and_personal_books() {
 
     let (_, _, sam_team) = send(&app, get_with("/api/memories", &sam_h)).await;
     assert_eq!(sam_team["files"][0]["content"], "shared\n");
-    let (_, _, sam_personal) = send(&app, get_with("/api/memories?scope=user", &sam_h)).await;
+    let (_, _, sam_personal) = send(&app, get_with("/api/memories?scope=personal", &sam_h)).await;
     assert_eq!(sam_personal["files"].as_array().unwrap().len(), 0);
-    let (_, _, ada_personal) = send(&app, get_with("/api/memories?scope=user", &ada_h)).await;
+    let (_, _, ada_personal) = send(&app, get_with("/api/memories?scope=personal", &ada_h)).await;
     assert_eq!(ada_personal["files"][0]["content"], "private\n");
     let (_, _, other_team) = send(&app, get_with("/api/memories", &other_h)).await;
     assert_eq!(other_team["files"].as_array().unwrap().len(), 0);
-    let (_, _, other_personal) = send(&app, get_with("/api/memories?scope=user", &other_h)).await;
+    let (_, _, other_personal) =
+        send(&app, get_with("/api/memories?scope=personal", &other_h)).await;
     assert_eq!(other_personal["files"].as_array().unwrap().len(), 0);
 
-    let (_, _, ada_tree) = send(&app, get_with("/api/memories/tree?scope=user", &ada_h)).await;
+    let (_, _, ada_tree) = send(&app, get_with("/api/memories/tree?scope=personal", &ada_h)).await;
     let private_blob = ada_tree["files"][0]["blob"].as_str().unwrap().to_string();
     let (_, _, team_tree) = send(&app, get_with("/api/memories/tree", &ada_h)).await;
     let shared_blob = team_tree["files"][0]["blob"].as_str().unwrap().to_string();
     let blob_path = |sha: &str, scope: &str| format!("/api/memories/blob/{sha}?scope={scope}");
-    let (status, bytes) = send_raw(&app, get_with(&blob_path(&private_blob, "user"), &ada_h)).await;
+    let (status, bytes) = send_raw(
+        &app,
+        get_with(&blob_path(&private_blob, "personal"), &ada_h),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, b"private\n");
-    let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "user"), &sam_h)).await;
+    let (status, _, _) = send(
+        &app,
+        get_with(&blob_path(&private_blob, "personal"), &sam_h),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _, _) = send(&app, get_with(&blob_path(&private_blob, "team"), &sam_h)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2956,14 +2966,18 @@ async fn workos_token_isolates_team_and_personal_books() {
     assert_eq!(bytes, b"shared\n");
     let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "team"), &other_h)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) = send(&app, get_with(&blob_path(&shared_blob, "user"), &other_h)).await;
+    let (status, _, _) = send(
+        &app,
+        get_with(&blob_path(&shared_blob, "personal"), &other_h),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     let (status, _, rejected) = send(
         &app,
         request(
             Method::POST,
-            "/api/memories/commits?scope=user",
+            "/api/memories/commits?scope=personal",
             &sam_h,
             Some(json!({
                 "message": "Remove Ada",
@@ -2974,12 +2988,15 @@ async fn workos_token_isolates_team_and_personal_books() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(rejected["error"], "invalid memory path");
-    let (_, _, ada_still) = send(&app, get_with("/api/memories?scope=user", &ada_h)).await;
+    let (_, _, ada_still) = send(&app, get_with("/api/memories?scope=personal", &ada_h)).await;
     assert_eq!(ada_still["files"][0]["content"], "private\n");
 
     let (status, bytes) = send_raw(
         &app,
-        get_with("/git/user.git/info/refs?service=git-upload-pack", &ada_h),
+        get_with(
+            "/git/personal.git/info/refs?service=git-upload-pack",
+            &ada_h,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -2988,7 +3005,10 @@ async fn workos_token_isolates_team_and_personal_books() {
         .any(|window| window == ada_commit.as_bytes()));
     let (status, sam_bytes) = send_raw(
         &app,
-        get_with("/git/user.git/info/refs?service=git-upload-pack", &sam_h),
+        get_with(
+            "/git/personal.git/info/refs?service=git-upload-pack",
+            &sam_h,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -3056,7 +3076,7 @@ async fn a_paused_trial_locks_memory_books() {
     let (status, _, body) = send(&app, get_with("/api/memories", &cookie)).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     assert_eq!(body["error"], "payment_required");
-    let (status, _, _) = send(&app, get_with("/api/memories?scope=user", &cookie)).await;
+    let (status, _, _) = send(&app, get_with("/api/memories?scope=personal", &cookie)).await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
     let (status, _, body) = send(
         &app,
@@ -3067,7 +3087,10 @@ async fn a_paused_trial_locks_memory_books() {
     assert_eq!(body["error"], "payment_required");
     let (status, _, body) = send(
         &app,
-        get_with("/git/user.git/info/refs?service=git-upload-pack", &cookie),
+        get_with(
+            "/git/personal.git/info/refs?service=git-upload-pack",
+            &cookie,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::PAYMENT_REQUIRED);

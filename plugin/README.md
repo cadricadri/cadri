@@ -82,10 +82,10 @@ cadri discover --seed [--json] [--days 60] [--limit 100]   # smaller of the day 
 cadri show <thread_id>
 cadri memory context [--harness claude]   # what session start gives the agent
 cadri memory status                       # sign-in, books, pending edits, repairs
-cadri memory sync [--scope team|user|all]
+cadri memory sync [--scope team|personal|all]
 cadri memory push [-m "message"] [--human] [--continue | --abort]
-cadri memory clone|path [--scope user]
-cadri memory write <path> --file f.md -m "message" [--scope user]
+cadri memory clone|path [--scope personal]
+cadri memory write <path> --file f.md -m "message" [--scope personal]
 cadri hook <event> --harness <name>       # run by the harnesses
 ```
 

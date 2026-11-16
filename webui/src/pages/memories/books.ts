@@ -1,7 +1,16 @@
 import type { Me } from "../../ee/workos";
 import type { BlameEntry, MemoryCommit, MemoryStore, MemoryTree } from "./types";
 
-export type MemoryScope = "team" | "user";
+export type MemoryScope = "team" | "personal";
+
+/** `user` is the previous name of the personal book, in URLs and older API replies. */
+export function memoryScopeFromParam(value: string | null): MemoryScope {
+  return value === "personal" || value === "user" ? "personal" : "team";
+}
+
+export function isPersonalBook(book: string): boolean {
+  return book === "personal" || book === "user";
+}
 
 const STORAGE_PREFIX = "cadri.memories.v1.";
 const FRESH_MS = 10_000;
@@ -246,8 +255,8 @@ export async function loadMemoryBlame(
   headers: Record<string, string>,
 ): Promise<BlameEntry[]> {
   const params = new URLSearchParams();
-  if (scope === "user") {
-    params.set("scope", "user");
+  if (scope === "personal") {
+    params.set("scope", "personal");
   }
   params.set("path", path);
   const response = await fetch(`/api/memories/blame?${params}`, { headers });
@@ -265,8 +274,8 @@ async function fetchTree(
   known: MemoryStore | null,
 ): Promise<MemoryStore> {
   const params = new URLSearchParams();
-  if (scope === "user") {
-    params.set("scope", "user");
+  if (scope === "personal") {
+    params.set("scope", "personal");
   }
   if (open) {
     params.set("open", open);
@@ -299,5 +308,5 @@ export class LoadError extends Error {
 }
 
 function scopedPath(path: string, scope: MemoryScope): string {
-  return scope === "user" ? `${path}?scope=user` : path;
+  return scope === "personal" ? `${path}?scope=personal` : path;
 }

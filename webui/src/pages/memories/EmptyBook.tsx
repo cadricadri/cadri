@@ -13,7 +13,7 @@ import {
 export type EmptyPhase = "install" | "seeding" | "empty";
 export type EmptyFlow = "install" | "join";
 
-type MemoryScope = "team" | "user";
+type MemoryScope = "team" | "personal";
 
 export function EmptyBook({
   scope,
@@ -70,7 +70,7 @@ function explainer(scope: MemoryScope, phase: EmptyPhase, flow: EmptyFlow): stri
       "Haven't installed Cadri on this machine yet? Paste this prompt into your agent.",
     ].join("\n");
   }
-  const title = scope === "user" ? "No personal memories yet" : "No team memories yet";
+  const title = scope === "personal" ? "No personal memories yet" : "No team memories yet";
   return [
     `# ${title}`,
     "",

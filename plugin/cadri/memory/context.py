@@ -71,7 +71,7 @@ def instructions(inputs: Inputs) -> str:
         skill_text("cadri-memory/references/session-start.md").strip(),
         {
             "team_path": paths.get("team", "not cloned"),
-            "personal_path": paths.get("user", "not cloned"),
+            "personal_path": paths.get("personal", "not cloned"),
             "keeper": inputs.names.keeper,
             "memory_skill": inputs.names.memory_skill,
             "repair_skill": inputs.names.repair_skill,

@@ -50,4 +50,4 @@ Memory text lives in the git book. Provenance:
 - Client may include in commit message / API metadata: `thread_id`, `other_memories_used`, harness/model, `compaction_prompt_version`.
 - Server sets author from token + `Cadri-Author-Kind`.
 - `POST /api/memories/commits` accepts `session_id`; the server writes it as a `Cadri-Session-Id:` trailer. Commits without the trailer but with a `Sources: <thread_id>, …` or `Sources: <harness>:<thread_id>, …` line are linked by the first id listed.
-- **`GET /api/memories/commits/{id}?scope=team|user`** returns the commit (`session_id` included) and `changes: [{path, before, after}]` with full file text (`null` when absent).
+- **`GET /api/memories/commits/{id}?scope=team|personal`** returns the commit (`session_id` included) and `changes: [{path, before, after}]` with full file text (`null` when absent). `scope=user` is the previous name of the personal book and still works.

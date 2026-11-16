@@ -27,7 +27,7 @@ export function FileView({
 }: {
   file: LoadedFile;
   createIn?: string;
-  scope: "team" | "user";
+  scope: "team" | "personal";
   commits: MemoryCommit[];
   paths: string[];
   directories?: string[];
@@ -362,9 +362,9 @@ function latestBlameCommit(file: LoadedFile, commits: MemoryCommit[]): MemoryCom
   return best;
 }
 
-function commitPath(id: string, scope: "team" | "user"): string {
+function commitPath(id: string, scope: "team" | "personal"): string {
   const path = `/memories/commits/${encodeURIComponent(id)}`;
-  return scope === "user" ? `${path}?scope=user` : path;
+  return scope === "personal" ? `${path}?scope=personal` : path;
 }
 
 const blameRailMs = 180;

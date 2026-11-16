@@ -43,15 +43,15 @@ impl Book {
     }
 
     fn git_name(&self) -> &'static str {
-        if self.scope == "user" {
-            "user.git"
+        if self.scope == "personal" {
+            "personal.git"
         } else {
             "team.git"
         }
     }
 
     fn repo_user(&self) -> &str {
-        if self.scope == "user" {
+        if self.scope == "personal" {
             &self.user
         } else {
             ""
@@ -78,7 +78,7 @@ fn books() -> Vec<Book> {
         books.push(Book {
             org: format!("org-{index:02}"),
             user: format!("ada-{index}"),
-            scope: "user",
+            scope: "personal",
             conflict: None,
         });
     }
@@ -251,8 +251,8 @@ struct PushResult {
 }
 
 fn store(addr: std::net::SocketAddr, book: &Book) -> Value {
-    let path = if book.scope == "user" {
-        "/api/memories?scope=user"
+    let path = if book.scope == "personal" {
+        "/api/memories?scope=personal"
     } else {
         "/api/memories"
     };
@@ -260,8 +260,8 @@ fn store(addr: std::net::SocketAddr, book: &Book) -> Value {
 }
 
 fn log(addr: std::net::SocketAddr, book: &Book) -> Value {
-    let path = if book.scope == "user" {
-        "/api/memories/log?scope=user"
+    let path = if book.scope == "personal" {
+        "/api/memories/log?scope=personal"
     } else {
         "/api/memories/log"
     };

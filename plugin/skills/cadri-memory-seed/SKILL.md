@@ -1,34 +1,45 @@
 ---
-name: cadri-memory-seed
-description: Turn the user's recent agent sessions into the first Cadri memories right after cadri init, when the team book has no lessons yet. Use when the install docs say to seed memory. If the team book already has memories, use cadri-memory-join instead. Finish this in the same task as install.
----
+
+## name: cadri-memory-seed
+description: Writes the first Cadri team and personal memories from recent agent sessions when the team book has no lessons yet. Use when cadri init says to follow cadri-memory-seed, or the install docs say to seed memory. A team book that already has topic files is cadri-memory-join.
 
 # Seed Cadri memory from past sessions
 
-`cadri init` cloned two memory books and uploaded the seed window for the Sessions page: the smaller of the last 60 days and the 100 most recent sessions. `cadri show` reads the local session, so you seed that same window from disk, including a session the upload skipped because it hit the size cap. You write the first lessons and publish them. Do not stop after init. This task writes the books itself. The steady-state rule that the memory keeper does the writing does not apply here.
+Write the first memories and publish them in this same task. `cadri init` returning is not the end. This task writes the books. The memory keeper does not.
 
-If the team book already has a topic file — any markdown file other than `MEMORY.md` or `README.md` — it is a shared book that already has memories. Stop and load `cadri-memory-join`. That is also the skill `cadri init` names when it says the team book already has memories. If init said the books were not cloned, clone them before this check.
+`cadri init` cloned both team and personal books and uploaded the seed window for the Sessions page. `cadri show` reads the local session, so read that same window from disk, including a session the upload skipped because it hit the size cap.
 
-- **Team book** (`cadri memory path`): shared by everyone in the team. Facts about shared code, systems, conventions, and decisions.
-- **Personal book** (`cadri memory path --scope user`): this person only. Their preferences, corrections, and ways of working.
+**Input.** Both books are cloned. The default number of sessions is whichever is smaller, the last 60 days or the 100 most recent sessions.
 
-Use the same judgment as steady state. Read `cadri-memory/references/maintain.md` and follow it. That is what the memory keeper uses when a hook wakes it. This run is once, over past sessions, instead of over one live digest.
+- The team book has a topic file — if any markdown file exists other than the starting `MEMORY.md` or `README.md` then Load and execute the skill `cadri-memory-join`. That is the skill init names when the team book already has memories.
+- Init said the books were not cloned. Run `cadri memory clone` and `cadri memory clone --scope personal`, then repeat this check.
+- `cadri discover` prints no sessions. Tell the user there is nothing to seed yet and stop. Do not push.
 
-Fewer, sharper memories beat many vague ones. Often a session contributes nothing. That is a fine outcome.
+**Output.** How many sessions you read, the window, and each memory you wrote, one line, with its book. If nothing was worth keeping, say that. They review and edit what you wrote on the Memories page.
+
+- **Team book** (`cadri memory path`): shared by everyone. Facts about shared code, systems, conventions, and decisions.
+- **Personal book** (`cadri memory path --scope personal`): this person only. Preferences, corrections, and ways of working.
+
+Read `cadri-memory/references/maintain.md` and follow it for what is worth keeping, which book a fact goes in, and how files are shaped. That is the same judgment the memory keeper uses. This run is once, over past sessions. Fewer, sharper memories beat many vague ones. A session that contributes nothing is a fine outcome.
+
+Track this for yourself. The report in section 4 is what the user sees.
+
+- [ ] Tell the user, then list the window
+- [ ] Read every session
+- [ ] Write the lessons and push once
+- [ ] Report
 
 ## 1. Tell the user, then choose the window
 
 Say that seeding usually takes several minutes, and longer for a large window, before you read sessions.
 
-Default window: whichever set is smaller, the last 60 days or the 100 most recent sessions.
-
 ```bash
 cadri discover --json --seed
 ```
 
-The stderr line is the count. Seed every session in the JSON. Do not sample a subset.
+The stderr line is the count. Read every session in the JSON. Do not sample a subset.
 
-If the user's install message names a tighter window, pass it and keep the same smaller-of rule:
+If the user's message names a tighter window, pass it and keep the same smaller-of rule:
 
 - "last 10 days or 10 sessions" → `cadri discover --json --seed --days 10 --limit 10`
 - only a day count → pass `--days` and leave `--limit` at the default 100
@@ -36,22 +47,11 @@ If the user's install message names a tighter window, pass it and keep the same 
 
 A request for a larger window than the default is the same idea: pass the numbers they named. Do not invent a tighter window they did not ask for.
 
-If the command prints no sessions, tell the user there is nothing to seed yet and stop. Do not push an empty layout.
-
 ## 2. Read them in parallel
 
 Split the sessions into batches of about five. Run at most three subagents at a time. Each subagent reads its batch with `cadri show <thread_id>` and returns candidate lessons, not file edits. Subagents must not edit either book and must not run `cadri memory`.
 
-Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections.
-
-For each session, look for these, in the order `maintain.md` cares about:
-
-1. **Corrections.** The human said the agent was wrong, or undid the work. What rule would have prevented it?
-2. **Preferences.** How this person wants things done. Personal book.
-3. **Decisions and conventions.** Why a system is shaped this way, team rules, how to ship. Team book.
-4. **Durable discoveries.** Non-obvious facts that cost real effort and will matter again.
-
-Write each lesson as a rule or fact that generalizes, not as a story of the session. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
+Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections. Apply `maintain.md` in this order: corrections, preferences (personal book), decisions and conventions (team book), durable discoveries. Write a rule or fact that generalizes. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
 
 ## 3. You write, then one push
 
@@ -71,8 +71,12 @@ Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset 
 
 `--book` defaults to both books. A book with no edits is skipped. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
 
-Do not launch `cadri-memory-keeper` for this seed. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
+Do not launch `cadri-memory-keeper`. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
 
 ## 4. Report
 
-Tell the user how many sessions you read, how long the window was, and list the memories you wrote, one line each, with which book they went to. If nothing was worth keeping, say that. They can review and edit what you wrote on the Memories page.
+```text
+Read 12 sessions, the last 60 days.
+- team path-to-prod/deploy-freeze.md — freeze rules before a release
+- personal review.md — ask before a refactor
+```

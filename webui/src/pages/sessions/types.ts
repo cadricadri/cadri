@@ -1,6 +1,6 @@
 import type { MemoryCommit } from "../memories/types";
 
-export type MemoryBook = "team" | "user";
+export type MemoryBook = "team" | "personal";
 
 export type LinkedCommit = MemoryCommit & { book: MemoryBook };
 
@@ -49,8 +49,11 @@ export type SessionDetail = SessionRow & {
   tool_calls: ToolCall[];
 };
 
-export function commitLink(commit: { id: string; book: MemoryBook }): string {
-  return commit.book === "user" ? `/memories/commits/${commit.id}?scope=user` : `/memories/commits/${commit.id}`;
+export function commitLink(commit: { id: string; book: string }): string {
+  const personal = commit.book === "personal" || commit.book === "user";
+  return personal
+    ? `/memories/commits/${commit.id}?scope=personal`
+    : `/memories/commits/${commit.id}`;
 }
 
 export function sessionLink(sessionId: string): string {

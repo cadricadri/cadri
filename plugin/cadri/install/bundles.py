@@ -331,6 +331,7 @@ def install_claude(home: Path) -> str:
     if claude:
         if not ok(run_cli(claude, "plugin", "marketplace", "add", str(marketplace))):
             run_cli(claude, "plugin", "marketplace", "update", MARKETPLACE)
+        # Claude's own flag: install for this user, not the project. Not the personal memory book.
         installed = ok(run_cli(claude, "plugin", "install", PLUGIN_ID, "--scope", "user"))
         if not installed:
             installed = ok(run_cli(claude, "plugin", "update", PLUGIN_ID, "--scope", "user"))

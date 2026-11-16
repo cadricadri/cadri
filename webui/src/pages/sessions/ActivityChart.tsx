@@ -19,7 +19,7 @@ const MAX_DAYS = 366;
 
 const BOOK_SERIES: Record<MemoryBook, Series> = {
   team: { key: "team", label: "Team memories", color: "var(--pink)" },
-  user: { key: "user", label: "Personal memories", color: "var(--lav)" },
+  personal: { key: "personal", label: "Personal memories", color: "var(--lav)" },
 };
 
 const dayLabel = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
@@ -76,7 +76,7 @@ function buildChart(
   const items =
     mode === "sessions"
       ? rows.map((row) => ({ at: row.started_at, series: row.harness ?? "" }))
-      : commits.map((commit) => ({ at: commit.at, series: commit.book }));
+      : commits.map((commit) => ({ at: commit.at, series: commit.book === "team" ? "team" : "personal" }));
   // Both modes share one span so toggling keeps the same days on the axis.
   const times = [...rows.map((row) => row.started_at), ...commits.map((commit) => commit.at)]
     .map((at) => Date.parse(at))
@@ -89,7 +89,7 @@ function buildChart(
           const info = harnessInfo(key || undefined);
           return { key, label: info.label, color: info.color };
         })
-      : (["team", "user"] as MemoryBook[]).filter((book) => seriesKeys.includes(book)).map((book) => BOOK_SERIES[book]);
+      : (["team", "personal"] as MemoryBook[]).filter((book) => seriesKeys.includes(book)).map((book) => BOOK_SERIES[book]);
   const total = days.reduce((sum, day) => sum + day.total, 0);
   return { days, series, total, max: niceMax(Math.max(0, ...days.map((day) => day.total))) };
 }

@@ -70,7 +70,7 @@ export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; u
                 <Link to={commitLink(commit)}>{commit.message || commit.id.slice(0, 8)}</Link>
                 <span className="side-memory-meta">
                   <AuthorMark author={commit.author} />
-                  <span>{commit.book === "user" ? "Personal" : "Team"}</span>
+                  <span>{commit.book === "team" ? "Team" : "Personal"}</span>
                   <time dateTime={commit.at}>{formatTime(commit.at)}</time>
                 </span>
                 {commit.files.length > 0 ? <code className="side-files">{commit.files.join(", ")}</code> : null}

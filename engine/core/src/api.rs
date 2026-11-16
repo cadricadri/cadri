@@ -342,7 +342,8 @@ fn memory_book(
 ) -> Result<(&'static str, String), ApiError> {
     match scope {
         None | Some("team") => Ok(("team", String::new())),
-        Some("user") => Ok(("user", identity.user_id.clone())),
+        // `user` is the previous name of the personal book.
+        Some("personal") | Some("user") => Ok(("personal", identity.user_id.clone())),
         Some(_) => Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid memory scope",
@@ -353,7 +354,7 @@ fn memory_book(
 fn git_book(book: &str, identity: &Identity) -> Result<(&'static str, String), ApiError> {
     match book {
         "team.git" => Ok(("team", String::new())),
-        "user.git" => Ok(("user", identity.user_id.clone())),
+        "personal.git" | "user.git" => Ok(("personal", identity.user_id.clone())),
         _ => Err(ApiError::new(StatusCode::NOT_FOUND, "not found")),
     }
 }
@@ -665,7 +666,7 @@ async fn commits_by_session(
     identity: &Identity,
 ) -> HashMap<String, Vec<LinkedCommit>> {
     let mut by_session: HashMap<String, Vec<LinkedCommit>> = HashMap::new();
-    for scope in ["team", "user"] {
+    for scope in ["team", "personal"] {
         let Ok((book, user_id)) = memory_book(identity, Some(scope)) else {
             continue;
         };

@@ -83,7 +83,7 @@ export default function SessionList() {
 
   const loadCommits = useCallback(async () => {
     setCommitsReady(false);
-    const books: MemoryBook[] = ["team", "user"];
+    const books: MemoryBook[] = ["team", "personal"];
     const logs = await Promise.all(
       books.map((book) =>
         loadMemoryLog(book, session.headers())
