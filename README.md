@@ -65,7 +65,7 @@ Docker image builds stay in CI. They need a daemon, and the hosted deploy builds
 git config core.hooksPath .githooks
 ```
 
-`./scripts/test-rust` still runs only the engine tests.
+From `engine/`, `cargo test --workspace` runs the engine tests on their own.
 
 ## Deployment
 
