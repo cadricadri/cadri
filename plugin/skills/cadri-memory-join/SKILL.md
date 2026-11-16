@@ -24,7 +24,7 @@ Track this for yourself. The report in section 7 is what the user sees.
 
 - [ ] Sync, then read the team book
 - [ ] List the window and read every session
-- [ ] Sync again, then revise and push once
+- [ ] Sync again, then revise and push each learning
 - [ ] Report
 
 ## 1. Tell the user, then sync
@@ -79,19 +79,22 @@ Subagent notes are not memory until you put them in the books. Re-read a file im
 
 Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Edit the files in the clones with your file tools.
 
-## 6. One push
+## 6. Push each learning
 
-Publish once, after the edits, when a file changed. When nothing was worth keeping, do not push.
+Publish each learning before you edit the next. A learning may touch several files, including the indexes that link a new or revised file. When nothing was worth keeping, do not push.
+
+The subject, body, and `Sources:` rules are in `cadri-memory/references/maintain.md` under How to write the commit. `Sources:` lists the sessions that justified this learning, not the whole window.
 
 ```bash
-cadri memory push --agent cadri-memory-join -m "Join: revise team memory from <N> sessions" -m "Sources: cursor:<id>, claude_code:<id>"
+cadri memory push --agent cadri-memory-join --book <team|personal> -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: cursor:<id>, claude_code:<id>
+- cursor:<id> (<YYYY-MM-DD>): <what happened there>"
 ```
 
-Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of the whole push; the commit message lists the rest.
+Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
 
-`--book` defaults to both books. A book with no edits is skipped. This push lands on the shared branch your teammates already have. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
+Each push lands on the shared branch your teammates already have. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue --book <team|personal>`, then the next learning.
 
-Do not launch `cadri-memory-keeper`. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
+Do not launch `cadri-memory-keeper`. Push each learning before you stop, so the quiet hook does not publish the files under a generic message.
 
 ## 7. Report
 

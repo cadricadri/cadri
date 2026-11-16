@@ -189,7 +189,7 @@ def remember_request(session_id: str | None) -> str:
     return (
         "The user asked you to remember, forget, or correct something. Do it yourself in this turn: edit the right "
         "memory book (team for shared knowledge, personal for this person's preferences), then run "
-        f'`cadri memory push --human{session} -m "<what>"`.'
+        f'`cadri memory push --human{session} -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: <harness>:<id>"`.'
     )
 
 

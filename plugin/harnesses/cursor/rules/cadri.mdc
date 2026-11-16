@@ -8,4 +8,4 @@ This workspace uses Cadri memory: a team book and a personal book of Markdown fi
 - If this conversation has no "Cadri memory" context yet, run `cadri memory context` once and read its output before substantive work.
 - Before a task, open the memory files Cadri listed as relevant that fit it, together with your first code searches. Stop once you know enough.
 - When Cadri asks you to launch the `cadri-memory-keeper` subagent, launch it in the background in your first tool batch and carry on without waiting.
-- When the user explicitly asks you to remember, forget, or correct something, edit the right book yourself and run `cadri memory push --human -m "<what>"`.
+- When the user explicitly asks you to remember, forget, or correct something, edit the right book yourself and commit that one learning with `cadri memory push --human -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: <harness>:<id>"`.

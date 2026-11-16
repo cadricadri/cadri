@@ -70,6 +70,26 @@ class BookTests(BooksTestCase):
 
 
 class PushTests(BooksTestCase):
+    def test_a_learning_message_keeps_the_story_and_the_author_trailers(self):
+        self.write(self.team, "operations/deploys.md", "Wednesday.\n")
+        edits.record(self.team, "operations/deploys.md", "s1", "cadri-memory-seed", "cursor")
+        message = "\n\n".join(
+            [
+                "Deploys happen on Wednesday, before the release cut.",
+                "The Thursday rule was leftover from an older runbook.",
+                "Sources: cursor:7a9e, claude_code:2f1c\n- cursor:7a9e (2026-11-13): the deploy day was corrected to Wednesday",
+            ]
+        )
+        self.assertEqual(push.push_book(self.team, caller(agent="cadri-memory-seed", harness="cursor"), message, log=Logs()), 0)
+        stored = self.remote_log("team")
+        self.assertIn("Deploys happen on Wednesday, before the release cut.", stored)
+        self.assertIn("The Thursday rule was leftover from an older runbook.", stored)
+        self.assertIn("Sources: cursor:7a9e, claude_code:2f1c", stored)
+        self.assertIn("Cadri-Author-Kind: robot", stored)
+        self.assertIn("Cadri-Author-Label: Cursor agent", stored)
+        self.assertIn("Cadri-Session-Id: s1", stored)
+        self.assertNotIn("Update operations/deploys.md", stored)
+
     def test_commits_only_the_callers_files_with_trailers(self):
         self.write(self.team, "mine.md", "mine\n")
         self.write(self.team, "theirs.md", "theirs\n")

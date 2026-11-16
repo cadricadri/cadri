@@ -27,10 +27,10 @@ Most memory upkeep is done by the `cadri-memory-keeper` subagent, in the backgro
 Follow `references/maintain.md`. Edit the files in the book directly with targeted edits, then publish:
 
 ```bash
-cadri memory push -m "What changed and why"            # your own edits
-cadri memory push --human -m "What the user asked"     # the user told you to remember this
+cadri memory push --book team -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: <harness>:<id>"
+cadri memory push --human --book personal -m "<the learning>" -m "<what the user asked and why it should persist>" -m "Sources: <harness>:<id>"
 ```
 
-`push` commits only this session's files, rebases, and pushes. If it reports a conflict, load the `cadri-memory-repair` skill. If it says the server was not reachable, the commit is saved and Cadri pushes it after the turn. Never run `git commit`, `git push`, or `git reset` in a book yourself.
+Commit each learning before you edit the next. The subject, body, and `Sources:` rules are in `references/maintain.md` under How to write the commit. `push` commits only this session's files, rebases, and pushes. If it reports a conflict, load the `cadri-memory-repair` skill. If it says the server was not reachable, the commit is saved and Cadri pushes it after the turn. Never run `git commit`, `git push`, or `git reset` in a book yourself.
 
 If no Cadri memory context is in your conversation (for example the session-start hook did not run), run `cadri memory context` and read its output.

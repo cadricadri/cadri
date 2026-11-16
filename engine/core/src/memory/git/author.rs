@@ -147,4 +147,25 @@ mod tests {
         assert_eq!(session_from(&format!("Plain\n\n{TRAILERS}")), None);
         assert_eq!(session_from("x\n\nCadri-Session-Id: not valid!"), None);
     }
+
+    #[test]
+    fn prose_sources_link_the_first_id_and_stay_in_the_message() {
+        let message = format!(
+            "Deploys happen on Wednesday, before the release cut.\n\n\
+             The Thursday rule was leftover from an older runbook.\n\n\
+             Sources: cursor:7a9e, claude_code:2f1c\n\
+             - cursor:7a9e (2026-11-13): the deploy day was corrected to Wednesday\n\n\
+             {TRAILERS}\n"
+        );
+        assert_eq!(session_from(&message).as_deref(), Some("7a9e"));
+        assert_eq!(
+            display_message(&message),
+            "Deploys happen on Wednesday, before the release cut.\n\n\
+             The Thursday rule was leftover from an older runbook.\n\n\
+             Sources: cursor:7a9e, claude_code:2f1c\n\
+             - cursor:7a9e (2026-11-13): the deploy day was corrected to Wednesday"
+        );
+        let linked = format!("{message}Cadri-Session-Id: parent-session\n");
+        assert_eq!(session_from(&linked).as_deref(), Some("parent-session"));
+    }
 }

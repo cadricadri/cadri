@@ -94,9 +94,33 @@ The server rejects a push that breaks these limits. Root `MEMORY.md` is at most 
 - Write principles with the reason that makes them generalize, in the imperative: "Verify claims against the running system, because the team trusts evidence over plausibility." Not three narrow rules.
 - When several lines share a cause, replace them with the one principle that explains them and delete what it absorbs.
 - When a principle keeps being misapplied, attach one short contrastive example (bad, then good) instead of adding another rule.
-- Write the lesson, not the session: no dates, no one's name, no quotes, and no play-by-play. An incident file names the failure pattern and the rule that prevents it. Fold new evidence into the existing text. Git keeps the history, and the commit message says why it changed.
+- Write the lesson, not the session: no dates, no one's name, no quotes, and no play-by-play. An incident file names the failure pattern and the rule that prevents it. Fold new evidence into the existing text. Git keeps the history. Names, dates, and sources belong in the commit, as described in How to write the commit.
 - When two statements cannot both be true, keep the one that replaces the other and delete the old one. Facts that can both be true can both stay.
 - Plain language, no all-caps or absolute emphasis.
+
+## How to write the commit
+
+Someone reading `git log` or blame should see why the line exists without opening the session. The file states the rule or fact. The commit states the learning, the story, and the sources.
+
+Commit each learning separately. A learning may touch several files, such as a topic file and the indexes that link it. When a turn produces several learnings, finish and push one before editing for the next. `cadri memory push` puts every file this session has not yet pushed into that one commit.
+
+Repeat `-m` once per paragraph. Add `--human` when the user explicitly asked for this change. Pass `--book team` or `--book personal` so a dirty file in the other book is not included.
+
+```bash
+cadri memory push --book team \
+  -m "Deploys happen on Wednesday, before the release cut." \
+  -m "The Thursday rule was leftover from an older runbook. Two sessions corrected it, and the freeze is tied to the release cut rather than a weekday." \
+  -m "Sources: cursor:7a9e, claude_code:2f1c
+- cursor:7a9e (2026-11-13): the deploy day was corrected to Wednesday
+- claude_code:2f1c (2026-11-01): the freeze is before the release cut"
+```
+
+- The subject is the learning itself, one line, the rule or fact. `Seed memories from 12 sessions` and `Update operations/deploys.md` name the procedure, not the learning.
+- The body tells the story: what the user said or corrected, what failed or succeeded, or what pattern recurred, and why it generalizes beyond that moment. Write the event date here. The git date is when the commit was pushed.
+- The first `Sources:` line lists session ids as `harness:id`, separated by commas. The Sessions page links the first id. Then one line per source: harness, id, the event date, and what happened. When the user explicitly asked, cite that request. Take ids from the digest, `cadri discover`, or `cadri show`. Add a message id only when the transcript printed one. Do not invent a source. If no session id can be found, leave `Sources:` out and say in the body that the source could not be identified. A placeholder token after `Sources:` would be stored as a session id.
+- Never include secrets.
+- The keeper passes `--agent cadri-memory-keeper` and `--session`. Pass `--digest` only on its last push; that push releases the digest. When nothing was worth keeping, that only push is `-m "Nothing worth keeping"` and creates no commit.
+- Seed and join pass their own `--agent` and omit `--session` unless that one learning came from a single session. `Sources:` lists the sessions that justified that learning, not the whole window.
 
 ## Editing safely
 
@@ -104,5 +128,5 @@ Other agents may be editing the same books right now.
 
 - Re-read a file immediately before editing it.
 - Make targeted edits to the lines that change. Never rewrite a whole file to change a few lines.
-- Publish with `cadri memory push -m "<what changed and why>"` (add `--human` when the user explicitly asked for it). Push commits only your session's files.
+- Publish with the commit above. Push commits only your session's files.
 - If `cadri memory push` reports a conflict and you are not already following `cadri-memory-repair`, load that skill. It applies the file rules and "How to write it" above, then continues the push. Do not follow this bullet again from inside that skill. If the push says the server was not reachable, the commit is saved and pushed after the turn.

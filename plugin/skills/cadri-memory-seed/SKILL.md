@@ -26,7 +26,7 @@ Track this for yourself. The report in section 4 is what the user sees.
 
 - [ ] Tell the user, then list the window
 - [ ] Read every session
-- [ ] Write the lessons and push once
+- [ ] Write each lesson and push it before the next
 - [ ] Report
 
 ## 1. Tell the user, then choose the window
@@ -53,25 +53,28 @@ Split the sessions into batches of about five. Run at most three subagents at a 
 
 Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections. Apply `maintain.md` in this order: corrections, preferences (personal book), decisions and conventions (team book), durable discoveries. Write a rule or fact that generalizes. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
 
-## 3. You write, then one push
+## 3. You write, and push each learning
 
 You integrate the lessons yourself. Subagent notes are not memory until you put them in the books.
 
-A new book has no files. Init does not publish a scaffold. Create the root `MEMORY.md` and each directory's `MEMORY.md` in the same push as the lessons that need them. Do not push a scaffold of empty indexes by itself. If a book already has files, read the root `MEMORY.md`, the directory indexes, and the topic files you will change, so you update a file instead of adding a near-duplicate.
+A new book has no files. Init does not publish a scaffold. Create the root `MEMORY.md` and each directory's `MEMORY.md` in the same push as the first lesson that needs them. Do not push a scaffold of empty indexes by itself. If a book already has files, read the root `MEMORY.md`, the directory indexes, and the topic files you will change, so you update a file instead of adding a near-duplicate.
 
 Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`.
 
-Edit the files in the clones with your file tools. Re-read a file immediately before you change it. Publish once when a file changed. When nothing was worth keeping, leave the books untouched and do not push.
+Edit the files for one learning, then push it, then start the next. A learning may touch several files, including the indexes that link a new file. Re-read a file immediately before you change it. When nothing was worth keeping, leave the books untouched and do not push.
+
+The subject, body, and `Sources:` rules are in `cadri-memory/references/maintain.md` under How to write the commit. `Sources:` lists the sessions that justified this learning, not the whole window.
 
 ```bash
-cadri memory push --agent cadri-memory-seed -m "Seed memories from <N> sessions" -m "Sources: cursor:<id>, claude_code:<id>"
+cadri memory push --agent cadri-memory-seed --book <team|personal> -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: cursor:<id>, claude_code:<id>
+- cursor:<id> (<YYYY-MM-DD>): <what happened there>"
 ```
 
-Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of the whole push; the commit message lists the rest.
+Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
 
-`--book` defaults to both books. A book with no edits is skipped. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue`.
+Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue --book <team|personal>`, then the next learning.
 
-Do not launch `cadri-memory-keeper`. When you edited, push before you stop, so the quiet hook does not publish the files under a generic message.
+Do not launch `cadri-memory-keeper`. Push each learning before you stop, so the quiet hook does not publish the files under a generic message.
 
 ## 4. Report
 
