@@ -2170,6 +2170,8 @@ a.author-mark:hover span {
 
 .session-table td {
   vertical-align: middle;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .session-row {
@@ -2184,6 +2186,12 @@ a.author-mark:hover span {
   color: var(--ink);
   font-family: var(--mono);
   font-size: 12.5px;
+}
+
+.session-harness {
+  width: 11rem;
+  min-width: 11rem;
+  text-align: center;
 }
 
 .harness-cell {
@@ -2215,6 +2223,17 @@ a.author-mark:hover span {
   color: var(--ink);
 }
 
+.harness-pick {
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.harness-pick:hover {
+  border-color: var(--ink);
+}
+
 .harness-name {
   color: var(--mute);
   font-size: 12px;
@@ -2223,7 +2242,46 @@ a.author-mark:hover span {
 
 .session-user {
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 12px;
+}
+
+.user-pick {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.user-pick:hover .user-name {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--user-color) 70%, var(--ink));
+}
+
+.user-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--user-color) 38%, transparent);
+}
+
+.user-swatch {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 2px;
+  background: var(--user-color);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+.user-you {
+  color: var(--mute);
 }
 
 .session-prompt {
@@ -2232,7 +2290,7 @@ a.author-mark:hover span {
 
 .session-model {
   display: block;
-  max-width: 8.5rem;
+  max-width: 11rem;
   color: var(--mute);
   font-size: 12px;
   line-height: 1.25;
@@ -2245,33 +2303,42 @@ a.author-mark:hover span {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
   line-clamp: 4;
+  font-size: 14px;
   font-weight: 500;
   word-break: break-word;
 }
 
-.session-time {
-  white-space: nowrap;
+.session-table th.session-time,
+.session-table td.session-time {
+  width: 6.3rem;
+  max-width: 6.3rem;
   font-variant-numeric: tabular-nums;
+}
+
+.session-table td.session-time {
+  white-space: normal;
 }
 
 .session-none {
   color: var(--mute);
 }
 
+.session-activity {
+  width: 6.6rem;
+  max-width: 6.6rem;
+  overflow: hidden;
+}
+
 .activity-cell {
   display: grid;
   gap: 4px;
-  min-width: 11rem;
+  width: 100%;
+  min-width: 0;
   font-size: 12px;
 }
 
 .activity-count {
   color: var(--mute);
-}
-
-.activity-count strong {
-  color: var(--ink);
-  font-size: 14px;
 }
 
 .activity-track {
@@ -2302,13 +2369,12 @@ a.author-mark:hover span {
 
 .activity-tail {
   color: var(--mute);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .memory-link,
 .memory-links summary {
   color: var(--ink);
-  font-weight: 600;
   white-space: nowrap;
 }
 

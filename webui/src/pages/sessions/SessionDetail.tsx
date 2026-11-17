@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
-import { funName, sessionUserLabel } from "../../funNames";
+import { funName } from "../../funNames";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { ChatThread } from "./ChatThread";
@@ -55,8 +55,6 @@ export default function SessionDetail() {
     void load();
   }, [load]);
 
-  const userLabel = detail?.user_id ? sessionUserLabel(detail.user_id, session.me?.user_id) : null;
-
   return (
     <Page
       title="Session"
@@ -86,10 +84,10 @@ export default function SessionDetail() {
             <ChatThread
               messages={detail.messages}
               plans={detail.plans ?? []}
-              speaker={detail.user_id ? funName(detail.user_id) : "You"}
+              speaker={detail.user_id ? funName(detail.user_id, session.me?.org_id) : "You"}
             />
           </section>
-          <SessionSidebar detail={detail} userLabel={userLabel} />
+          <SessionSidebar detail={detail} />
         </div>
       ) : null}
     </Page>

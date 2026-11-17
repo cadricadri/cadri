@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { AuthorMark } from "../memories/AuthorMark";
 import { HarnessLogo, harnessInfo } from "./HarnessLogo";
+import { UserName } from "./UserName";
 import { commitLink, formatDuration, formatTime, type SessionDetail } from "./types";
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
@@ -34,7 +35,7 @@ function CopyId({ id }: { id: string }) {
   );
 }
 
-export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; userLabel: string | null }) {
+export function SessionSidebar({ detail }: { detail: SessionDetail }) {
   const tools = Object.entries(detail.tool_counts).sort(([, left], [, right]) => right - left);
   return (
     <aside className="session-side" aria-label="Session details">
@@ -49,7 +50,11 @@ export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; u
             </span>
           </Fact>
           {detail.model ? <Fact label="Model">{detail.model}</Fact> : null}
-          {userLabel ? <Fact label="User">{userLabel}</Fact> : null}
+          {detail.user_id ? (
+            <Fact label="User">
+              <UserName userId={detail.user_id} />
+            </Fact>
+          ) : null}
           <Fact label="Start">{formatTime(detail.started_at)}</Fact>
           <Fact label="End">{formatTime(detail.ended_at)}</Fact>
           <Fact label="Duration">{formatDuration(detail.started_at, detail.ended_at)}</Fact>

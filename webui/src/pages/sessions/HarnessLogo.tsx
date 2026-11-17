@@ -91,12 +91,25 @@ export function HarnessLogo({ harness, size = 22 }: { harness: string | undefine
 }
 
 /** The logo tile with the harness name under it, as in the session table. */
-export function HarnessBadge({ harness }: { harness: string | undefined }) {
+export function HarnessBadge({ harness, onPick }: { harness: string | undefined; onPick?: () => void }) {
+  const logo = <HarnessLogo harness={harness} />;
   return (
     <span className="harness-badge">
-      <span className="harness-tile">
-        <HarnessLogo harness={harness} />
-      </span>
+      {onPick ? (
+        <button
+          type="button"
+          className="harness-tile harness-pick"
+          aria-label={`Show ${harnessInfo(harness).label} sessions`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onPick();
+          }}
+        >
+          {logo}
+        </button>
+      ) : (
+        <span className="harness-tile">{logo}</span>
+      )}
       <span className="harness-name">{harnessInfo(harness).label}</span>
     </span>
   );

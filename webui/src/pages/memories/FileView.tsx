@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref 
 import { Link } from "react-router";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { HumanMark, RobotMark } from "../../icons";
 import { displayAuthorName } from "../../funNames";
+import { HumanMark, RobotMark } from "../../icons";
+import { useSession } from "../../session";
 import { blameGroups, type BlameGroup } from "./blame";
 import { AuthorMark } from "./AuthorMark";
 import type { LoadedFile, MemoryAuthor, MemoryCommit, MemoryFile } from "./types";
@@ -421,6 +422,7 @@ function CodeLines({ lines, numbersRef }: { lines: string[]; numbersRef?: Ref<HT
 const heatStops = ["1", "2", "3", "4", "5"] as const;
 
 function Contributors({ file }: { file: MemoryFile }) {
+  const session = useSession();
   const people = contributors(file);
   return (
     <div className="blame-contributors">
@@ -428,7 +430,11 @@ function Contributors({ file }: { file: MemoryFile }) {
         {people.slice(0, 4).map((author) => (
           <span
             key={authorKey(author)}
-            title={author.kind === "human" ? displayAuthorName(author.user_id, author.label) : author.id}
+            title={
+              author.kind === "human"
+                ? displayAuthorName(author.user_id, author.label, session.me?.org_id)
+                : author.id
+            }
           >
             {author.kind === "human" ? <HumanMark /> : <RobotMark />}
           </span>

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
 import { sessionUserLabel } from "../../funNames";
+import { UserName } from "./UserName";
 import { Page } from "../../page";
 import { useSession } from "../../session";
 import { loadMemoryLog } from "../memories/books";
@@ -128,7 +129,8 @@ export default function SessionList() {
   }
 
   const meId = session.me?.user_id;
-  const userLabel = useCallback((userId: string) => sessionUserLabel(userId, meId), [meId]);
+  const orgId = session.me?.org_id;
+  const userLabel = useCallback((userId: string) => sessionUserLabel(userId, meId, orgId), [meId, orgId]);
 
   function change(changes: Partial<Filters>): void {
     setParams((current) => withFilters(current, changes), { replace: true });
@@ -208,13 +210,13 @@ export default function SessionList() {
                 <thead>
                   <tr>
                     <th>Session ID</th>
-                    <th>Agent Harness</th>
+                    <th className="session-harness">Agent Harness</th>
                     <th>User</th>
                     <th>Session Prompt</th>
                     <SortHeader label="Activity" column="activity" sort={sort} onSort={toggleSort} />
                     <SortHeader label="Memories Generated" column="memories" sort={sort} onSort={toggleSort} />
-                    <SortHeader label="Start" column="start" sort={sort} onSort={toggleSort} />
-                    <SortHeader label="End" column="end" sort={sort} onSort={toggleSort} />
+                    <SortHeader className="session-time" label="Start" column="start" sort={sort} onSort={toggleSort} />
+                    <SortHeader className="session-time" label="End" column="end" sort={sort} onSort={toggleSort} />
                   </tr>
                 </thead>
                 <tbody>
@@ -225,24 +227,47 @@ export default function SessionList() {
                           {shortId(row.session_id)}
                         </Link>
                       </td>
-                      <td>
+                      <td className="session-harness">
                         <div className="harness-cell">
-                          <HarnessBadge harness={row.harness} />
+                          <HarnessBadge
+                            harness={row.harness}
+                            onPick={row.harness ? () => change({ harness: row.harness ?? null }) : undefined}
+                          />
                           {row.model ? <span className="session-model">{row.model}</span> : null}
                         </div>
                       </td>
-                      <td className="session-user">{row.user_id ? userLabel(row.user_id) : "—"}</td>
+                      <td className="session-user">
+                        {row.user_id ? (
+                          <button
+                            type="button"
+                            className="user-pick"
+                            aria-label={`Show sessions for ${userLabel(row.user_id)}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              change({ user: row.user_id ?? null });
+                            }}
+                          >
+                            <UserName userId={row.user_id} />
+                          </button>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
                       <td className="session-prompt">
                         <span className="session-prompt-text">{row.prompt || row.preview || "No prompt"}</span>
                       </td>
-                      <td>
+                      <td className="session-activity">
                         <ActivityBar row={row} />
                       </td>
                       <td>
                         <MemoryLinks commits={row.memory_commits} />
                       </td>
-                      <td className="session-time">{formatTime(row.started_at)}</td>
-                      <td className="session-time">{formatTime(row.ended_at)}</td>
+                      <td className="session-time">
+                        <TimeStamp iso={row.started_at} />
+                      </td>
+                      <td className="session-time">
+                        <TimeStamp iso={row.ended_at} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -282,15 +307,17 @@ function SortHeader({
   column,
   sort,
   onSort,
+  className,
 }: {
   label: string;
   column: SortKey;
   sort: Sort;
   onSort: (key: SortKey) => void;
+  className?: string;
 }) {
   const active = sort.key === column;
   return (
-    <th aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+    <th className={className} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
       <button type="button" className={active ? "sort-button active" : "sort-button"} onClick={() => onSort(column)}>
         {label}
         {active ? (
@@ -300,6 +327,21 @@ function SortHeader({
         ) : null}
       </button>
     </th>
+  );
+}
+
+function TimeStamp({ iso }: { iso: string }) {
+  const text = formatTime(iso);
+  const split = text.indexOf(", ");
+  if (split === -1) {
+    return text;
+  }
+  return (
+    <>
+      {text.slice(0, split + 1)}
+      <br />
+      {text.slice(split + 2)}
+    </>
   );
 }
 
@@ -317,9 +359,7 @@ function ActivityBar({ row }: { row: SessionRow }) {
   ];
   return (
     <div className="activity-cell">
-      <span className="activity-count">
-        <strong>{row.event_count}</strong> events
-      </span>
+      <span className="activity-count">{row.event_count} events</span>
       <span className="activity-track" aria-label={activitySummary(row)}>
         {parts.map((part) =>
           part.count > 0 ? (

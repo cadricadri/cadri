@@ -759,7 +759,7 @@ function editorAuthor(me: Me | null): MemoryAuthor {
   if (!me) {
     return { kind: "human", user_id: "local", label: "You" };
   }
-  return { kind: "human", user_id: me.user_id, label: funName(me.user_id) };
+  return { kind: "human", user_id: me.user_id, label: funName(me.user_id, me.org_id) };
 }
 
 function readStore(store: MemoryStore): MemoryStore {
