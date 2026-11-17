@@ -21,37 +21,38 @@
   font-family: var(--sans);
 }
 
+/* Night palette from the landing page trolley section (dark neon pass). */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #121016;
-  --paper: #1c1924;
-  --nav: #17141e;
-  --ink: #f6f1e8;
-  --mute: #a39aaf;
-  --line: #2e2a38;
-  --line-strong: #3d384a;
-  --focus: #7be0f0;
-  --pink: #ff9ed2;
-  --cyan: #7be0f0;
-  --lav: #b9a6ff;
-  --sun: #ffe27a;
+  --bg: #0d0620;
+  --paper: #170b33;
+  --nav: #140636;
+  --ink: #f6f0ff;
+  --mute: #b9abdf;
+  --line: #3d2870;
+  --line-strong: #5b3d96;
+  --focus: #00f5ff;
+  --pink: #ff2bd6;
+  --cyan: #00f5ff;
+  --lav: #8a3cff;
+  --sun: #ffe84a;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #121016;
-    --paper: #1c1924;
-    --nav: #17141e;
-    --ink: #f6f1e8;
-    --mute: #a39aaf;
-    --line: #2e2a38;
-    --line-strong: #3d384a;
-    --focus: #7be0f0;
-    --pink: #ff9ed2;
-    --cyan: #7be0f0;
-    --lav: #b9a6ff;
-    --sun: #ffe27a;
+    --bg: #0d0620;
+    --paper: #170b33;
+    --nav: #140636;
+    --ink: #f6f0ff;
+    --mute: #b9abdf;
+    --line: #3d2870;
+    --line-strong: #5b3d96;
+    --focus: #00f5ff;
+    --pink: #ff2bd6;
+    --cyan: #00f5ff;
+    --lav: #8a3cff;
+    --sun: #ffe84a;
   }
 }
 
