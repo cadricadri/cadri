@@ -60,7 +60,7 @@ export default function SessionDetail() {
   return (
     <Page
       title="Session"
-      beside={
+      actions={
         detail ? (
           <span className="session-title-id">
             <HarnessLogo harness={detail.harness} size={18} />
@@ -68,25 +68,24 @@ export default function SessionDetail() {
           </span>
         ) : null
       }
-      actions={
-        <Link className="btn ghost btn-back" to="/sessions">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M19 12H5M11 18l-6-6 6-6" />
-          </svg>
-          All sessions
-        </Link>
-      }
     >
       {status ? (
         <p className="status" role="status">
           {status}
         </p>
       ) : null}
+      <Link className="btn ghost btn-back session-back" to="/sessions">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M19 12H5M11 18l-6-6 6-6" />
+        </svg>
+        All sessions
+      </Link>
       {detail ? (
         <div className="session-detail">
           <section className="session-chat" aria-label="Conversation">
             <ChatThread
               messages={detail.messages}
+              plans={detail.plans ?? []}
               speaker={detail.user_id ? funName(detail.user_id) : "You"}
             />
           </section>

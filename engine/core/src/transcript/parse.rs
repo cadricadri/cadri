@@ -40,10 +40,25 @@ pub struct ToolCall {
     pub at: Option<String>,
 }
 
+/// A design the person and the agent wrote down before building. Tool calls stay
+/// hidden in the chat; this is the document those calls were carrying.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Plan {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overview: Option<String>,
+    pub body: String,
+    /// Tool that produced it (`CreatePlan`, `Write`, `ExitPlanMode`, `apply_patch`).
+    pub source: String,
+    /// Index of the chat message this plan follows. The card sits in the thread there.
+    pub after_message: usize,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Parsed {
     pub messages: Vec<Message>,
     pub tool_calls: Vec<ToolCall>,
+    pub plans: Vec<Plan>,
     pub model: Option<String>,
     /// Earliest and latest timestamps seen on any line, including hidden tool output.
     span: Option<(String, String)>,
@@ -236,7 +251,7 @@ fn parse_claude(value: &Value, parsed: &mut Parsed) {
                         }
                     }
                     Some("tool_use") | Some("server_tool_use") => {
-                        push_tool(parsed, block.get("name"), at.clone())
+                        note_tool(parsed, block.get("name"), block.get("input"), at.clone())
                     }
                     _ => {}
                 }
@@ -252,24 +267,21 @@ fn parse_cursor(value: &Value, parsed: &mut Parsed) {
         Some("assistant") => Role::Assistant,
         _ => return,
     };
-    let blocks = match &value["message"]["content"] {
-        Value::String(text) => vec![(Some("text"), Some(text.as_str()), None)],
-        Value::Array(blocks) => blocks
-            .iter()
-            .map(|block| {
-                (
-                    block.get("type").and_then(Value::as_str),
-                    block.get("text").and_then(Value::as_str),
-                    block.get("name"),
-                )
-            })
-            .collect(),
-        _ => return,
+    let Value::Array(blocks) = &value["message"]["content"] else {
+        if let Value::String(text) = &value["message"]["content"] {
+            let at = if role == Role::User {
+                cursor_timestamp(text)
+            } else {
+                None
+            };
+            push_text(parsed, role, text, at);
+        }
+        return;
     };
-    for (kind, text, name) in blocks {
-        match kind {
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
             Some("text") => {
-                if let Some(text) = text {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
                     let at = if role == Role::User {
                         cursor_timestamp(text)
                     } else {
@@ -278,7 +290,7 @@ fn parse_cursor(value: &Value, parsed: &mut Parsed) {
                     push_text(parsed, role, text, at);
                 }
             }
-            Some("tool_use") => push_tool(parsed, name, None),
+            Some("tool_use") => note_tool(parsed, block.get("name"), block.get("input"), None),
             _ => {}
         }
     }
@@ -316,9 +328,12 @@ fn parse_codex(
             codex.saw_response_messages = true;
             push_text(parsed, role, &text, at);
         }
-        (Some("response_item"), Some("function_call" | "custom_tool_call")) => {
-            push_tool(parsed, payload.get("name"), at)
-        }
+        (Some("response_item"), Some("function_call" | "custom_tool_call")) => note_tool(
+            parsed,
+            payload.get("name"),
+            payload.get("arguments").or_else(|| payload.get("input")),
+            at,
+        ),
         (Some("response_item"), Some("local_shell_call")) => {
             push_tool(parsed, Some(&Value::from("shell")), at)
         }
@@ -423,9 +438,12 @@ fn parse_opencode(content: &str, parsed: &mut Parsed) -> bool {
                         .and_then(|time| time.get("start").or_else(|| time.get("created")))
                         .and_then(normalize_time)
                         .or_else(|| at.clone());
-                    push_tool(
+                    note_tool(
                         parsed,
                         part.get("tool").or_else(|| part.get("name")),
+                        part.get("state")
+                            .and_then(|state| state.get("input"))
+                            .or_else(|| part.get("input")),
                         tool_at,
                     );
                 }
@@ -513,6 +531,260 @@ fn push_tool(parsed: &mut Parsed, name: Option<&Value>, at: Option<String>) {
             name: name.to_string(),
             at,
         });
+    }
+}
+
+fn note_tool(parsed: &mut Parsed, name: Option<&Value>, input: Option<&Value>, at: Option<String>) {
+    push_tool(parsed, name, at);
+    let Some(name) = name.and_then(Value::as_str).filter(|name| !name.is_empty()) else {
+        return;
+    };
+    let after_message = plan_anchor(parsed);
+    for mut plan in plans_from_call(name, input) {
+        plan.after_message = after_message;
+        upsert_plan(parsed, plan);
+    }
+}
+
+/// A later draft of the same title replaces the earlier one.
+fn upsert_plan(parsed: &mut Parsed, next: Plan) {
+    if let Some(existing) = parsed
+        .plans
+        .iter_mut()
+        .find(|plan| plan.title.eq_ignore_ascii_case(&next.title))
+    {
+        *existing = next;
+        return;
+    }
+    parsed.plans.push(next);
+}
+
+/// Designs an agent writes down for the person to accept. The same shapes are read
+/// in `plugin/cadri/plans.py` for the memory digest. A todo checklist (`update_plan`)
+/// is not a plan.
+fn plans_from_call(name: &str, input: Option<&Value>) -> Vec<Plan> {
+    let key = tool_key(name);
+    if key == "updateplan" || key == "enterplanmode" {
+        return Vec::new();
+    }
+    let owned = object_input(input);
+    let data = owned.as_ref();
+    if key == "applypatch" {
+        let patch = data
+            .and_then(|value| string_field(value, &["command", "input", "patch"]))
+            .or_else(|| input.and_then(Value::as_str));
+        return patch
+            .map(plans_added_in_patch)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(path, body)| plan_document(&path, None, None, &body, name))
+            .collect();
+    }
+    let Some(data) = data else {
+        return Vec::new();
+    };
+    if key == "write" || key == "createfile" {
+        let path = string_field(data, &["path", "file_path", "filePath", "filepath"]);
+        let body = string_field(data, &["contents", "content", "file_text"]);
+        return path
+            .zip(body)
+            .and_then(|(path, body)| plan_document(path, None, None, body, name))
+            .into_iter()
+            .collect();
+    }
+    if is_plan_tool(&key) {
+        if let Some(body) = string_field(data, &["plan", "plan_markdown", "markdown"]) {
+            let title = string_field(data, &["name", "title"]);
+            let overview = string_field(data, &["overview"]);
+            return plan_document("", title, overview, body, name)
+                .into_iter()
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn is_plan_tool(key: &str) -> bool {
+    matches!(
+        key,
+        "createplan" | "exitplanmode" | "submitplan" | "presentplan" | "writeplan"
+    ) || key.contains("plan")
+}
+
+fn tool_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn object_input(input: Option<&Value>) -> Option<Value> {
+    match input? {
+        Value::Object(_) => Some(input?.clone()),
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object),
+        _ => None,
+    }
+}
+
+fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    })
+}
+
+fn plans_added_in_patch(patch: &str) -> Vec<(String, String)> {
+    let mut path: Option<String> = None;
+    let mut lines: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    let finish = |path: &str, lines: &[String], found: &mut Vec<(String, String)>| {
+        if is_plan_path(path) {
+            found.push((path.to_string(), lines.join("\n")));
+        }
+    };
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("*** Add File:") {
+            if let Some(path) = path.take() {
+                finish(&path, &lines, &mut found);
+            }
+            path = Some(rest.trim().to_string());
+            lines.clear();
+            continue;
+        }
+        if line.starts_with("*** ") {
+            if let Some(path) = path.take() {
+                finish(&path, &lines, &mut found);
+            }
+            lines.clear();
+            continue;
+        }
+        if path.is_some() {
+            if let Some(rest) = line.strip_prefix('+') {
+                lines.push(rest.to_string());
+            }
+        }
+    }
+    if let Some(path) = path {
+        finish(&path, &lines, &mut found);
+    }
+    found
+}
+
+fn plan_document(
+    path: &str,
+    title: Option<&str>,
+    overview: Option<&str>,
+    raw: &str,
+    source: &str,
+) -> Option<Plan> {
+    if !path.is_empty() && !is_plan_path(path) {
+        return None;
+    }
+    let (matter_name, matter_overview, body) = split_frontmatter(raw);
+    let body = body.trim();
+    if !is_plan_body(body) {
+        return None;
+    }
+    let title = title
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or(matter_name)
+        .or_else(|| markdown_title(body))
+        .or_else(|| path_title(path))
+        .unwrap_or_else(|| "Plan".to_string());
+    Some(Plan {
+        title,
+        overview: overview
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .or(matter_overview),
+        body: body.to_string(),
+        source: source.to_string(),
+        after_message: 0,
+    })
+}
+
+/// The plan follows the message that was already on screen when it was written.
+fn plan_anchor(parsed: &Parsed) -> usize {
+    parsed.messages.len().saturating_sub(1)
+}
+
+fn is_plan_path(path: &str) -> bool {
+    let path = path.replace('\\', "/").to_ascii_lowercase();
+    if !path.ends_with(".md") {
+        return false;
+    }
+    path.ends_with(".plan.md")
+        || path.contains("/.cursor/plans/")
+        || path.contains("/.claude/plans/")
+        || path.contains("/.codex/plans/")
+        || path.contains("/.opencode/plan/")
+}
+
+fn is_plan_body(body: &str) -> bool {
+    body.chars().count() >= 80 && body.lines().any(|line| line.trim_start().starts_with("# "))
+}
+
+fn markdown_title(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("# ")
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn path_title(path: &str) -> Option<String> {
+    let name = path.replace('\\', "/");
+    let name = name.rsplit('/').next().unwrap_or(path);
+    let name = name
+        .strip_suffix(".plan.md")
+        .or_else(|| name.strip_suffix(".md"))?;
+    let title = name.replace(['_', '-'], " ").trim().to_string();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+fn split_frontmatter(text: &str) -> (Option<String>, Option<String>, &str) {
+    let text = text.trim();
+    let Some(rest) = text.strip_prefix("---") else {
+        return (None, None, text);
+    };
+    let rest = rest.strip_prefix('\n').unwrap_or(rest);
+    let Some((head, body)) = rest.split_once("\n---") else {
+        return (None, None, text);
+    };
+    let mut name = None;
+    let mut overview = None;
+    for line in head.lines() {
+        if let Some(value) = scalar(line, "name:") {
+            name = Some(value);
+        } else if let Some(value) = scalar(line, "overview:") {
+            overview = Some(value);
+        }
+    }
+    let body = body.trim_start_matches('\n');
+    (name, overview, body)
+}
+
+fn scalar(line: &str, prefix: &str) -> Option<String> {
+    let value = line.trim().strip_prefix(prefix)?.trim();
+    let value = value.trim_matches('"').trim_matches('\'').trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -637,6 +909,11 @@ fn cursor_timestamp(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn line(value: serde_json::Value) -> String {
+        value.to_string()
+    }
 
     const CLAUDE: &str = include_str!("fixtures/claude_code.jsonl");
     const CURSOR: &str = include_str!("fixtures/cursor.jsonl");
@@ -790,6 +1067,152 @@ mod tests {
             assert_eq!(parsed.messages[index].text, "");
             assert_eq!(parsed.messages[index].notes.len(), 1);
         }
+    }
+
+    #[test]
+    fn a_cursor_plan_is_a_document_not_a_chat_message() {
+        let draft = "# Transcripts page\n\n## Decisions\n\nFilters live in the URL, and memory commits point back at the session that wrote them.\n";
+        let revised = "# Transcripts page\n\n## Decisions\n\nThe chart counts transcripts per day, and a second series counts memories.\n";
+        let blob = [
+            line(json!({
+                "role": "user",
+                "message": {"content": [{"type": "text", "text": "<user_query>Redesign the page.</user_query>"}]}
+            })),
+            line(json!({
+                "role": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "Here is the design."},
+                    {"type": "tool_use", "name": "CreatePlan", "input": {
+                        "name": "Transcripts page",
+                        "overview": "A filterable list and a chat detail page.",
+                        "plan": draft
+                    }}
+                ]}
+            })),
+            line(json!({
+                "role": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "CreatePlan", "input": {
+                    "name": "Transcripts page",
+                    "overview": "Revised.",
+                    "plan": revised
+                }}]}
+            })),
+        ]
+        .join("\n");
+        let parsed = parse(&blob, None);
+        assert_eq!(parsed.plans.len(), 1, "a revision replaces the draft");
+        assert_eq!(parsed.plans[0].title, "Transcripts page");
+        assert_eq!(parsed.plans[0].overview.as_deref(), Some("Revised."));
+        assert!(parsed.plans[0].body.contains("second series"));
+        assert_eq!(parsed.plans[0].source, "CreatePlan");
+        assert_eq!(parsed.plans[0].after_message, 1);
+        assert!(!parsed
+            .messages
+            .iter()
+            .any(|message| message.text.contains("second series")));
+        assert!(parsed.tool_counts().contains_key("CreatePlan"));
+    }
+
+    #[test]
+    fn claude_writes_its_plan_file_and_codex_adds_one() {
+        let body = "---\nname: Checkout\noverview: Charge after the cart locks.\n---\n# Checkout\n\nThe cart locks before the charge, because a price change mid-payment was the bug.\n";
+        let claude = line(json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Write", "input": {
+                    "file_path": "/Users/me/.claude/plans/checkout.md",
+                    "content": body
+                }},
+                {"type": "tool_use", "name": "ExitPlanMode", "input": {"allowedPrompts": []}}
+            ]}
+        }));
+        let parsed = parse(&claude, None);
+        assert_eq!(parsed.plans.len(), 1);
+        assert_eq!(parsed.plans[0].title, "Checkout");
+        assert_eq!(
+            parsed.plans[0].overview.as_deref(),
+            Some("Charge after the cart locks.")
+        );
+        assert!(parsed.plans[0].body.contains("cart locks"));
+        assert!(!parsed.plans[0].body.contains("name: Checkout"));
+        assert_eq!(parsed.plans[0].source, "Write");
+
+        let patch = "*** Begin Patch\n*** Add File: docs/checkout.plan.md\n+# Checkout\n+\n+Charge only after the cart locks, so a price change cannot land mid-payment.\n*** End Patch\n";
+        let codex = [
+            line(json!({
+                "timestamp": "2026-09-12T10:00:00.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "update_plan",
+                    "arguments": "{\"plan\":[{\"step\":\"read the tests\",\"status\":\"pending\"}]}"
+                }
+            })),
+            line(json!({
+                "timestamp": "2026-09-12T10:00:01.000Z",
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call", "name": "apply_patch", "input": patch}
+            })),
+        ]
+        .join("\n");
+        let parsed = parse(&codex, None);
+        assert_eq!(
+            parsed.plans.len(),
+            1,
+            "update_plan is a checklist, not a design"
+        );
+        assert_eq!(parsed.plans[0].title, "Checkout");
+        assert!(parsed.plans[0].body.contains("price change"));
+        assert_eq!(parsed.plans[0].source, "apply_patch");
+    }
+
+    #[test]
+    fn opencode_plan_tool_is_read_from_the_part() {
+        let blob = line(json!({
+            "info": {"id": "ses_1"},
+            "messages": [{"info": {"role": "assistant"}, "parts": [{
+                "type": "tool",
+                "tool": "submit_plan",
+                "state": {"input": {
+                    "name": "Rename",
+                    "plan": "# Rename\n\nThe button says Save, because the old label described the implementation.\n"
+                }}
+            }]}]
+        }));
+        let parsed = parse(&blob, None);
+        assert_eq!(parsed.plans.len(), 1);
+        assert_eq!(parsed.plans[0].title, "Rename");
+        assert_eq!(parsed.plans[0].source, "submit_plan");
+        assert!(parsed.tool_counts().contains_key("submit_plan"));
+    }
+
+    #[test]
+    fn an_ordinary_write_is_not_a_plan() {
+        let blob = line(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Write", "input": {
+                "file_path": "/work/src/app.py",
+                "content": "# not a heading in a plan file\n\nprint('hello')\n"
+            }}]}
+        }));
+        assert!(parse(&blob, None).plans.is_empty());
+    }
+
+    #[test]
+    fn an_opencode_plan_file_is_the_singular_plan_directory() {
+        let body = "# Rename\n\nThe button says Save, because the old label described the implementation and confused people.\n";
+        let hit = line(json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Write", "input": {
+                "file_path": "/Users/me/.opencode/plan/rename.md",
+                "content": body
+            }}]}
+        }));
+        let parsed = parse(&hit, None);
+        assert_eq!(parsed.plans.len(), 1);
+        assert_eq!(parsed.plans[0].title, "Rename");
+        let miss = hit.replace("/.opencode/plan/", "/.opencode/plans/");
+        assert!(parse(&miss, None).plans.is_empty());
     }
 
     #[test]

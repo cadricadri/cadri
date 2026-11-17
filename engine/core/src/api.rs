@@ -649,6 +649,7 @@ struct SessionDetail {
     session: SessionRecord,
     messages: Vec<transcript::Message>,
     tool_calls: Vec<transcript::ToolCall>,
+    plans: Vec<transcript::Plan>,
     memory_commits: Vec<LinkedCommit>,
 }
 
@@ -743,6 +744,7 @@ async fn get_session(
         session,
         messages: parsed.messages,
         tool_calls: parsed.tool_calls,
+        plans: parsed.plans,
         memory_commits,
     }))
 }

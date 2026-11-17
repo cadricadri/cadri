@@ -61,7 +61,7 @@ A request for a larger window than the default is the same idea: pass the number
 
 Split the sessions into batches of about five. Run at most three subagents at a time. Give each subagent the team-book map (which files exist, and what each is for). Each subagent reads its batch with `cadri show <thread_id>` and returns candidate changes, naming the existing file to revise when there is one. Subagents must not edit either book and must not run `cadri memory`.
 
-Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections. Apply `maintain.md` in this order: corrections, preferences (personal book), decisions and conventions (team book), durable discoveries. Write a rule or fact that generalizes. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
+Sessions can be large. Read the human's messages first (search for `"role":"user"` or `"type":"user"`), then the surrounding corrections. Also search for a plan: `CreatePlan`, `ExitPlanMode`, a write under `~/.claude/plans` or `~/.cursor/plans`, or a `*.plan.md` file. An accepted plan's decisions follow the Plans section of `maintain.md`. Apply `maintain.md` in this order: corrections, preferences (personal book), decisions and conventions (team book), durable discoveries. Write a rule or fact that generalizes. Drop anything a future agent could learn in seconds by reading the code. Never store secrets.
 
 When a candidate contradicts a file you read in step 2, say so, and say which side the sessions support.
 

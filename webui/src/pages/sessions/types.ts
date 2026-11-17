@@ -44,9 +44,20 @@ export type ToolCall = {
   at?: string;
 };
 
+/** A design written down before building. Tool calls stay out of the chat. */
+export type SessionPlan = {
+  title: string;
+  overview?: string;
+  body: string;
+  source: string;
+  /** Chat message this plan follows, so the card sits in the thread there. */
+  after_message?: number;
+};
+
 export type SessionDetail = SessionRow & {
   messages: ChatMessage[];
   tool_calls: ToolCall[];
+  plans?: SessionPlan[];
 };
 
 export function commitLink(commit: { id: string; book: string }): string {

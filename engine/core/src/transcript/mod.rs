@@ -2,4 +2,4 @@
 
 mod parse;
 
-pub use parse::{parse, Message, Parsed, Role, ToolCall};
+pub use parse::{parse, Message, Parsed, Plan, Role, ToolCall};

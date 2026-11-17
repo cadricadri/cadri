@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import shlex
 import time
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .. import auth, capture, state
+from .. import auth, capture, plans, state
 from ..memory import books as bk
 from ..memory import context, digests, edits, push, recall, repair, sync
 from . import events as ev
@@ -312,6 +313,11 @@ def stop(inp: HookInput, adapter: Adapter) -> Result:
                 for record in edits.by_session(book, inp.session_id)
                 if record.at >= started
             ]
+            found = plans.overlay(
+                plans.extract(capture.transcript_text(adapter.capture_name, inp.raw)),
+                Path.home(),
+            )
+            fresh, seen = plans.select_new(found, list(data.get("seen_plan_hashes") or []))
             digests.save(
                 inp.harness,
                 inp.session_id,
@@ -319,8 +325,9 @@ def stop(inp: HookInput, adapter: Adapter) -> Result:
                 inp.last_message or data.get("last_reply"),
                 int(data.get("turn_edits") or 0),
                 sorted(set(memory_edits)),
+                fresh,
             )
-            current.update(digest_turn=started, last_reply=None)
+            current.update(digest_turn=started, last_reply=None, seen_plan_hashes=seen)
     if books and bk.git_ready():
         result.background.append(sweep_job(books, inp.harness))
     return result

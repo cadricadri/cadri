@@ -11,7 +11,26 @@ You decide subjectively from the digest (what the user asked, how the agent repl
 - **Decisions and conventions.** Why the system is shaped the way it is, team rules, naming, how to ship. Team book.
 - **Durable discoveries.** Non-obvious facts that cost real effort to find and will matter again: a gotcha in a component, the real cause of a failure pattern, why a feature exists.
 
-Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (refer to them by name, such as `$API_KEY`). Update from a pattern or an explicit instruction, not a single ambiguous event.
+Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (refer to them by name, such as `$API_KEY`). An accepted plan is the exception to "the transcript already holds it": the decisions in it belong in memory, because a future agent should learn the design without reopening the session. Update from a pattern or an explicit instruction, not a single ambiguous event.
+
+## Plans
+
+A digest section named **Plan** is a design the person and the agent wrote down before building. The short reply above it is usually just narration. Read the plan, then the user's next message.
+
+- The next message accepts it (implement it, looks good, ship it): the plan's decisions are worth keeping.
+- The next message revises it: keep the revision, not the draft. A later turn carries the revised plan.
+- The next message rejects it, or nothing shows the plan was followed: it is a proposal. Do not store it.
+
+Do not paste the plan into memory. Store the decisions a future agent cannot cheaply recover from the code: why this shape, what was rejected, how the pieces connect.
+
+Where an accepted plan goes:
+
+- A plan that establishes how components fit, or a design later work assumes: `architecture/`.
+- A plan that adds or changes one feature: `features/`.
+- A plan that changes how one component behaves: `components/`.
+- A plan that is only a sequence of edits, with no decision beyond the code: nothing. The code is the record.
+
+One learning per decision. A plan is not a new file of its own.
 
 ## Team or personal
 

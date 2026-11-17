@@ -36,7 +36,7 @@ Two layers:
 - **`GET /api/sessions` (list)** returns Layer B + metadata: `preview`, `transcript_text`, `conversation`, harness/model fields, `bytes`, timestamps. **Omits** Layer A `content` / trajectory.
 - **`POST /api/sessions`** response still includes stored Layer A `content` so the uploader can confirm what was saved.
 - The server parses Layer A on every upload (`engine/core/src/transcript/`) and stores a summary: `prompt`, `started_at`, `ended_at`, `user_turns`, `assistant_turns`, `tool_call_count`, `tool_counts`, `has_writes`. List rows carry it plus `event_count` and `memory_commits` (commits whose `Cadri-Session-Id` names the session).
-- **`GET /api/sessions/{session_id}`** returns the row with `messages` (`[{role: user|assistant, text, notes?, at?}]`, tool calls hidden; `notes` is assistant text written before a tool call in the same turn, `text` the reply after the last one), `tool_calls` (`[{name, at?}]`) and `memory_commits`. It does not return raw `content`.
+- **`GET /api/sessions/{session_id}`** returns the row with `messages` (`[{role: user|assistant, text, notes?, at?}]`, tool calls hidden; `notes` is assistant text written before a tool call in the same turn, `text` the reply after the last one), `tool_calls` (`[{name, at?}]`), `plans` (`[{title, overview?, body, source, after_message}]`, where `after_message` is the chat message the plan follows), and `memory_commits`. A plan is a markdown design extracted from the session blob (Cursor `CreatePlan`, a write under `~/.cursor/plans`, `~/.claude/plans`, or `~/.opencode/plan`, a `*.plan.md` file, Codex `apply_patch` of a plan file, or an OpenCode plan tool). It does not return raw `content`.
 
 ### Visibility
 

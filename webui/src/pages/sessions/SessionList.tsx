@@ -226,11 +226,13 @@ export default function SessionList() {
                         </Link>
                       </td>
                       <td>
-                        <HarnessBadge harness={row.harness} />
+                        <div className="harness-cell">
+                          <HarnessBadge harness={row.harness} />
+                          {row.model ? <span className="session-model">{row.model}</span> : null}
+                        </div>
                       </td>
                       <td className="session-user">{row.user_id ? userLabel(row.user_id) : "—"}</td>
                       <td className="session-prompt">
-                        {row.model ? <span className="session-model">{row.model}</span> : null}
                         <span className="session-prompt-text">{row.prompt || row.preview || "No prompt"}</span>
                       </td>
                       <td>

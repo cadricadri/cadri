@@ -294,6 +294,52 @@ class CursorTests(HookTestCase):
         self.assertIn("cadri_search", first["additional_context"])
         self.assertEqual(self.json_hook("cursor", "tool-after", {**self.base, "tool_name": "Read"}), {})
 
+    def test_a_plan_is_in_the_digest_once_and_the_next_message_accepts_it(self):
+        path = self.tmp / "k1.jsonl"
+        body = (
+            "# Widget checkout\n\n"
+            "Charge only after the cart locks, so a price change cannot land mid-payment.\n"
+        )
+        path.write_text(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "CreatePlan",
+                                "input": {
+                                    "name": "Widget checkout",
+                                    "overview": "Charge after the cart locks.",
+                                    "plan": body,
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.json_hook("cursor", "prompt", {**self.base, "prompt": "Plan the checkout."})
+        self.json_hook("cursor", "stop", {**self.base, "transcript_path": str(path)})
+        [(_, digest)] = digests.pending()
+        self.assertEqual(digest["plans"][0]["title"], "Widget checkout")
+        self.assertIn("cart locks", digest["plans"][0]["body"])
+
+        self.json_hook("cursor", "prompt", {**self.base, "prompt": "Implement the plan."})
+        [reflect] = list((self.tmp / "home" / "state" / "digests" / "claimed").rglob("reflect.md"))
+        text = reflect.read_text(encoding="utf-8")
+        self.assertIn("**Plan: Widget checkout**", text)
+        self.assertIn("Implement the plan.", text)
+        self.assertIn("accepted", text)
+
+        self.json_hook("cursor", "response", {**self.base, "text": "Shipped."})
+        self.json_hook("cursor", "stop", {**self.base, "transcript_path": str(path)})
+        [(_, again)] = digests.pending()
+        self.assertNotIn("plans", again)
+
     def test_the_reply_from_after_agent_response_reaches_the_digest(self):
         self.json_hook("cursor", "prompt", {**self.base, "prompt": "explain billing"})
         self.json_hook("cursor", "response", {**self.base, "text": "Billing retries back off."})

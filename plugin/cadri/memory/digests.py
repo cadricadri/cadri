@@ -90,8 +90,10 @@ def save(
     reply: str | None,
     edit_count: int,
     memory_edits: list[str],
+    plans: list[dict] | None = None,
 ) -> Path | None:
-    if not (prompt or reply):
+    plans = [plan for plan in (plans or []) if plan.get("body")]
+    if not (prompt or reply or plans):
         return None
     now = time.time()
     path = pending_dir() / f"{time.time_ns()}-{safe_part(harness)}-{safe_part(session)}.json"
@@ -107,6 +109,7 @@ def save(
             "edit_count": edit_count,
             "memory_edits": memory_edits,
             "reaction": None,
+            **({"plans": plans} if plans else {}),
         },
     )
     return path
@@ -136,6 +139,11 @@ def add_reaction(session: str, prompt: str) -> dict | None:
         if data.get("reaction") is not None:
             return None
         data["reaction"] = clip(prompt, REACTION_CHARS)
+        if data.get("plans"):
+            # The person may have edited the plan file before this reply.
+            from ..plans import absorb_files
+
+            data["plans"] = absorb_files(data["plans"], data.get("harness"), data.get("session"))
         write_json(path, data)
         return data
     return None
@@ -216,6 +224,13 @@ def render(turns: list[dict], books: dict[str, Path] | None = None) -> str:
         "decisions, durable discoveries). Most turns change nothing — that is a fine outcome.",
         "Do not treat this file as a checklist of facts to copy in.",
     ]
+    if any(turn.get("plans") for turn in turns):
+        parts += [
+            "",
+            "A **Plan** is a design the agent wrote for the user to accept. It is the",
+            "substance of that turn. The user's next message says whether they accepted",
+            "it, revised it, or dropped it. Follow the maintain rules for plans.",
+        ]
     if books:
         parts += ["", "Memory books:", ""]
         parts += [f"- {label}: {path}" for label, path in books.items()]
@@ -224,6 +239,11 @@ def render(turns: list[dict], books: dict[str, Path] | None = None) -> str:
         parts += ["", f"## Turn {number} — {data.get('harness')} session {data.get('session')} at {when}", ""]
         parts += ["**User asked:**", "", data.get("prompt") or "(not captured)", ""]
         parts += ["**Agent replied:**", "", data.get("reply") or "(not captured)", ""]
+        for plan in data.get("plans") or []:
+            parts += ["", f"**Plan: {plan.get('title') or 'Plan'}**", ""]
+            if plan.get("overview"):
+                parts += [plan["overview"], ""]
+            parts += [plan.get("body") or "", ""]
         if data.get("memory_edits"):
             parts += ["**Memory files the agent already edited:** " + ", ".join(data["memory_edits"]), ""]
         if data.get("edit_count"):

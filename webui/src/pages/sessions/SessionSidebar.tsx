@@ -59,6 +59,36 @@ export function SessionSidebar({ detail, userLabel }: { detail: SessionDetail; u
         </dl>
       </section>
 
+      {detail.plans && detail.plans.length > 0 ? (
+        <section className="side-card">
+          <h2>
+            Plans <span className="side-mute">{detail.plans.length}</span>
+          </h2>
+          <ul className="side-plans">
+            {detail.plans.map((plan, index) => (
+              <li key={`${plan.title}-${index}`}>
+                <a
+                  href={`#plan-${index}`}
+                  onClick={(event) => {
+                    const node = document.getElementById(`plan-${index}`);
+                    if (!node) {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (node instanceof HTMLDetailsElement) {
+                      node.open = true;
+                    }
+                    node.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
+                >
+                  {plan.title}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="side-card">
         <h2>Memories generated</h2>
         {detail.memory_commits.length === 0 ? (

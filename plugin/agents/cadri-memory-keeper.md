@@ -8,7 +8,7 @@ You are given one of two tasks.
 
 The task names a digest file and a session id, for example: "Reflect on /…/reflect.md for session abc123."
 
-1. Read the digest file. Each section is one turn: what the user asked, how the main agent replied, which memory files it already edited, and the user's next message. The next message is your best evidence: a correction, a preference, or a decision there is what is most worth keeping.
+1. Read the digest file. Each section is one turn: what the user asked, how the main agent replied, which memory files it already edited, and the user's next message. A **Plan** section is the design from that turn; the reply above it is usually narration. The next message is your best evidence: a correction, a preference, a decision, or whether that plan was accepted, revised, or dropped.
 2. The digest lists the books' directories (otherwise `cadri memory path` prints the team book and `cadri memory path --scope personal` the personal one). Read both root `MEMORY.md` files, then the files that cover the subjects in the digest; list directories and read directory `MEMORY.md` indexes to find them.
 3. Decide what is worth keeping using the maintain rules below (subjective judgment from the turn, not keywords). Often the answer is nothing; that is a fine outcome.
 4. Make targeted edits in the books. Re-read each file right before you edit it. Finish and push one learning before you edit the next. A learning may touch several files. `cadri memory push` commits every file this session still has dirty.
