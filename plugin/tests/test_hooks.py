@@ -340,6 +340,33 @@ class CursorTests(HookTestCase):
         [(_, again)] = digests.pending()
         self.assertNotIn("plans", again)
 
+    def test_an_edit_inside_a_book_is_recorded_and_compaction_uploads(self):
+        target = self.team.path / "components" / "billing.md"
+        self.assertEqual(
+            self.json_hook(
+                "cursor",
+                "edit",
+                {**self.base, "file_path": str(target), "workspace_roots": [str(self.team.path)]},
+            ),
+            {},
+        )
+        self.assertEqual(sorted(edits.latest(self.team)), ["components/billing.md"])
+        outside = self.tmp / "notes.md"
+        outside.write_text("not memory\n", encoding="utf-8")
+        self.json_hook("cursor", "edit", {**self.base, "file_path": str(outside)})
+        self.assertEqual(sorted(edits.latest(self.team)), ["components/billing.md"])
+
+        transcript = self.tmp / "k1.jsonl"
+        transcript.write_text('{"role":"user","content":"billing retries"}\n', encoding="utf-8")
+        self.assertEqual(
+            self.json_hook("cursor", "pre-compact", {**self.base, "transcript_path": str(transcript)}),
+            {},
+        )
+        self.assertEqual(len(self.uploads), 1)
+        self.assertEqual(self.uploads[0]["thread_id"], "k1")
+        self.assertEqual(self.uploads[0]["harness"], "cursor")
+        self.assertIn("billing retries", self.uploads[0]["content"])
+
     def test_the_reply_from_after_agent_response_reaches_the_digest(self):
         self.json_hook("cursor", "prompt", {**self.base, "prompt": "explain billing"})
         self.json_hook("cursor", "response", {**self.base, "text": "Billing retries back off."})
@@ -350,6 +377,12 @@ class CursorTests(HookTestCase):
 
 
 class OpenCodeTests(HookTestCase):
+    def test_session_start_puts_both_books_in_context(self):
+        data = self.json_hook("opencode", "session-start", {"session_id": "o1", "source": "startup"})
+        self.assertIn("Deploys happen on Tuesdays", data["context"])
+        self.assertIn("Prefers short answers", data["context"])
+        self.assertIn("`cadri-memory-keeper`", data["context"])
+
     def test_the_next_prompt_asks_the_main_agent_for_the_keeper(self):
         self.json_hook("opencode", "prompt", {"session_id": "o1", "prompt": "how do retries work"})
         self.json_hook("opencode", "stop", {"session_id": "o1", "last_message": "They back off."})

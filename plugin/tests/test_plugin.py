@@ -26,6 +26,7 @@ class FakeCadri:
 
     def __init__(self):
         self.responses: dict[str, list[tuple[int, dict]]] = {}
+        self.gets: dict[str, tuple[int, dict]] = {}
         self.requests: list[dict] = []
         fake = self
 
@@ -36,6 +37,16 @@ class FakeCadri:
                 fake.requests.append({"path": self.path, "headers": dict(self.headers), "body": body})
                 queue = fake.responses.get(self.path) or [(200, {})]
                 status, payload = queue.pop(0) if len(queue) > 1 else queue[0]
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                fake.requests.append({"method": "GET", "path": self.path, "headers": dict(self.headers), "body": None})
+                status, payload = fake.gets.get(self.path, (404, {}))
                 data = json.dumps(payload).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")

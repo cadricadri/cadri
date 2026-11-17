@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 const engine = "http://127.0.0.1:8080";
 
@@ -14,5 +14,9 @@ export default defineConfig({
       "/healthz": engine,
       "/git": engine,
     },
+  },
+  test: {
+    environment: "jsdom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });

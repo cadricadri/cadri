@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Run the plugin memory client against the core engine this checkout just built.
+# Auth is off. The books live in a temp directory, not staging or production.
+set -euo pipefail
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+bin="$root/engine/target/debug/cadri-engine"
+if [[ ! -x "$bin" ]]; then
+  echo "building cadri-engine"
+  (cd "$root/engine" && cargo build --bin cadri-engine)
+fi
+
+port=18412
+dir=$(mktemp -d)
+mkdir -p "$dir/mem"
+log="$dir/engine.log"
+cleanup() {
+  if [[ -n "${pid:-}" ]]; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  rm -rf "$dir"
+}
+trap cleanup EXIT
+
+env \
+  -u CADRI_API_TOKEN \
+  -u CADRI_MEMORIES_BUCKET \
+  -u CADRI_MEMORY_JAIL \
+  CADRI_DB="$dir/t.db" \
+  CADRI_MEMORIES="$dir/mem" \
+  CADRI_BIND="127.0.0.1:$port" \
+  "$bin" >"$log" 2>&1 &
+pid=$!
+
+ready=0
+for _ in $(seq 1 50); do
+  if curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  if ! kill -0 "$pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+if [[ "$ready" != 1 ]]; then
+  echo "cadri-engine did not become ready on 127.0.0.1:$port" >&2
+  cat "$log" >&2
+  exit 1
+fi
+
+cd "$root"
+CADRI_TEST_ENGINE_URL="http://127.0.0.1:$port" \
+  python3 -m unittest discover -s plugin/tests -p test_memory_engine.py -v
