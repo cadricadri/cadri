@@ -7,8 +7,8 @@ pub(super) const MAX_FILE_CHARS: usize = 65_536;
 pub(super) const MAX_ROOT_MEMORY_CHARS: usize = 3_000;
 /// Combined size of root `*.md` files other than `MEMORY.md`.
 pub(super) const MAX_CORE_CHARS: usize = 65_536;
-/// Directories between the book root and a file. `components/api/gotchas.md` is 2.
-pub(super) const MAX_DEPTH: usize = 2;
+/// Directories between the book root and a file. `components/api/http/handlers/gotchas.md` is 4.
+pub(super) const MAX_DEPTH: usize = 4;
 pub(super) const FILE_TOO_LONG: &str = "memory file is over 65536 characters";
 pub(super) const ROOT_MEMORY_TOO_LONG: &str = "root MEMORY.md is over 3000 characters";
 pub(super) const CORE_TOO_LONG: &str = "core memory is over 65536 characters";

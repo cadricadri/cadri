@@ -42,7 +42,7 @@ Before you write, trace one real user-visible feature from its entry point to th
 
 ## 4. Which files to write
 
-Write a file when the repo supports it. Skip a file rather than invent it, and name the skip in the report. A file is at most two directories deep (`components/api/how-it-works.md` is the deepest).
+Write a file when the repo supports it. Skip a file rather than invent it, and name the skip in the report. A file is at most four directories deep (`components/api/http/handlers/how-it-works.md` is the deepest).
 
 - `architecture/component-map.md` — subsystems, boundaries, entry points, and how a main flow crosses them.
 - `architecture/conventions.md` — layer rules, file placement, and commands from the README, `CLAUDE.md`, `AGENTS.md`, and repo skills, rewritten as rules with the reason. Name the owning doc in the file. Commands that change how an agent works belong here. A dump of every package script does not.

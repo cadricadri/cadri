@@ -117,7 +117,7 @@ Rules for files:
 - One home per subject. Update the existing file instead of adding a near-duplicate. Name files after their subject, never a session id.
 - After adding or moving a file, check that a natural future request would reach it from the root `MEMORY.md` and the directory indexes. Add the link if not.
 
-The server rejects a push that breaks these limits. Root `MEMORY.md` is at most 3,000 characters. Every other file is at most 65,536 characters. Other root markdown files together stay under 65,536 characters. A file is at most two directories deep (`components/api/gotchas.md` is the deepest). Team pushes also reject a new top-level directory outside the table above. When something does not fit, split it into another file under the same directory. Do not add a directory level past that depth, and do not try to raise a limit.
+The server rejects a push that breaks these limits. Root `MEMORY.md` is at most 3,000 characters. Every other file is at most 65,536 characters. Other root markdown files together stay under 65,536 characters. A file is at most four directories deep (`components/api/http/handlers/gotchas.md` is the deepest). Team pushes also reject a new top-level directory outside the table above. When something does not fit, split it into another file under the same directory. Do not add a directory level past that depth, and do not try to raise a limit.
 
 ## How to write it
 

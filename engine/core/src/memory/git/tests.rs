@@ -130,7 +130,7 @@ fn memory_shape_limits_reject_a_deep_path_a_long_file_and_a_bloated_root() {
     let repo = "org_shape_repo_0";
     let (user, label) = author();
 
-    let deep = service.commit(repo, user, label, "deep", &[write("a/b/c/d.md", "x")]);
+    let deep = service.commit(repo, user, label, "deep", &[write("a/b/c/d/e/f.md", "x")]);
     assert!(matches!(deep, Err(err) if err.message == "memory path is too deep"));
 
     let nested = service
@@ -139,13 +139,13 @@ fn memory_shape_limits_reject_a_deep_path_a_long_file_and_a_bloated_root() {
             user,
             label,
             "ok",
-            &[write("components/api/gotchas.md", "x")],
+            &[write("components/api/http/handlers/gotchas.md", "x")],
         )
         .unwrap();
     assert!(nested
         .files
         .iter()
-        .any(|file| file.path == "components/api/gotchas.md"));
+        .any(|file| file.path == "components/api/http/handlers/gotchas.md"));
 
     let long = service.commit(
         repo,

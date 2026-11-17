@@ -28,7 +28,7 @@ LOCK_SECONDS = 30
 PUSH_ATTEMPTS = 3
 MAX_FILE_CHARS = 65_536
 MAX_ROOT_MEMORY_CHARS = 3_000
-MAX_DEPTH = 2
+MAX_DEPTH = 4
 NETWORK_ERRORS = (
     "could not resolve host",
     "failed to connect",
