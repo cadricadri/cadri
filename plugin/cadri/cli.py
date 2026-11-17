@@ -14,6 +14,7 @@ from pathlib import Path
 from . import auth
 from .discover import cursor, detected_harnesses, discover_all
 from .discover.opencode import export_session_json
+from .discover.repos import choose_repo, format_repo_choice, repo_payload, roots_for_sessions
 from .discover.types import SessionRef
 from .hooks import adapters
 from .hooks import run as hook_run
@@ -289,6 +290,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("  " + ", ".join(f"{HARNESS_NAMES[k]} {v}" for k, v in summary["by_harness"].items()))
     cloned, joining = clone_books(args.url)
     print(cloned)
+    print(format_repo_choice(choose_repo(roots_for_sessions(chosen), Path.cwd())))
     if "codex" in harnesses:
         print("Codex runs new hooks only after you trust them: open Codex, type /hooks, and trust the Cadri hooks.")
     print(memory_time_warning(joining))
@@ -339,12 +341,15 @@ def cmd_discover(args: argparse.Namespace) -> int:
     days, limit = resolve_discover_bounds(args.days, args.limit, args.seed)
     chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), days, limit)
     refs = chosen
+    choice = None
     if args.seed:
+        choice = choose_repo(roots_for_sessions(refs), Path.cwd())
         summary = (
             f"seed window: {len(chosen)} sessions "
             f"({in_window} in the last {days:g} days, {newest} most recent)"
         )
         print(summary, file=sys.stderr)
+        print(format_repo_choice(choice), file=sys.stderr)
     if args.json:
         rows = [
             {
@@ -354,7 +359,8 @@ def cmd_discover(args: argparse.Namespace) -> int:
             }
             for ref in refs
         ]
-        print(json.dumps(rows, indent=2))
+        payload: object = rows if choice is None else {"sessions": rows, "repos": repo_payload(choice)}
+        print(json.dumps(payload, indent=2))
         return 0
     for ref in refs:
         print(f"{ref.harness}\t{ref.thread_id}\t{ref.path}")
