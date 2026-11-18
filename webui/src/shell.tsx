@@ -290,52 +290,62 @@ function AccountFooter() {
 
   if (session.mode === "token") {
     return (
-      <footer className="nav-footer">
-        <SupportLine />
-        <ThemeToggle />
-        <button className="btn ghost" type="button" onClick={session.forgetToken}>
-          Forget token
-        </button>
-      </footer>
+      <NavBottom>
+        <div className="nav-actions">
+          <button className="btn ghost nav-signout" type="button" onClick={session.forgetToken}>
+            Forget token
+          </button>
+          <ThemeToggle />
+        </div>
+      </NavBottom>
     );
   }
   if (session.mode !== "workos" || !session.me) {
     return (
-      <footer className="nav-footer">
-        <SupportLine />
+      <NavBottom>
         <ThemeToggle />
-      </footer>
+      </NavBottom>
     );
   }
   const me = session.me;
   return (
-    <footer className="nav-footer">
-      <SupportLine />
-      <ThemeToggle />
+    <NavBottom>
       <p className="account">{[me.email ?? me.user_id, me.org_name ?? me.org_id].join(" · ")}</p>
       {error ? (
         <p className="form-status" role="status">
           {error}
         </p>
       ) : null}
-      <button
-        className="btn ghost nav-signout"
-        type="button"
-        disabled={busy}
-        onClick={() => {
-          setBusy(true);
-          setError(null);
-          void session.signOut().then((message) => {
-            if (message) {
-              setError(message);
-              setBusy(false);
-            }
-          });
-        }}
-      >
-        Sign out
-      </button>
-    </footer>
+      <div className="nav-actions">
+        <button
+          className="btn ghost nav-signout"
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            setBusy(true);
+            setError(null);
+            void session.signOut().then((message) => {
+              if (message) {
+                setError(message);
+                setBusy(false);
+              }
+            });
+          }}
+        >
+          Sign out
+        </button>
+        <ThemeToggle />
+      </div>
+    </NavBottom>
+  );
+}
+
+function NavBottom({ children }: { children: ReactNode }) {
+  return (
+    <div className="nav-bottom">
+      <SupportLine />
+      <footer className="nav-footer">{children}</footer>
+    </div>
   );
 }
 

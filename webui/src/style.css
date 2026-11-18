@@ -226,14 +226,25 @@ button {
   background: var(--line-strong);
 }
 
-.nav-footer {
+.nav-bottom {
   margin-top: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-footer {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 8px;
   padding: 14px 16px 18px;
   border-top: 1px solid var(--line);
+}
+
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .account {
@@ -246,6 +257,7 @@ button {
 
 .nav-support {
   margin: 0;
+  padding: 0 16px 8px;
   color: var(--mute);
   font-size: 13px;
   line-height: 1.4;
@@ -256,28 +268,34 @@ button {
 }
 
 .nav-footer .nav-signout {
-  padding-block: 5px;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+  line-height: 1;
 }
 
 .theme-toggle {
   display: inline-flex;
+  flex: none;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.2rem;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--bg) 88%, var(--ink));
-  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  gap: 2px;
+  height: 32px;
+  padding: 3px;
+  border-radius: 6px;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
 }
 
 .theme-toggle button {
   display: grid;
   place-items: center;
-  width: 2rem;
-  height: 2rem;
+  width: 26px;
+  height: 24px;
   margin: 0;
   padding: 0;
   border: none;
-  border-radius: 0.55rem;
+  border-radius: 4px;
   background: transparent;
   color: var(--mute);
   box-shadow: none;
@@ -289,30 +307,17 @@ button {
 }
 
 .theme-toggle button[aria-pressed="true"] {
-  background: var(--paper);
+  background: color-mix(in srgb, var(--ink) 8%, var(--paper));
   color: var(--ink);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 18%, transparent);
-}
-
-:root[data-theme="dark"] .theme-toggle {
-  background: var(--paper);
-  border-color: color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
 :root[data-theme="dark"] .theme-toggle button[aria-pressed="true"] {
   background: color-mix(in srgb, var(--ink) 16%, var(--paper));
-  box-shadow: 0 1px 2px color-mix(in srgb, #000 40%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .theme-toggle {
-    background: var(--paper);
-    border-color: color-mix(in srgb, var(--ink) 12%, transparent);
-  }
-
   :root:not([data-theme="light"]) .theme-toggle button[aria-pressed="true"] {
     background: color-mix(in srgb, var(--ink) 16%, var(--paper));
-    box-shadow: 0 1px 2px color-mix(in srgb, #000 40%, transparent);
   }
 }
 
@@ -1500,8 +1505,9 @@ button.tree-row {
 
 .blame-faces span {
   display: flex;
+  flex: none;
   margin-left: -6px;
-  box-shadow: 0 0 0 2px var(--paper);
+  line-height: 0;
 }
 
 .blame-faces span:first-child {
@@ -1622,8 +1628,9 @@ a.author-mark:hover span {
 }
 
 .author-icon {
+  display: block;
   flex: none;
-  image-rendering: pixelated;
+  overflow: visible;
 }
 
 .blame-unsaved {
