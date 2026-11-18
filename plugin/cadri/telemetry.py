@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import urllib.error
 import urllib.request
 
 from . import auth
@@ -31,7 +30,8 @@ def report(command: str, seconds: float) -> None:
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS):
             return
-    except (OSError, urllib.error.URLError):
+    except Exception:
+        # A beacon must not change the command's exit code.
         return
 
 
