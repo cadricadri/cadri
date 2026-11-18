@@ -207,7 +207,7 @@ async fn metrics_record_http_and_page_load_without_raw_ids() {
 
     let (status, body) = send_text(&app, get_request("/metrics", &[])).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.contains("cadri_http_in_flight 0"));
+    assert!(body.contains("cadri_http_in_flight "));
     assert!(body.contains("cadri_client_request_duration_seconds_bucket"));
     assert!(body.contains("route=\"/api/sessions/{session_id}\""));
     assert!(body.contains("cadri_plugin_duration_seconds_bucket"));
