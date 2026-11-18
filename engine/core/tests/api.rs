@@ -241,7 +241,9 @@ async fn no_auth_uses_the_default_org() {
     let (status, _, stored) = send(&app, post_session("s1", "hello", &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stored["session_id"], "s1");
-    assert_eq!(stored["bytes"], 5);
+    assert_eq!(stored["preview"], "hello");
+    assert!(stored.get("content").is_none());
+    assert!(stored["bytes"].as_u64().unwrap() < 128);
     let (_, _, listed) = send(&app, get_request("/api/sessions", &[])).await;
     assert_eq!(listed.as_array().unwrap().len(), 1);
     let (_, _, aliased) = send(&app, get_request("/api/transcripts", &[])).await;
@@ -376,7 +378,7 @@ async fn mid_turn_transcript_uploads_update_one_session() {
     );
     assert_eq!(rows[0]["session_id"], "sess-live");
     assert_eq!(rows[0]["created_at"], started["created_at"]);
-    assert_eq!(rows[0]["bytes"], mid.len());
+    assert!(rows[0]["bytes"].as_u64().unwrap() < mid.len() as u64);
     assert_eq!(rows[0]["event_count"], 2);
     assert!(rows[0].get("content").is_none());
 
@@ -406,7 +408,7 @@ async fn mid_turn_transcript_uploads_update_one_session() {
     assert_eq!(status, StatusCode::OK, "{finished_row}");
     assert_eq!(finished_row["created_at"], started["created_at"]);
     assert_eq!(finished_row["tool_call_count"], 1);
-    assert_eq!(finished_row["bytes"], later.len());
+    assert!(finished_row["bytes"].as_u64().unwrap() < later.len() as u64);
 
     let (_, _, listed) = send(&app, get_request("/api/transcripts", &[])).await;
     assert_eq!(
@@ -415,7 +417,7 @@ async fn mid_turn_transcript_uploads_update_one_session() {
         "transcript alias must update the same session: {listed}"
     );
     assert_eq!(listed[0]["session_id"], "sess-live");
-    assert_eq!(listed[0]["bytes"], later.len());
+    assert!(listed[0]["bytes"].as_u64().unwrap() < later.len() as u64);
     assert_eq!(listed[0]["tool_call_count"], 1);
     assert_eq!(listed[0]["prompt"], "fix the login");
 
@@ -473,7 +475,7 @@ async fn mid_turn_transcript_uploads_update_one_session() {
         .iter()
         .find(|row| row["session_id"] == "sess-live")
         .unwrap();
-    assert_eq!(live["bytes"], later.len());
+    assert!(live["bytes"].as_u64().unwrap() < later.len() as u64);
     assert_eq!(live["tool_call_count"], 1);
 
     let (status, _, detail) = send(&app, get_request("/api/sessions/sess-live", &[])).await;

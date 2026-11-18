@@ -11,9 +11,10 @@ use crate::transcript;
 
 /// Bump when the on-disk shape changes. Version 1 adds summary columns and renames
 /// `transcripts` to `sessions`. Version 4 renames that table. Version 5 is the sessions
-/// table with a `cwd` column; version 6 drops it. Versions 2 and 3 predate the reset
-/// to 1 and are dropped.
-pub const SCHEMA_VERSION: i64 = 6;
+/// table with a `cwd` column; version 6 drops it. Version 7 keeps the parsed chat,
+/// plans, and tool names, and drops the raw transcript. Versions 2 and 3 predate the
+/// reset to 1 and are dropped.
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Columns derived from `content` by `transcript::parse`, rewritten on every upload.
 const SUMMARY_COLUMNS: &[(&str, &str)] = &[
@@ -32,7 +33,6 @@ CREATE TABLE sessions (
     org_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     hook_event TEXT,
-    content TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     user_id TEXT,
@@ -40,11 +40,9 @@ CREATE TABLE sessions (
     harness_version TEXT,
     model TEXT,
     model_version TEXT,
-    conversation TEXT,
-    transcript_text TEXT,
-    compaction_summary TEXT,
     client_timestamp TEXT,
     prompt TEXT,
+    preview TEXT NOT NULL DEFAULT '',
     started_at TEXT,
     ended_at TEXT,
     user_turns INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +50,8 @@ CREATE TABLE sessions (
     tool_calls INTEGER NOT NULL DEFAULT 0,
     tool_counts TEXT,
     has_writes INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    view TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (org_id, session_id)
 );
 CREATE INDEX sessions_org_updated ON sessions (org_id, updated_at DESC);
@@ -79,6 +79,8 @@ pub(crate) struct IncomingSession {
     pub harness_version: Option<String>,
     pub model: Option<String>,
     pub model_version: Option<String>,
+    /// Accepted from older clients. Not stored.
+    #[allow(dead_code)]
     pub compaction_summary: Option<String>,
 }
 
@@ -126,9 +128,6 @@ pub(crate) struct SessionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
     pub hook_event: Option<String>,
-    /// Layer A blob. Present on POST response; omitted from list.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub bytes: usize,
@@ -143,12 +142,6 @@ pub(crate) struct SessionRecord {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub transcript_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compaction_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_timestamp: Option<String>,
     /// First thing the person typed, from the parsed session.
@@ -181,8 +174,34 @@ struct Summary {
 
 const PROMPT_CHARS: usize = 1000;
 
-fn summarize(content: &str, conversation: Option<&Value>) -> Summary {
-    let parsed = transcript::parse(content, conversation);
+/// What the session page renders. The raw harness transcript is parsed on ingest
+/// and not stored; it remains on the machine that uploaded it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub(crate) struct SessionView {
+    #[serde(default)]
+    pub messages: Vec<transcript::Message>,
+    #[serde(default)]
+    pub tool_calls: Vec<transcript::ToolCall>,
+    #[serde(default)]
+    pub plans: Vec<transcript::Plan>,
+}
+
+impl SessionView {
+    fn from_parsed(parsed: transcript::Parsed) -> Self {
+        Self {
+            messages: parsed.messages,
+            tool_calls: parsed.tool_calls,
+            plans: parsed.plans,
+        }
+    }
+}
+
+pub(crate) struct StoredSession {
+    pub session: SessionRecord,
+    pub view: SessionView,
+}
+
+fn summary_from(parsed: &transcript::Parsed) -> Summary {
     let prompt = parsed
         .prompt()
         .map(|text| text.chars().take(PROMPT_CHARS).collect());
@@ -272,24 +291,135 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     if version == SCHEMA_VERSION {
         return Ok(());
     }
-    let transaction = connection.transaction()?;
-    if version == 1 {
-        upgrade_from_v1(&transaction)?;
-    } else if version == 4 {
-        rename_transcripts_table(&transaction)?;
-    } else if version != 5 {
-        // Unknown or pre-reset schemas are dropped. Versions 2 and 3 must not be trusted.
-        // Version 5 is the sessions table and only loses its cwd column below.
-        transaction.execute_batch(
-            "DROP TABLE IF EXISTS transcripts;
-             DROP TABLE IF EXISTS sessions;
-             DROP TABLE IF EXISTS memory_repos;",
-        )?;
-        transaction.execute_batch(CREATE_SESSIONS)?;
+    let project = {
+        let transaction = connection.transaction()?;
+        // Versions 2 and 3 predate the reset to 1 and are dropped. Anything else
+        // unknown is rebuilt empty. Versions 1, 4, 5, and 6 keep their rows.
+        let project = match version {
+            1 => {
+                upgrade_from_v1(&transaction)?;
+                true
+            }
+            4 => {
+                rename_transcripts_table(&transaction)?;
+                true
+            }
+            5 | 6 => true,
+            _ => {
+                transaction.execute_batch(
+                    "DROP TABLE IF EXISTS transcripts;
+                     DROP TABLE IF EXISTS sessions;
+                     DROP TABLE IF EXISTS memory_repos;",
+                )?;
+                transaction.execute_batch(CREATE_SESSIONS)?;
+                false
+            }
+        };
+        drop_cwd_column(&transaction)?;
+        if project {
+            project_sessions(&transaction)?;
+        }
+        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.commit()?;
+        project
+    };
+    // Rewriting every transcript leaves the old pages allocated until vacuum.
+    if project {
+        connection.execute_batch("VACUUM")?;
     }
-    drop_cwd_column(&transaction)?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    transaction.commit()
+    Ok(())
+}
+
+/// Parse each stored transcript and keep the chat, plans, and tool names.
+fn project_sessions(connection: &Connection) -> rusqlite::Result<()> {
+    if !has_column(connection, "sessions", "content") {
+        return Ok(());
+    }
+    ensure_column(
+        connection,
+        "sessions",
+        "preview",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "sessions",
+        "bytes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(connection, "sessions", "view", "TEXT NOT NULL DEFAULT '{}'")?;
+    let rows = {
+        let mut statement = connection.prepare(
+            "SELECT org_id, session_id, content, conversation, transcript_text FROM sessions",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (org_id, session_id, content, conversation, transcript_text) in rows {
+        let conversation = conversation
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok());
+        let parsed = transcript::parse(&content, conversation.as_ref());
+        let shown = preview_text(transcript_text.as_deref(), &parsed, &content);
+        let view = SessionView::from_parsed(parsed);
+        let view_json = serde_json::to_string(&view).unwrap_or_else(|_| "{}".into());
+        connection.execute(
+            "UPDATE sessions SET preview = ?3, bytes = ?4, view = ?5
+             WHERE org_id = ?1 AND session_id = ?2",
+            params![org_id, session_id, shown, view_json.len() as i64, view_json],
+        )?;
+    }
+    for column in [
+        "content",
+        "conversation",
+        "transcript_text",
+        "compaction_summary",
+    ] {
+        drop_column(connection, "sessions", column)?;
+    }
+    Ok(())
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    if has_column(connection, table, column) {
+        return Ok(());
+    }
+    connection.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+}
+
+fn drop_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
+    if has_column(connection, table, column) {
+        connection.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {column}"))?;
+    }
+    Ok(())
+}
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> bool {
+    let Ok(mut statement) = connection.prepare(&format!("PRAGMA table_info({table})")) else {
+        return false;
+    };
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .ok()
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>().ok())
+        .is_some_and(|names| names.iter().any(|name| name == column))
 }
 
 fn upgrade_from_v1(connection: &Connection) -> rusqlite::Result<()> {
@@ -305,7 +435,8 @@ fn upgrade_from_v1(connection: &Connection) -> rusqlite::Result<()> {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    parse_conversation(row.get(3)?),
+                    row.get::<_, Option<String>>(3)?
+                        .and_then(|raw| serde_json::from_str(&raw).ok()),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -313,7 +444,8 @@ fn upgrade_from_v1(connection: &Connection) -> rusqlite::Result<()> {
     };
     rename_transcripts_table(connection)?;
     for (org_id, session_id, content, conversation) in rows {
-        let summary = summarize(&content, conversation.as_ref());
+        let parsed = transcript::parse(&content, conversation.as_ref());
+        let summary = summary_from(&parsed);
         write_summary(connection, &org_id, &session_id, &summary)?;
     }
     Ok(())
@@ -361,39 +493,23 @@ fn preview(content: &str) -> String {
     out
 }
 
-fn preview_for(incoming: &IncomingSession, content: &str) -> String {
-    if let Some(text) = incoming
-        .transcript_text
-        .as_ref()
-        .filter(|value| !value.is_empty())
-    {
+fn preview_text(transcript_text: Option<&str>, parsed: &transcript::Parsed, raw: &str) -> String {
+    if let Some(text) = transcript_text.filter(|value| !value.is_empty()) {
         return preview(text);
     }
-    preview(content)
+    if let Some(text) = parsed.prompt().filter(|text| !text.is_empty()) {
+        return preview(text);
+    }
+    preview(raw)
 }
 
-fn conversation_json(value: &Option<Value>) -> Option<String> {
-    value.as_ref().map(|conversation| conversation.to_string())
-}
-
-fn parse_conversation(raw: Option<String>) -> Option<Value> {
-    raw.and_then(|text| serde_json::from_str(&text).ok())
-}
-
-fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Result<SessionRecord> {
-    let session_id: String = row.get(0)?;
-    let content: String = row.get(2)?;
-    let conversation = parse_conversation(row.get(10)?);
-    let transcript_text: Option<String> = row.get(11)?;
-    let preview = match transcript_text.as_ref().filter(|value| !value.is_empty()) {
-        Some(text) => preview(text),
-        None => preview(&content),
-    };
-    let created_at: String = row.get(3)?;
-    let updated_at: String = row.get(4)?;
-    let client_timestamp: Option<String> = row.get(13)?;
-    let parsed_start: Option<String> = row.get(15)?;
-    let parsed_end: Option<String> = row.get(16)?;
+fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
+    let session_id: String = row.get("session_id")?;
+    let created_at: String = row.get("created_at")?;
+    let updated_at: String = row.get("updated_at")?;
+    let client_timestamp: Option<String> = row.get("client_timestamp")?;
+    let parsed_start: Option<String> = row.get("started_at")?;
+    let parsed_end: Option<String> = row.get("ended_at")?;
     let ended_at = [
         parsed_end,
         client_timestamp.as_deref().and_then(normalize_time),
@@ -405,33 +521,32 @@ fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Resul
     let started_at = parsed_start
         .unwrap_or_else(|| created_at.clone())
         .min(ended_at.clone());
-    let count = |index: usize| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-    let user_turns = count(17)?;
-    let assistant_turns = count(18)?;
-    let tool_calls = count(19)?;
+    let user_turns: i64 = row.get("user_turns")?;
+    let assistant_turns: i64 = row.get("assistant_turns")?;
+    let tool_calls: i64 = row.get("tool_calls")?;
+    let user_turns = user_turns.max(0) as u64;
+    let assistant_turns = assistant_turns.max(0) as u64;
+    let tool_calls = tool_calls.max(0) as u64;
+    let bytes: i64 = row.get("bytes")?;
     let tool_counts = row
-        .get::<_, Option<String>>(20)?
+        .get::<_, Option<String>>("tool_counts")?
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default();
     Ok(SessionRecord {
         thread_id: Some(session_id.clone()),
         session_id,
-        hook_event: row.get(1)?,
-        bytes: content.len(),
-        preview,
-        content: if include_layer_a { Some(content) } else { None },
+        hook_event: row.get("hook_event")?,
+        bytes: bytes.max(0) as usize,
+        preview: row.get("preview")?,
         created_at,
         updated_at,
-        user_id: row.get(5)?,
-        harness: row.get(6)?,
-        harness_version: row.get(7)?,
-        model: row.get(8)?,
-        model_version: row.get(9)?,
-        conversation,
-        transcript_text,
-        compaction_summary: row.get(12)?,
+        user_id: row.get("user_id")?,
+        harness: row.get("harness")?,
+        harness_version: row.get("harness_version")?,
+        model: row.get("model")?,
+        model_version: row.get("model_version")?,
         client_timestamp,
-        prompt: row.get(14)?,
+        prompt: row.get("prompt")?,
         started_at,
         ended_at,
         user_turns,
@@ -439,7 +554,7 @@ fn row_to_session(row: &rusqlite::Row, include_layer_a: bool) -> rusqlite::Resul
         tool_call_count: tool_calls,
         event_count: user_turns + assistant_turns + tool_calls,
         tool_counts,
-        has_writes: row.get(21)?,
+        has_writes: row.get("has_writes")?,
     })
 }
 
@@ -450,10 +565,10 @@ fn normalize_time(text: &str) -> Option<String> {
     })
 }
 
-const SELECT_COLS: &str = "session_id, hook_event, content, created_at, updated_at,
-         user_id, harness, harness_version, model, model_version, conversation,
-         transcript_text, compaction_summary, client_timestamp, prompt, started_at, ended_at,
-         user_turns, assistant_turns, tool_calls, tool_counts, has_writes";
+const SELECT_COLS: &str = "session_id, hook_event, created_at, updated_at,
+         user_id, harness, harness_version, model, model_version, client_timestamp,
+         prompt, preview, started_at, ended_at, user_turns, assistant_turns, tool_calls,
+         tool_counts, has_writes, bytes";
 
 pub(crate) fn upsert(
     connection: &Connection,
@@ -473,60 +588,56 @@ pub(crate) fn upsert(
         )
         .optional()?
         .is_none();
-    let content = incoming.layer_a_content();
+    let raw = incoming.layer_a_content();
+    let parsed = transcript::parse(&raw, incoming.conversation.as_ref());
+    let summary = summary_from(&parsed);
+    let shown = preview_text(incoming.transcript_text.as_deref(), &parsed, &raw);
+    let view = SessionView::from_parsed(parsed);
+    let view_json = serde_json::to_string(&view).unwrap_or_else(|_| "{}".into());
     let timestamp = now();
-    let conversation = conversation_json(&incoming.conversation);
     connection.execute(
         "INSERT INTO sessions (
-            org_id, session_id, hook_event, content, created_at, updated_at,
-            user_id, harness, harness_version, model, model_version, conversation,
-            transcript_text, compaction_summary, client_timestamp
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            org_id, session_id, hook_event, created_at, updated_at,
+            user_id, harness, harness_version, model, model_version,
+            client_timestamp, preview, bytes, view
+         ) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(org_id, session_id) DO UPDATE SET
            hook_event = COALESCE(excluded.hook_event, sessions.hook_event),
-           content = excluded.content,
            updated_at = excluded.updated_at,
            user_id = COALESCE(excluded.user_id, sessions.user_id),
            harness = COALESCE(excluded.harness, sessions.harness),
            harness_version = COALESCE(excluded.harness_version, sessions.harness_version),
            model = COALESCE(excluded.model, sessions.model),
            model_version = COALESCE(excluded.model_version, sessions.model_version),
-           conversation = COALESCE(excluded.conversation, sessions.conversation),
-           transcript_text = COALESCE(excluded.transcript_text, sessions.transcript_text),
-           compaction_summary = COALESCE(excluded.compaction_summary, sessions.compaction_summary),
-           client_timestamp = COALESCE(excluded.client_timestamp, sessions.client_timestamp)",
+           client_timestamp = COALESCE(excluded.client_timestamp, sessions.client_timestamp),
+           preview = excluded.preview,
+           bytes = excluded.bytes,
+           view = excluded.view",
         params![
             org_id,
             thread_id,
             incoming.hook_event,
-            content,
             timestamp,
             user_id,
             incoming.harness,
             incoming.harness_version,
             incoming.model,
             incoming.model_version,
-            conversation,
-            incoming.transcript_text,
-            incoming.compaction_summary,
             incoming.timestamp,
+            shown,
+            view_json.len() as i64,
+            view_json,
         ],
     )?;
-    let summary = summarize(&content, incoming.conversation.as_ref());
     write_summary(connection, org_id, &thread_id, &summary)?;
 
     let session = connection.query_row(
         &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
         params![org_id, thread_id],
-        |row| {
-            let mut session = row_to_session(row, true)?;
-            let layer_a = session.content.as_deref().unwrap_or("");
-            session.preview = preview_for(incoming, layer_a);
-            Ok(session)
-        },
+        row_to_session,
     )?;
     if inserted {
-        crate::telemetry::observe_session(content.len() as u64);
+        crate::telemetry::observe_session(view_json.len() as u64);
     }
     Ok(session)
 }
@@ -538,26 +649,36 @@ pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Ve
          WHERE org_id = ?1
          ORDER BY updated_at DESC"
     ))?;
-    // List is Layer B + metadata: omit the Layer A `content` / trajectory blob.
-    let rows = statement.query_map(params![org_id], |row| row_to_session(row, false))?;
+    let rows = statement.query_map(params![org_id], row_to_session)?;
     let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     // A backfill uploads every session at once, so upload time says nothing about recency.
     rows.sort_by(|left, right| right.ended_at.cmp(&left.ended_at));
     Ok(rows)
 }
 
-/// One session with its Layer A blob, for the detail page.
+/// One session and the chat the detail page renders.
 pub(crate) fn get(
     connection: &Connection,
     org_id: &str,
     session_id: &str,
-) -> rusqlite::Result<Option<SessionRecord>> {
-    use rusqlite::OptionalExtension;
+) -> rusqlite::Result<Option<StoredSession>> {
     connection
         .query_row(
-            &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
+            &format!(
+                "SELECT {SELECT_COLS}, view FROM sessions WHERE org_id = ?1 AND session_id = ?2"
+            ),
             params![org_id, session_id],
-            |row| row_to_session(row, true),
+            |row| {
+                let view = row
+                    .get::<_, String>("view")
+                    .ok()
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
+                Ok(StoredSession {
+                    session: row_to_session(row)?,
+                    view,
+                })
+            },
         )
         .optional()
 }
@@ -651,19 +772,12 @@ mod tests {
 
         assert_eq!(second.session_id, "session-1");
         assert_eq!(second.thread_id.as_deref(), Some("session-1"));
-        assert_eq!(second.content.as_deref(), Some("hello\nfull transcript"));
+        assert_eq!(second.preview, "hello full transcript");
+        assert!(!has_column(&connection, "sessions", "content"));
         assert_eq!(second.hook_event.as_deref(), Some("Stop"));
         assert_eq!(second.harness.as_deref(), Some("claude_code"));
         assert_eq!(second.user_id.as_deref(), Some("user-1"));
         assert_eq!(second.created_at, first.created_at);
-        assert_eq!(
-            second.bytes,
-            second
-                .content
-                .as_ref()
-                .map(|value| value.len())
-                .unwrap_or(0)
-        );
     }
 
     fn count_sessions(connection: &Connection, org_id: &str) -> i64 {
@@ -713,7 +827,7 @@ mod tests {
         assert_eq!(count_sessions(&connection, "default"), 1);
         assert_eq!(second.created_at, first.created_at);
         assert!(second.updated_at > first.updated_at);
-        assert_eq!(second.content.as_deref(), Some(mid.as_str()));
+        assert!(second.bytes < mid.len());
         assert_eq!(second.assistant_turns, 1);
         assert_eq!(second.tool_call_count, 0);
         assert_eq!(list(&connection, "default").unwrap().len(), 1);
@@ -726,7 +840,7 @@ mod tests {
         assert_eq!(count_sessions(&connection, "default"), 1);
         assert_eq!(third.session_id, "sess-live");
         assert_eq!(third.created_at, first.created_at);
-        assert_eq!(third.content.as_deref(), Some(later.as_str()));
+        assert!(third.bytes < later.len());
         assert_eq!(third.prompt.as_deref(), Some("fix the login"));
         assert_eq!(third.user_turns, 1);
         assert_eq!(third.assistant_turns, 1);
@@ -736,11 +850,12 @@ mod tests {
         let listed = list(&connection, "default").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "sess-live");
-        assert!(listed[0].content.is_none());
-        assert_eq!(listed[0].bytes, later.len());
+        assert!(listed[0].bytes < later.len());
         assert_eq!(listed[0].tool_call_count, 1);
         let stored = get(&connection, "default", "sess-live").unwrap().unwrap();
-        assert_eq!(stored.content.as_deref(), Some(later.as_str()));
+        assert_eq!(stored.view.messages.len(), 2);
+        assert_eq!(stored.view.messages[0].text, "fix the login");
+        assert_eq!(stored.view.tool_calls.len(), 1);
 
         upsert(
             &connection,
@@ -761,9 +876,10 @@ mod tests {
             get(&connection, "default", "sess-live")
                 .unwrap()
                 .unwrap()
-                .content
-                .as_deref(),
-            Some(later.as_str())
+                .view
+                .messages[0]
+                .text,
+            "fix the login"
         );
     }
 
@@ -792,10 +908,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stored.session_id, "t1");
-        assert_eq!(stored.content.as_deref(), Some(r#"{"source":"cursor"}"#));
-        assert_eq!(stored.transcript_text.as_deref(), Some("user: hi"));
+        assert_eq!(stored.preview, "user: hi");
+        assert_eq!(stored.prompt.as_deref(), Some("hi"));
         assert_eq!(stored.model.as_deref(), Some("claude"));
-        assert!(stored.conversation.is_some());
+        assert!(!has_column(&connection, "sessions", "content"));
+        assert!(!has_column(&connection, "sessions", "transcript_text"));
     }
 
     #[test]
@@ -819,7 +936,7 @@ mod tests {
             &IncomingSession {
                 thread_id: None,
                 session_id: Some("s1".to_string()),
-                content: "huge trajectory blob".to_string(),
+                content: "x".repeat(10_000),
                 trajectory: None,
                 hook_event: None,
                 timestamp: None,
@@ -833,19 +950,16 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(stored.content.as_deref(), Some("huge trajectory blob"));
+        assert!(stored.bytes < 10_000);
+        assert_eq!(stored.preview, "user: hi assistant: hello");
 
         let listed = list(&connection, "default").unwrap();
         assert_eq!(listed.len(), 1);
-        assert!(listed[0].content.is_none(), "list must omit Layer A");
-        assert_eq!(listed[0].bytes, "huge trajectory blob".len());
-        assert_eq!(
-            listed[0].transcript_text.as_deref(),
-            Some("user: hi\nassistant: hello")
-        );
+        assert!(listed[0].bytes < 10_000);
         assert!(listed[0].preview.starts_with("user: hi"));
         let json = serde_json::to_value(&listed[0]).unwrap();
         assert!(json.get("content").is_none());
+        assert!(json.get("transcript_text").is_none());
     }
 
     #[test]
@@ -855,7 +969,7 @@ mod tests {
         upsert(&connection, "org-b", "u", &incoming("shared", "from b")).unwrap();
         assert_eq!(list(&connection, "org-a").unwrap()[0].preview, "from a");
         assert_eq!(list(&connection, "org-b").unwrap()[0].preview, "from b");
-        assert!(list(&connection, "org-a").unwrap()[0].content.is_none());
+        assert!(!has_column(&connection, "sessions", "content"));
     }
 
     #[test]
@@ -898,7 +1012,9 @@ mod tests {
         assert_eq!(stored.ended_at, "2026-10-07T18:50:00.000Z");
 
         let fetched = get(&connection, "default", "claude").unwrap().unwrap();
-        assert_eq!(fetched.content.as_deref(), Some(CLAUDE));
+        assert!(!fetched.view.messages.is_empty());
+        assert!(fetched.session.bytes < CLAUDE.len());
+        assert!(!has_column(&connection, "sessions", "content"));
         assert!(get(&connection, "default", "missing").unwrap().is_none());
     }
 
@@ -1027,6 +1143,50 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].session_id, "kept");
         assert_eq!(listed[0].prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn upgrade_from_v6_keeps_the_chat_and_drops_the_transcript() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    org_id TEXT NOT NULL, session_id TEXT NOT NULL, hook_event TEXT,
+                    content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    user_id TEXT, harness TEXT, harness_version TEXT, model TEXT,
+                    model_version TEXT, conversation TEXT, transcript_text TEXT,
+                    compaction_summary TEXT, client_timestamp TEXT,
+                    prompt TEXT, started_at TEXT, ended_at TEXT,
+                    user_turns INTEGER NOT NULL DEFAULT 0,
+                    assistant_turns INTEGER NOT NULL DEFAULT 0,
+                    tool_calls INTEGER NOT NULL DEFAULT 0,
+                    tool_counts TEXT, has_writes INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (org_id, session_id)
+                );
+                PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (
+                    org_id, session_id, content, created_at, updated_at, prompt
+                 ) VALUES (
+                    'default', 'kept', ?1, '2026-10-08T00:00:00.000Z', '2026-10-08T00:00:00.000Z',
+                    'install the vercel cli'
+                 )",
+                params![CLAUDE],
+            )
+            .unwrap();
+        migrate(&mut connection).unwrap();
+        assert!(!has_column(&connection, "sessions", "content"));
+        assert!(!has_column(&connection, "sessions", "transcript_text"));
+        let stored = get(&connection, "default", "kept").unwrap().unwrap();
+        assert!(!stored.view.messages.is_empty());
+        assert!(stored.session.bytes < CLAUDE.len());
+        assert_eq!(
+            stored.session.prompt.as_deref(),
+            Some("install the vercel cli")
+        );
     }
 
     #[test]

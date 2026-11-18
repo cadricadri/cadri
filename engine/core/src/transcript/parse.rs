@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, TimeZone, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     User,
@@ -12,15 +12,15 @@ pub enum Role {
 }
 
 /// A turn the person at the keyboard saw: their prompt or the agent's reply.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     /// For the assistant, the text after the turn's last tool call: the reply itself.
     pub text: String,
     /// Assistant text written before a tool call in the same turn (progress narration).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
 }
 
@@ -33,19 +33,19 @@ impl Message {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
 }
 
 /// A design the person and the agent wrote down before building. Tool calls stay
 /// hidden in the chat; this is the document those calls were carrying.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overview: Option<String>,
     pub body: String,
     /// Tool that produced it (`CreatePlan`, `Write`, `ExitPlanMode`, `apply_patch`).

@@ -733,19 +733,16 @@ async fn get_session(
             )
         })?
     };
-    let mut session =
-        found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "session not found"))?;
-    let content = session.content.take().unwrap_or_default();
-    let parsed = transcript::parse(&content, session.conversation.as_ref());
+    let stored = found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "session not found"))?;
     let memory_commits = commits_by_session(&state, &identity)
         .await
         .remove(&session_id)
         .unwrap_or_default();
     Ok(Json(SessionDetail {
-        session,
-        messages: parsed.messages,
-        tool_calls: parsed.tool_calls,
-        plans: parsed.plans,
+        session: stored.session,
+        messages: stored.view.messages,
+        tool_calls: stored.view.tool_calls,
+        plans: stored.view.plans,
         memory_commits,
     }))
 }

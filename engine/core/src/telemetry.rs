@@ -183,7 +183,7 @@ fn metrics() -> &'static Metrics {
         .expect("sessions");
         let session_bytes = bare_histogram(
             "cadri_session_upload_bytes",
-            "Bytes of a newly inserted session body.",
+            "Bytes stored for a newly inserted session after keeping the chat, plans, and tool names.",
             BYTE_BUCKETS,
         );
         let memory_commits = IntCounterVec::new(
