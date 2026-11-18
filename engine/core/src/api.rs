@@ -52,6 +52,7 @@ pub fn assemble(
     memories: MemoryService,
 ) -> Router {
     let db = Arc::new(Mutex::new(db));
+    crate::telemetry::bind_db(Arc::clone(&db));
     auth.bind_db(Arc::clone(&db));
     let state = AppState { db, auth, memories };
     let protected = Router::new()

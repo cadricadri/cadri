@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use super::error::Fail;
 use super::ids::is_hex;
@@ -122,10 +123,12 @@ pub(super) fn git_out(
     for (key, value) in env {
         command.env(key, value);
     }
+    let started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|err| Fail::git(format!("failed to run git (is git installed?): {err}")))?;
-    if let Some(bytes) = stdin {
+    let _git_child = crate::telemetry::GitChild::enter();
+    let output = if let Some(bytes) = stdin {
         let mut pipe = child.stdin.take().expect("stdin");
         let payload = bytes.to_vec();
         let writer = std::thread::spawn(move || pipe.write_all(&payload));
@@ -133,15 +136,13 @@ pub(super) fn git_out(
             .wait_with_output()
             .map_err(|err| Fail::git(err.to_string()))?;
         let _ = writer.join();
-        return Ok(GitOutput {
-            ok: output.status.success(),
-            stdout: output.stdout,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|err| Fail::git(err.to_string()))?;
+        output
+    } else {
+        child
+            .wait_with_output()
+            .map_err(|err| Fail::git(err.to_string()))?
+    };
+    crate::telemetry::observe_git(args, started.elapsed().as_secs_f64());
     Ok(GitOutput {
         ok: output.status.success(),
         stdout: output.stdout,

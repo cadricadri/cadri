@@ -278,7 +278,8 @@ impl S3Books {
         let key = key.to_string();
         let body = body.to_vec();
         let client = client.clone();
-        self.drive(async move {
+        let started = std::time::Instant::now();
+        let outcome = self.drive(async move {
             // S3 answers a taken key with 412. A 409 means another conditional
             // write was in flight; the upload is retried, and a later 412 means
             // the other write won.
@@ -303,7 +304,9 @@ impl S3Books {
             Err(S3Fail::Message(
                 "s3 put failed: 409 ConditionalRequestConflict".into(),
             ))
-        })?
+        });
+        crate::telemetry::observe_s3_put(started.elapsed().as_secs_f64());
+        outcome?
     }
 
     fn drive<T: Send + 'static>(

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router";
 import { sessionUserLabel } from "../../funNames";
+import { reportContentReady } from "../../telemetry";
 import { UserName } from "./UserName";
 import { Page } from "../../page";
 import { useSession } from "../../session";
@@ -33,6 +34,12 @@ export default function SessionList() {
   const [commits, setCommits] = useState<Array<{ at: string; book: MemoryBook }>>([]);
   const [commitsReady, setCommitsReady] = useState(false);
   const request = useRef(0);
+  useEffect(() => {
+    if (phase === "done") {
+      reportContentReady("/sessions");
+    }
+  }, [phase]);
+
   const seeding = rows.length === 0 && phase === "done" && status.startsWith("Seeding");
   const filters = readFilters(params);
   const [now, setNow] = useState(() => Date.now());

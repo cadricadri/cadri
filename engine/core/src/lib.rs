@@ -9,6 +9,10 @@ mod api;
 mod error;
 mod telemetry;
 
+pub use telemetry::{
+    observe_billing_transition, observe_signup, reset_org_statuses, set_org_status, set_scrape_hook,
+};
+
 pub use api::{assemble, router, serve};
 pub use auth::{AuthFuture, Authenticated, Authenticator, Identity};
 pub use error::ApiError;

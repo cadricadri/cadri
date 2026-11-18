@@ -420,6 +420,28 @@ impl MemoryService {
             let tip = next.tip.clone().unwrap_or_default();
             match self.publish(&repo, repo_id, book, state, start.tip.as_deref(), &tip) {
                 Ok(()) => {
+                    for (request, result) in requests.iter().zip(&made) {
+                        if matches!(result, Ok(Some(_))) {
+                            let origin = if request
+                                .agent
+                                .as_deref()
+                                .is_some_and(|agent| agent.contains("cadri-memory-seed"))
+                            {
+                                "seed"
+                            } else {
+                                "steady"
+                            };
+                            let bytes = request
+                                .changes
+                                .iter()
+                                .map(|change| match change {
+                                    Change::Write { content, .. } => content.len() as u64,
+                                    _ => 0,
+                                })
+                                .sum();
+                            crate::telemetry::observe_commit(origin, bytes);
+                        }
+                    }
                     self.install(
                         repo_id,
                         book,
@@ -865,16 +887,22 @@ impl MemoryService {
                 return Ok(ready(report(Err("non-fast-forward"))));
             }
         }
-        if let Err(err) = inspect(repo, snapshot, old, &command.new, user_id) {
-            if let Fail::Api(err) = &err {
-                if err.status == StatusCode::BAD_REQUEST {
-                    return Ok(ready(report(Err(err.message.as_str()))));
+        let stats = match inspect(repo, snapshot, old, &command.new, user_id) {
+            Ok(stats) => stats,
+            Err(err) => {
+                if let Fail::Api(err) = &err {
+                    if err.status == StatusCode::BAD_REQUEST {
+                        return Ok(ready(report(Err(err.message.as_str()))));
+                    }
                 }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
         match self.publish(repo, repo_id, book, state, old, &command.new) {
             Ok(()) => {
+                for stat in &stats {
+                    crate::telemetry::observe_commit(stat.origin, stat.bytes);
+                }
                 self.install_published(repo, repo_id, book, state, snapshot, &command.new)?;
                 Ok(ready(report(Ok(()))))
             }

@@ -62,7 +62,11 @@ struct Event {
 enum EventWrite {
     Duplicate,
     Ignored,
-    Applied { org_id: String, status: String },
+    Applied {
+        org_id: String,
+        from: String,
+        status: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -361,7 +365,12 @@ impl WorkOs {
         match self.apply_subscription_event(event, customer_id, subscription)? {
             EventWrite::Duplicate => Ok(()),
             EventWrite::Ignored => Ok(()),
-            EventWrite::Applied { org_id, status } => {
+            EventWrite::Applied {
+                org_id,
+                from,
+                status,
+            } => {
+                cadri_core::observe_billing_transition(&from, &status);
                 if status == "active" {
                     let seats = self
                         .active_member_count(&org_id)
@@ -441,7 +450,12 @@ impl WorkOs {
                 account.trial_end,
             ],
         ) {
-            Ok(_) => Ok(()),
+            Ok(changed) => {
+                if changed == 1 {
+                    cadri_core::observe_billing_transition("none", &account.status);
+                }
+                Ok(())
+            }
             Err(err)
                 if err.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) =>
             {
@@ -453,6 +467,13 @@ impl WorkOs {
 
     fn save_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
         self.with_db(|connection| {
+            let previous: Option<String> = connection
+                .query_row(
+                    "SELECT status FROM billing WHERE org_id = ?1",
+                    [org_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
             connection.execute(
                 "UPDATE billing
                  SET stripe_subscription_id = ?1, status = ?2, trial_end = ?3
@@ -464,6 +485,11 @@ impl WorkOs {
                     org_id,
                 ],
             )?;
+            if let Some(previous) = previous {
+                if previous != account.status {
+                    cadri_core::observe_billing_transition(&previous, &account.status);
+                }
+            }
             Ok(())
         })
     }
@@ -490,14 +516,14 @@ impl WorkOs {
             if seen {
                 return Ok(EventWrite::Duplicate);
             }
-            let org_id: Option<String> = transaction
+            let existing: Option<(String, String)> = transaction
                 .query_row(
-                    "SELECT org_id FROM billing WHERE stripe_customer_id = ?1",
+                    "SELECT org_id, status FROM billing WHERE stripe_customer_id = ?1",
                     [customer_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            let Some(org_id) = org_id else {
+            let Some((org_id, previous)) = existing else {
                 transaction.execute(
                     "INSERT INTO billing_events (event_id, created) VALUES (?1, ?2)",
                     params![event.id, event.created],
@@ -530,6 +556,7 @@ impl WorkOs {
             transaction.commit()?;
             Ok(EventWrite::Applied {
                 org_id,
+                from: previous,
                 status: subscription.status.clone(),
             })
         })
@@ -698,6 +725,40 @@ pub fn sign_webhook(secret: &str, timestamp: i64, payload: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("t={timestamp},v1={hex}")
+}
+
+/// Billing rows by status. A missing table leaves the gauges untouched.
+pub(crate) fn refresh_org_gauges(db: &Arc<Mutex<Connection>>) {
+    let Ok(connection) = db.lock() else {
+        return;
+    };
+    let Ok(mut statement) =
+        connection.prepare("SELECT status, COUNT(*) FROM billing GROUP BY status")
+    else {
+        return;
+    };
+    let Ok(rows) = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }) else {
+        return;
+    };
+    let counts: Vec<(String, i64)> = rows.flatten().collect();
+    drop(statement);
+    drop(connection);
+    cadri_core::reset_org_statuses();
+    let mut other = 0_i64;
+    for (status, count) in counts {
+        match status.as_str() {
+            "trialing" | "active" | "canceled" | "past_due" | "unpaid" | "paused"
+            | "incomplete" | "incomplete_expired" => {
+                cadri_core::set_org_status(&status, count);
+            }
+            _ => other += count,
+        }
+    }
+    if other > 0 {
+        cadri_core::set_org_status("other", other);
+    }
 }
 
 #[cfg(test)]

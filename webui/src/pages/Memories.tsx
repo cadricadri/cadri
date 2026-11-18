@@ -30,6 +30,7 @@ import { applyCreateFile, applyCreateFolder, applyMove, applyRenameFolder, planM
 import { applyUpload, prepareUploads } from "./memories/upload";
 import { EmptyBook, type EmptyPhase } from "./memories/EmptyBook";
 import { hasTopicFile } from "../onboarding";
+import { reportContentReady } from "../telemetry";
 import type { SessionRow } from "./sessions/types";
 
 /** How long after the first uploaded session an empty book still says seeding is in progress.
@@ -72,6 +73,12 @@ export default function Memories() {
   const [fileError, setFileError] = useState<string | null>(null);
   const filePathRef = useRef<string | null>(null);
   filePathRef.current = picked?.path ?? filePath;
+
+  useEffect(() => {
+    if (store) {
+      reportContentReady("/");
+    }
+  }, [store]);
 
   const load = useCallback(async () => {
     const id = ++request.current;

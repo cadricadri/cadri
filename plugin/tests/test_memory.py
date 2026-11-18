@@ -88,6 +88,7 @@ class PushTests(BooksTestCase):
         self.assertIn("Cadri-Author-Kind: robot", stored)
         self.assertIn("Cadri-Author-Label: Cursor agent", stored)
         self.assertIn("Cadri-Session-Id: s1", stored)
+        self.assertIn("Cadri-Origin: seed", stored)
         self.assertNotIn("Update operations/deploys.md", stored)
 
     def test_commits_only_the_callers_files_with_trailers(self):

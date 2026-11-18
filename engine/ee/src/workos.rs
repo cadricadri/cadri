@@ -277,6 +277,7 @@ pub struct WorkOs {
     http: reqwest::Client,
     stripe: Option<StripeConfig>,
     db: OnceLock<std::sync::Arc<Mutex<Connection>>>,
+    signups: OnceLock<std::sync::Arc<Mutex<Connection>>>,
     issuers: [String; 2],
     jwks: tokio::sync::Mutex<Jwks>,
     refreshes: tokio::sync::Mutex<HashMap<String, (Instant, Session)>>,
@@ -303,6 +304,7 @@ impl WorkOs {
             http,
             stripe,
             db: OnceLock::new(),
+            signups: OnceLock::new(),
             issuers,
             jwks: Default::default(),
             refreshes: Default::default(),
@@ -1051,13 +1053,50 @@ impl WorkOs {
     }
 }
 
+impl WorkOs {
+    fn prepare_signups(&self, db: &std::sync::Arc<Mutex<Connection>>) {
+        let connection = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(err) = connection
+            .execute_batch("CREATE TABLE IF NOT EXISTS seen_users (user_id TEXT PRIMARY KEY);")
+        {
+            eprintln!("signup table setup failed: {err}");
+            return;
+        }
+        drop(connection);
+        let _ = self.signups.set(std::sync::Arc::clone(db));
+    }
+
+    /// Counts a user once. Later logins insert nothing and do not increment the counter.
+    pub(crate) fn note_signup(&self, user_id: &str) {
+        let Some(user_id) = workos_object_id(user_id) else {
+            return;
+        };
+        let Some(db) = self.signups.get() else {
+            return;
+        };
+        let Ok(connection) = db.lock() else {
+            return;
+        };
+        let inserted = connection.execute(
+            "INSERT OR IGNORE INTO seen_users (user_id) VALUES (?1)",
+            [user_id],
+        );
+        if matches!(inserted, Ok(1)) {
+            cadri_core::observe_signup();
+        }
+    }
+}
+
 impl Authenticator for WorkOs {
     fn mode(&self) -> &'static str {
         "workos"
     }
 
     fn bind_db(&self, db: std::sync::Arc<Mutex<Connection>>) {
+        self.prepare_signups(&db);
         self.prepare_billing(&db);
+        let gauges = std::sync::Arc::clone(&db);
+        cadri_core::set_scrape_hook(move || billing::refresh_org_gauges(&gauges));
     }
 
     fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> AuthFuture<'a> {

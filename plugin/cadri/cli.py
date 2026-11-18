@@ -25,6 +25,7 @@ from .memory import context, digests, editapi, push, repair, sync
 from . import mcp as mcp_server
 from .state import Session
 from .memory.layout import has_lessons
+from . import telemetry
 from .upload import post_session
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -624,15 +625,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def command_label(args: argparse.Namespace) -> str | None:
+    command = args.command
+    if command == "mcp":
+        return None
+    if command == "memory":
+        return f"memory_{args.memory_command}"
+    if command == "hook":
+        target = args.target if args.target in EVENTS else "other"
+        return f"hook_{target}"
+    return str(command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
+    started = time.perf_counter()
     try:
         return int(args.func(args))
     except (CliError, auth.AuthFailure) as exc:
         err(f"cadri: {exc}")
         return 1
+    finally:
+        label = command_label(args)
+        if label:
+            telemetry.report(label, time.perf_counter() - started)
 
 
 if __name__ == "__main__":

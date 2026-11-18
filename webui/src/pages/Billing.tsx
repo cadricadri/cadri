@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
 import { Page } from "../page";
+import { reportContentReady } from "../telemetry";
 import { useSession } from "../session";
 
 type BillingAccount = {
@@ -85,6 +86,12 @@ export default function Billing() {
       cancelled = true;
     };
   }, [params, session]);
+
+  useEffect(() => {
+    if (account || note !== "Loading…") {
+      reportContentReady("/billing");
+    }
+  }, [account, note]);
 
   async function openPortal(): Promise<void> {
     setBusy(true);

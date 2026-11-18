@@ -82,6 +82,8 @@ def trailers(author: Author, session: str | None) -> str:
     lines = [f"Cadri-Author-Kind: {author.kind}", f"Cadri-Author-Id: {author.id}", f"Cadri-Author-Label: {author.label}"]
     if session:
         lines.append(f"Cadri-Session-Id: {session}")
+    if author.id.endswith("cadri-memory-seed"):
+        lines.append("Cadri-Origin: seed")
     return "\n".join(lines)
 
 

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 from . import auth
+from . import telemetry
 from .memory import books as bk
 from .memory import context, recall
 from .state import Session
@@ -53,11 +55,15 @@ def handle(message: dict) -> dict | None:
         if params.get("name") != TOOL:
             return _error(identity, f"unknown tool {params.get('name')}")
         arguments = params.get("arguments") or {}
-        text = search_text(
-            _str(arguments.get("session")),
-            _str(arguments.get("harness")),
-            _str(arguments.get("prompt")),
-        )
+        started = time.perf_counter()
+        try:
+            text = search_text(
+                _str(arguments.get("session")),
+                _str(arguments.get("harness")),
+                _str(arguments.get("prompt")),
+            )
+        finally:
+            telemetry.report("mcp_cadri_search", time.perf_counter() - started)
         return _result(identity, {"content": [{"type": "text", "text": text}], "isError": False})
     if identity is None:
         return None

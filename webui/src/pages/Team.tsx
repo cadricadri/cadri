@@ -10,6 +10,7 @@ import {
   type TeamStatus,
 } from "../ee/workos";
 import { Page } from "../page";
+import { reportContentReady } from "../telemetry";
 import { useSession } from "../session";
 
 type Person = TeamPerson;
@@ -116,6 +117,12 @@ export default function Team() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  useEffect(() => {
+    if (loaded) {
+      reportContentReady("/team");
+    }
+  }, [loaded]);
 
   useEffect(() => {
     if (!fresh) {

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -465,6 +465,14 @@ pub(crate) fn upsert(
         .thread_id()
         .expect("caller validates thread_id")
         .to_string();
+    let inserted = connection
+        .query_row(
+            "SELECT 1 FROM sessions WHERE org_id = ?1 AND session_id = ?2",
+            params![org_id, thread_id],
+            |_| Ok(1_i64),
+        )
+        .optional()?
+        .is_none();
     let content = incoming.layer_a_content();
     let timestamp = now();
     let conversation = conversation_json(&incoming.conversation);
@@ -507,7 +515,7 @@ pub(crate) fn upsert(
     let summary = summarize(&content, incoming.conversation.as_ref());
     write_summary(connection, org_id, &thread_id, &summary)?;
 
-    connection.query_row(
+    let session = connection.query_row(
         &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
         params![org_id, thread_id],
         |row| {
@@ -516,7 +524,11 @@ pub(crate) fn upsert(
             session.preview = preview_for(incoming, layer_a);
             Ok(session)
         },
-    )
+    )?;
+    if inserted {
+        crate::telemetry::observe_session(content.len() as u64);
+    }
+    Ok(session)
 }
 
 pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Vec<SessionRecord>> {

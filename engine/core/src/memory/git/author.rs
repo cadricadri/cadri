@@ -48,7 +48,7 @@ pub(super) fn required_author(message: &str) -> Result<Parsed, Fail> {
             label = Some(value.trim().to_string());
             continue;
         }
-        if line.starts_with(SESSION_TRAILER) {
+        if line.starts_with(SESSION_TRAILER) || line.starts_with(ORIGIN_TRAILER) {
             continue;
         }
         break;
@@ -64,9 +64,26 @@ pub(super) fn required_author(message: &str) -> Result<Parsed, Fail> {
 }
 
 pub(super) const SESSION_TRAILER: &str = "Cadri-Session-Id:";
+pub(super) const ORIGIN_TRAILER: &str = "Cadri-Origin:";
+
+/// `seed` when the commit carries `Cadri-Origin: seed`. Every other commit is steady use.
+pub(super) fn commit_origin(message: &str) -> &'static str {
+    let seed = message.lines().any(|line| {
+        line.trim()
+            .strip_prefix(ORIGIN_TRAILER)
+            .is_some_and(|value| value.trim() == "seed")
+    });
+    if seed {
+        "seed"
+    } else {
+        "steady"
+    }
+}
 
 pub(super) fn is_trailer(line: &str) -> bool {
-    line.starts_with("Cadri-Author-") || line.starts_with(SESSION_TRAILER)
+    line.starts_with("Cadri-Author-")
+        || line.starts_with(SESSION_TRAILER)
+        || line.starts_with(ORIGIN_TRAILER)
 }
 
 pub(super) fn display_message(message: &str) -> String {

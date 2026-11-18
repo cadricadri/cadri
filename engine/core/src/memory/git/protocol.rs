@@ -1,8 +1,10 @@
+use std::collections::HashSet;
+
 use axum::http::StatusCode;
 
 use crate::memory::types::memory_path_ok;
 
-use super::author::{required_author, Parsed};
+use super::author::{commit_origin, required_author, Parsed};
 use super::commit::{check_book_text, check_layout};
 use super::error::Fail;
 use super::git_cli_exec::{git_bytes, git_out, git_text, Repo};
@@ -29,19 +31,25 @@ pub(super) fn ready(body: Vec<u8>) -> GitHttp {
     }
 }
 
+pub(super) struct CommitStat {
+    pub(super) origin: &'static str,
+    pub(super) bytes: u64,
+}
+
 pub(super) fn inspect(
     repo: &Repo,
     snapshot: &Snapshot,
     old: Option<&str>,
     new_sha: &str,
     user_id: &str,
-) -> Result<(), Fail> {
+) -> Result<Vec<CommitStat>, Fail> {
     let range = match old {
         Some(old) => format!("{old}..{new_sha}"),
         None => new_sha.to_string(),
     };
     let log = git_text(repo, &["log", "--format=%x02%H%x1e%B", &range], None, &[])?;
     let mut trees = Vec::new();
+    let mut origins = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for record in log.split('\u{2}') {
         let Some((sha, message)) = record.split_once('\u{1e}') else {
@@ -51,6 +59,7 @@ pub(super) fn inspect(
         if !is_hex(sha, 40) {
             continue;
         }
+        origins.push(commit_origin(message));
         match required_author(message.trim())? {
             Parsed::Human { id, .. } if id != user_id => {
                 return Err(Fail::api(
@@ -117,7 +126,21 @@ pub(super) fn inspect(
         check_layout(texts.iter().map(|(path, _)| *path))?;
         check_book_text(texts)?;
     }
-    Ok(())
+    let mut introduced = HashSet::new();
+    let mut stats = Vec::with_capacity(trees.len());
+    for (entries, origin) in trees.iter().zip(origins) {
+        let mut bytes = 0_u64;
+        for (blob, _) in entries {
+            if snapshot.blobs.contains_key(blob) || !introduced.insert(blob.clone()) {
+                continue;
+            }
+            if let Some(body) = bodies.get(blob) {
+                bytes += body.len() as u64;
+            }
+        }
+        stats.push(CommitStat { origin, bytes });
+    }
+    Ok(stats)
 }
 
 pub(super) fn index_pack(repo: &Repo, pack: &[u8]) -> Result<(), String> {
