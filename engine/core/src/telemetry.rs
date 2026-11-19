@@ -5,6 +5,8 @@
 //! `POST /api/telemetry/page` is public because `sendBeacon` cannot set an
 //! `Authorization` header. The handler keeps only an allowlisted page label.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -19,11 +21,28 @@ use prometheus::{
     Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
     Registry, TextEncoder, TEXT_FORMAT,
 };
-use rusqlite::Connection;
 use serde::Deserialize;
+
+use crate::Database;
 
 const HTTP_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
+];
+
+/// Postgres round trips are often under a millisecond, then jump when the pool waits.
+const POSTGRES_BUCKETS: &[f64] = &[
+    0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+];
+
+const POSTGRES_OPS: &[&str] = &[
+    "session_upsert",
+    "session_read",
+    "contributors",
+    "check",
+    "migrate",
+    "billing",
+    "signup",
+    "other",
 ];
 
 /// Page-load buckets go well past a minute because the memories screen can sit
@@ -107,11 +126,13 @@ struct Metrics {
     billing_transitions: IntCounterVec,
     orgs: IntGaugeVec,
     orgs_by_contributors: IntGaugeVec,
+    postgres_duration: HistogramVec,
+    postgres_queries: IntCounterVec,
 }
 
-type ScrapeHook = Arc<dyn Fn() + Send + Sync>;
-
-static DB: Mutex<Option<Arc<Mutex<Connection>>>> = Mutex::new(None);
+static DB: Mutex<Option<Database>> = Mutex::new(None);
+type ScrapeFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ScrapeHook = Arc<dyn Fn() -> ScrapeFuture + Send + Sync>;
 static SCRAPE_HOOK: Mutex<Option<ScrapeHook>> = Mutex::new(None);
 
 fn metrics() -> &'static Metrics {
@@ -220,6 +241,20 @@ fn metrics() -> &'static Metrics {
             &["bucket"],
         )
         .expect("contributors");
+        let postgres_duration = histogram(
+            "cadri_postgres_query_duration_seconds",
+            "Postgres statement duration in seconds.",
+            POSTGRES_BUCKETS,
+            &["op"],
+        );
+        let postgres_queries = IntCounterVec::new(
+            Opts::new(
+                "cadri_postgres_queries_total",
+                "Postgres statements. result is ok or error.",
+            ),
+            &["op", "result"],
+        )
+        .expect("postgres queries");
         for metric in [
             Box::new(http_duration.clone()) as Box<dyn prometheus::core::Collector>,
             Box::new(http_requests.clone()),
@@ -239,6 +274,8 @@ fn metrics() -> &'static Metrics {
             Box::new(billing_transitions.clone()),
             Box::new(orgs.clone()),
             Box::new(orgs_by_contributors.clone()),
+            Box::new(postgres_duration.clone()),
+            Box::new(postgres_queries.clone()),
         ] {
             registry.register(metric).expect("register metric");
         }
@@ -262,6 +299,8 @@ fn metrics() -> &'static Metrics {
             billing_transitions,
             orgs,
             orgs_by_contributors,
+            postgres_duration,
+            postgres_queries,
         }
     })
 }
@@ -289,16 +328,20 @@ pub fn routes() -> Router {
 }
 
 /// Latest engine database. Contributor gauges are counted from it at scrape time.
-pub(crate) fn bind_db(db: Arc<Mutex<Connection>>) {
+pub(crate) fn bind_db(db: Database) {
     if let Ok(mut slot) = DB.lock() {
         *slot = Some(db);
     }
 }
 
 /// Replaces the hosted-only scrape hook (billing row counts). Core does not call WorkOS.
-pub fn set_scrape_hook(hook: impl Fn() + Send + Sync + 'static) {
+pub fn set_scrape_hook<F, Fut>(hook: F)
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     if let Ok(mut slot) = SCRAPE_HOOK.lock() {
-        *slot = Some(Arc::new(hook));
+        *slot = Some(Arc::new(move || Box::pin(hook())));
     }
 }
 
@@ -413,6 +456,34 @@ impl Drop for GitChild {
     }
 }
 
+/// Times one Postgres statement. `op` is an allowlisted label; anything else is `other`.
+pub async fn time_postgres<T, E>(
+    op: &'static str,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let started = Instant::now();
+    let result = future.await;
+    let seconds = started.elapsed().as_secs_f64();
+    if seconds.is_finite() && seconds >= 0.0 {
+        let op = if POSTGRES_OPS.contains(&op) {
+            op
+        } else {
+            "other"
+        };
+        let outcome = if result.is_err() { "error" } else { "ok" };
+        let metrics = metrics();
+        metrics
+            .postgres_duration
+            .with_label_values(&[op])
+            .observe(seconds);
+        metrics
+            .postgres_queries
+            .with_label_values(&[op, outcome])
+            .inc();
+    }
+    result
+}
+
 pub(crate) fn observe_s3_put(seconds: f64) {
     if !seconds.is_finite() || seconds < 0.0 {
         return;
@@ -470,9 +541,9 @@ fn billing_status(status: &str) -> &'static str {
 }
 
 async fn scrape() -> impl IntoResponse {
-    refresh_contributors();
+    refresh_contributors().await;
     if let Some(hook) = SCRAPE_HOOK.lock().ok().and_then(|slot| slot.clone()) {
-        hook();
+        hook().await;
     }
     let encoder = TextEncoder::new();
     let mut buffer = Vec::new();
@@ -486,11 +557,11 @@ async fn scrape() -> impl IntoResponse {
     )
 }
 
-fn refresh_contributors() {
+async fn refresh_contributors() {
     let Some(db) = DB.lock().ok().and_then(|slot| slot.clone()) else {
         return;
     };
-    let Ok(connection) = db.lock() else {
+    let Ok(rows) = db.contributor_counts().await else {
         return;
     };
     let metrics = metrics();
@@ -500,18 +571,8 @@ fn refresh_contributors() {
             .with_label_values(&[bucket])
             .set(0);
     }
-    let Ok(mut statement) = connection.prepare(
-        "SELECT COUNT(DISTINCT user_id) FROM sessions
-         WHERE IFNULL(user_id, '') != ''
-         GROUP BY org_id",
-    ) else {
-        return;
-    };
-    let Ok(rows) = statement.query_map([], |row| row.get::<_, i64>(0)) else {
-        return;
-    };
     let mut counts = [0_i64; 4];
-    for count in rows.flatten() {
+    for count in rows {
         let index = match count {
             1 => 0,
             2 | 3 => 1,

@@ -1,8 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::PrivateCookieJar;
+use cadri_core::schema::{self, Dialect};
 use cadri_core::{ApiError, Identity};
 use hmac::{Hmac, Mac};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -12,31 +13,19 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use super::{read_session, session_cookie, WorkOs};
+
+mod billing_pg;
 use crate::stripe::{self, StripeError, Subscription};
 
 const ENTITLEMENT: &str = "cadri";
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS billing (
-    org_id TEXT PRIMARY KEY,
-    stripe_customer_id TEXT NOT NULL,
-    stripe_subscription_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    trial_end INTEGER,
-    last_event_created INTEGER
-);
-CREATE TABLE IF NOT EXISTS billing_events (
-    event_id TEXT PRIMARY KEY,
-    created INTEGER NOT NULL
-);
-";
 
 type HmacSha256 = Hmac<Sha256>;
 
-struct Account {
-    stripe_customer_id: String,
-    stripe_subscription_id: String,
-    status: String,
-    trial_end: Option<i64>,
+pub(crate) struct Account {
+    pub(crate) stripe_customer_id: String,
+    pub(crate) stripe_subscription_id: String,
+    pub(crate) status: String,
+    pub(crate) trial_end: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
@@ -79,27 +68,44 @@ impl WorkOs {
         self.stripe.is_some()
     }
 
-    pub(crate) fn prepare_billing(&self, db: &Arc<Mutex<Connection>>) {
+    pub(crate) fn prepare_billing(&self, db: &cadri_core::Database) {
         if self.stripe.is_none() {
             return;
         }
-        let connection = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(err) = connection.execute_batch(SCHEMA) {
+        let Some(sqlite) = db.sqlite_connection() else {
+            let _ = self.db.set(db.clone());
+            return;
+        };
+        let connection = sqlite
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let script = format!(
+            "{}\n{}",
+            schema::sqlite_script(&schema::BILLING, true),
+            schema::sqlite_script(&schema::BILLING_EVENTS, true),
+        );
+        if let Err(err) = connection.execute_batch(&script) {
             eprintln!("billing table setup failed: {err}");
             return;
         }
         // Databases created before last_event_created existed.
-        if let Err(err) = connection.execute(
-            "ALTER TABLE billing ADD COLUMN last_event_created INTEGER",
-            [],
-        ) {
+        let column = schema::sqlite_column_clause(&schema::BILLING, "last_event_created");
+        if let Err(err) =
+            connection.execute(&format!("ALTER TABLE billing ADD COLUMN {column}"), [])
+        {
             if !err.to_string().contains("duplicate column") {
                 eprintln!("billing table setup failed: {err}");
                 return;
             }
         }
+        if let Err(err) = schema::check_sqlite(&connection, &schema::BILLING)
+            .and_then(|_| schema::check_sqlite(&connection, &schema::BILLING_EVENTS))
+        {
+            eprintln!("billing table setup failed: {err}");
+            return;
+        }
         drop(connection);
-        let _ = self.db.set(Arc::clone(db));
+        let _ = self.db.set(db.clone());
     }
 
     /// Creates the Stripe customer and the 30-day trial once per organization.
@@ -107,7 +113,7 @@ impl WorkOs {
         let Some(config) = &self.stripe else {
             return Ok(());
         };
-        if self.account(org_id)?.is_some() {
+        if self.account(org_id).await?.is_some() {
             return Ok(());
         }
         let (name, email) = tokio::join!(
@@ -135,6 +141,7 @@ impl WorkOs {
                 trial_end: subscription.trial_end,
             },
         )
+        .await
     }
 
     pub(crate) async fn access_allowed(
@@ -153,7 +160,7 @@ impl WorkOs {
         {
             return Ok(true);
         }
-        if let Some(account) = self.account(&identity.org_id)? {
+        if let Some(account) = self.account(&identity.org_id).await? {
             if blocks_access(&account.status) {
                 return Ok(false);
             }
@@ -166,7 +173,7 @@ impl WorkOs {
         }
         self.ensure_account(&identity.org_id, &identity.user_id)
             .await?;
-        let Some(account) = self.account(&identity.org_id)? else {
+        let Some(account) = self.account(&identity.org_id).await? else {
             return Ok(false);
         };
         Ok(trial_open(&account))
@@ -183,7 +190,8 @@ impl WorkOs {
         self.ensure_account(&identity.org_id, &identity.user_id)
             .await?;
         let mut account = self
-            .account(&identity.org_id)?
+            .account(&identity.org_id)
+            .await?
             .ok_or_else(billing_disabled)?;
         let mut subscription =
             stripe::get_subscription(&self.http, config, &account.stripe_subscription_id)
@@ -231,7 +239,7 @@ impl WorkOs {
         }
         account.status = subscription.status;
         account.trial_end = subscription.trial_end;
-        self.save_account(&identity.org_id, &account)?;
+        self.save_account(&identity.org_id, &account).await?;
         let seat_count = match self.active_member_count(&identity.org_id).await {
             Ok(count) => Some(count),
             Err(err) => {
@@ -256,7 +264,8 @@ impl WorkOs {
         self.ensure_account(&identity.org_id, &identity.user_id)
             .await?;
         let account = self
-            .account(&identity.org_id)?
+            .account(&identity.org_id)
+            .await?
             .ok_or_else(billing_disabled)?;
         let return_url = format!("{}/billing?portal_return=1", self.config.public_url);
         stripe::portal_url(&self.http, config, &account.stripe_customer_id, &return_url)
@@ -270,7 +279,7 @@ impl WorkOs {
         identity: &Identity,
     ) -> Result<Vec<stripe::BillingInvoice>, ApiError> {
         let config = self.stripe.as_ref().ok_or_else(billing_disabled)?;
-        let Some(account) = self.account(&identity.org_id)? else {
+        let Some(account) = self.account(&identity.org_id).await? else {
             return Ok(Vec::new());
         };
         stripe::list_invoices(&self.http, config, &account.stripe_customer_id)
@@ -331,12 +340,12 @@ impl WorkOs {
         config: &crate::stripe::StripeConfig,
         event: &Event,
     ) -> Result<(), ApiError> {
-        if self.event_seen(&event.id)? {
+        if self.event_seen(&event.id).await? {
             return Ok(());
         }
         let customer_id = customer_id(event)?;
         if !retries_exhausted(&event.data.object) {
-            self.mark_event(&event.id, event.created)?;
+            self.mark_event(&event.id, event.created).await?;
             return Ok(());
         }
         let Some(subscription_id) = event
@@ -345,7 +354,7 @@ impl WorkOs {
             .get("subscription")
             .and_then(Value::as_str)
         else {
-            self.mark_event(&event.id, event.created)?;
+            self.mark_event(&event.id, event.created).await?;
             return Ok(());
         };
         let subscription = stripe::cancel_subscription(&self.http, config, subscription_id)
@@ -362,7 +371,10 @@ impl WorkOs {
         customer_id: &str,
         subscription: &Subscription,
     ) -> Result<(), ApiError> {
-        match self.apply_subscription_event(event, customer_id, subscription)? {
+        match self
+            .apply_subscription_event(event, customer_id, subscription)
+            .await?
+        {
             EventWrite::Duplicate => Ok(()),
             EventWrite::Ignored => Ok(()),
             EventWrite::Applied {
@@ -380,7 +392,7 @@ impl WorkOs {
                         .await
                         .map_err(stripe_error)?;
                 }
-                self.mark_event(&event.id, event.created)
+                self.mark_event(&event.id, event.created).await
             }
         }
     }
@@ -413,35 +425,43 @@ impl WorkOs {
         Ok(Some(jar.into_response().into_parts().0.headers))
     }
 
-    fn account(&self, org_id: &str) -> Result<Option<Account>, ApiError> {
+    async fn account(&self, org_id: &str) -> Result<Option<Account>, ApiError> {
+        let Some(db) = self.db.get() else {
+            return Err(billing_disabled());
+        };
+        if let Some(pool) = db.pg_pool() {
+            return billing_pg::account(pool, org_id).await;
+        }
         self.with_db(|connection| {
             connection
-                .query_row(
-                    "SELECT stripe_customer_id, stripe_subscription_id, status, trial_end
-                     FROM billing WHERE org_id = ?1",
-                    [org_id],
-                    |row| {
-                        Ok(Account {
-                            stripe_customer_id: row.get(0)?,
-                            stripe_subscription_id: row.get(1)?,
-                            status: row.get(2)?,
-                            trial_end: row.get(3)?,
-                        })
-                    },
-                )
+                .query_row(schema::BILLING_ACCOUNT, [org_id], |row| {
+                    Ok(Account {
+                        stripe_customer_id: row.get(0)?,
+                        stripe_subscription_id: row.get(1)?,
+                        status: row.get(2)?,
+                        trial_end: row.get(3)?,
+                    })
+                })
                 .optional()
         })
     }
 
-    fn insert_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
+    async fn insert_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
         let Some(db) = self.db.get() else {
             return Err(billing_disabled());
         };
-        let connection = lock_db(db)?;
+        if let Some(pool) = db.pg_pool() {
+            if billing_pg::insert_account(pool, org_id, account).await? == 1 {
+                cadri_core::observe_billing_transition("none", &account.status);
+            }
+            return Ok(());
+        }
+        let Some(sqlite) = db.sqlite_connection() else {
+            return Err(billing_disabled());
+        };
+        let connection = lock_db(&sqlite)?;
         match connection.execute(
-            "INSERT INTO billing
-                (org_id, stripe_customer_id, stripe_subscription_id, status, trial_end)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            &schema::insert_billing_account(Dialect::Sqlite),
             params![
                 org_id,
                 account.stripe_customer_id,
@@ -465,19 +485,26 @@ impl WorkOs {
         }
     }
 
-    fn save_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
+    async fn save_account(&self, org_id: &str, account: &Account) -> Result<(), ApiError> {
+        let Some(db) = self.db.get() else {
+            return Err(billing_disabled());
+        };
+        if let Some(pool) = db.pg_pool() {
+            let previous = billing_pg::previous_status(pool, org_id).await?;
+            billing_pg::save_account(pool, org_id, account).await?;
+            if let Some(previous) = previous {
+                if previous != account.status {
+                    cadri_core::observe_billing_transition(&previous, &account.status);
+                }
+            }
+            return Ok(());
+        }
         self.with_db(|connection| {
             let previous: Option<String> = connection
-                .query_row(
-                    "SELECT status FROM billing WHERE org_id = ?1",
-                    [org_id],
-                    |row| row.get(0),
-                )
+                .query_row(schema::BILLING_STATUS, [org_id], |row| row.get(0))
                 .optional()?;
             connection.execute(
-                "UPDATE billing
-                 SET stripe_subscription_id = ?1, status = ?2, trial_end = ?3
-                 WHERE org_id = ?4",
+                schema::BILLING_SAVE,
                 params![
                     account.stripe_subscription_id,
                     account.status,
@@ -497,35 +524,57 @@ impl WorkOs {
     /// Applies a subscription snapshot only when this event is newer than the last one stored
     /// for the customer. A repeated event id is ignored. The event id is recorded after side
     /// effects, so a failed seat-count report is retried.
-    fn apply_subscription_event(
+    async fn apply_subscription_event(
         &self,
         event: &Event,
         customer_id: &str,
         subscription: &Subscription,
     ) -> Result<EventWrite, ApiError> {
+        let Some(db) = self.db.get() else {
+            return Err(billing_disabled());
+        };
+        if let Some(pool) = db.pg_pool() {
+            return match billing_pg::apply_subscription_event(
+                pool,
+                &event.id,
+                event.created,
+                customer_id,
+                &subscription.status,
+                subscription.trial_end,
+                &subscription.id,
+            )
+            .await?
+            {
+                billing_pg::ApplyResult::Duplicate => Ok(EventWrite::Duplicate),
+                billing_pg::ApplyResult::Ignored => Ok(EventWrite::Ignored),
+                billing_pg::ApplyResult::Applied {
+                    org_id,
+                    from,
+                    status,
+                } => Ok(EventWrite::Applied {
+                    org_id,
+                    from,
+                    status,
+                }),
+            };
+        }
         self.with_db(|connection| {
             let transaction = connection.unchecked_transaction()?;
             let seen = transaction
-                .query_row(
-                    "SELECT 1 FROM billing_events WHERE event_id = ?1",
-                    [&event.id],
-                    |_| Ok(true),
-                )
+                .query_row(schema::BILLING_EVENT_SEEN, [&event.id], |_| Ok(true))
                 .optional()?
                 .is_some();
             if seen {
                 return Ok(EventWrite::Duplicate);
             }
             let existing: Option<(String, String)> = transaction
-                .query_row(
-                    "SELECT org_id, status FROM billing WHERE stripe_customer_id = ?1",
-                    [customer_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
+                .query_row(schema::BILLING_BY_CUSTOMER, [customer_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
                 .optional()?;
             let Some((org_id, previous)) = existing else {
                 transaction.execute(
-                    "INSERT INTO billing_events (event_id, created) VALUES (?1, ?2)",
+                    schema::BILLING_EVENT_INSERT,
                     params![event.id, event.created],
                 )?;
                 transaction.commit()?;
@@ -533,10 +582,7 @@ impl WorkOs {
                 return Ok(EventWrite::Ignored);
             };
             let changed = transaction.execute(
-                "UPDATE billing
-                 SET status = ?1, trial_end = ?2, stripe_subscription_id = ?3, last_event_created = ?4
-                 WHERE stripe_customer_id = ?5
-                   AND (last_event_created IS NULL OR last_event_created <= ?4)",
+                schema::BILLING_APPLY,
                 params![
                     subscription.status,
                     subscription.trial_end,
@@ -547,7 +593,7 @@ impl WorkOs {
             )?;
             if changed == 0 {
                 transaction.execute(
-                    "INSERT INTO billing_events (event_id, created) VALUES (?1, ?2)",
+                    schema::BILLING_EVENT_INSERT,
                     params![event.id, event.created],
                 )?;
                 transaction.commit()?;
@@ -562,27 +608,35 @@ impl WorkOs {
         })
     }
 
-    fn event_seen(&self, event_id: &str) -> Result<bool, ApiError> {
+    async fn event_seen(&self, event_id: &str) -> Result<bool, ApiError> {
+        let Some(db) = self.db.get() else {
+            return Err(billing_disabled());
+        };
+        if let Some(pool) = db.pg_pool() {
+            return billing_pg::event_seen(pool, event_id).await;
+        }
         self.with_db(|connection| {
             connection
-                .query_row(
-                    "SELECT 1 FROM billing_events WHERE event_id = ?1",
-                    [event_id],
-                    |_| Ok(true),
-                )
+                .query_row(schema::BILLING_EVENT_SEEN, [event_id], |_| Ok(true))
                 .optional()
                 .map(|row| row.is_some())
         })
     }
 
-    fn mark_event(&self, event_id: &str, created: i64) -> Result<(), ApiError> {
+    async fn mark_event(&self, event_id: &str, created: i64) -> Result<(), ApiError> {
+        let Some(db) = self.db.get() else {
+            return Err(billing_disabled());
+        };
+        if let Some(pool) = db.pg_pool() {
+            return billing_pg::mark_event(pool, event_id, created).await;
+        }
         self.with_db(|connection| {
             connection.execute(
-                "INSERT OR IGNORE INTO billing_events (event_id, created) VALUES (?1, ?2)",
+                &schema::insert_billing_event_once(Dialect::Sqlite),
                 params![event_id, created],
             )?;
             let cutoff = stripe::unix_now() - 30 * 24 * 60 * 60;
-            connection.execute("DELETE FROM billing_events WHERE created < ?1", [cutoff])?;
+            connection.execute(schema::BILLING_EVENT_DELETE_OLD, [cutoff])?;
             Ok(())
         })
     }
@@ -594,7 +648,10 @@ impl WorkOs {
         let Some(db) = self.db.get() else {
             return Err(billing_disabled());
         };
-        let connection = lock_db(db)?;
+        let Some(sqlite) = db.sqlite_connection() else {
+            return Err(billing_disabled());
+        };
+        let connection = lock_db(&sqlite)?;
         f(&connection).map_err(db_error_raw)
     }
 }
@@ -663,6 +720,14 @@ fn db_error<T>(err: rusqlite::Error) -> Result<T, ApiError> {
 }
 
 fn db_error_raw(err: rusqlite::Error) -> ApiError {
+    db_error_message(err)
+}
+
+pub(crate) async fn record_signup(pool: &sqlx::PgPool, user_id: &str) -> Result<bool, ApiError> {
+    billing_pg::note_signup(pool, user_id).await
+}
+
+pub(crate) fn db_error_message(err: impl std::fmt::Display) -> ApiError {
     eprintln!("billing database error: {err}");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "billing_unavailable")
 }
@@ -728,13 +793,21 @@ pub fn sign_webhook(secret: &str, timestamp: i64, payload: &[u8]) -> String {
 }
 
 /// Billing rows by status. A missing table leaves the gauges untouched.
-pub(crate) fn refresh_org_gauges(db: &Arc<Mutex<Connection>>) {
-    let Ok(connection) = db.lock() else {
+pub(crate) async fn refresh_org_gauges(db: &cadri_core::Database) {
+    if let Some(pool) = db.pg_pool() {
+        let Ok(counts) = billing_pg::status_counts(pool).await else {
+            return;
+        };
+        publish_status_counts(counts);
+        return;
+    }
+    let Some(sqlite) = db.sqlite_connection() else {
         return;
     };
-    let Ok(mut statement) =
-        connection.prepare("SELECT status, COUNT(*) FROM billing GROUP BY status")
-    else {
+    let Ok(connection) = sqlite.lock() else {
+        return;
+    };
+    let Ok(mut statement) = connection.prepare(schema::BILLING_STATUS_COUNTS) else {
         return;
     };
     let Ok(rows) = statement.query_map([], |row| {
@@ -745,6 +818,10 @@ pub(crate) fn refresh_org_gauges(db: &Arc<Mutex<Connection>>) {
     let counts: Vec<(String, i64)> = rows.flatten().collect();
     drop(statement);
     drop(connection);
+    publish_status_counts(counts);
+}
+
+fn publish_status_counts(counts: Vec<(String, i64)>) {
     cadri_core::reset_org_statuses();
     let mut other = 0_i64;
     for (status, count) in counts {

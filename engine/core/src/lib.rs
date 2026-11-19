@@ -6,11 +6,17 @@ pub mod memory;
 pub mod transcript;
 
 mod api;
+mod database;
 mod error;
+mod pg;
+pub mod schema;
 mod telemetry;
 
+pub use database::Database;
+
 pub use telemetry::{
-    observe_billing_transition, observe_signup, reset_org_statuses, set_org_status, set_scrape_hook,
+    observe_billing_transition, observe_signup, reset_org_statuses, set_org_status,
+    set_scrape_hook, time_postgres,
 };
 
 pub use api::{assemble, router, serve};

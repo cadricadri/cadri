@@ -25,6 +25,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde.workspace = true
 sha2 = "0.10.9"
 serde_json.workspace = true
+sqlx.workspace = true
 subtle.workspace = true
 tokio.workspace = true
 

@@ -179,7 +179,7 @@ async fn callback(
         WorkOsError::Unavailable => workos_unavailable(),
     })?;
     if let Ok(claims) = workos.verify(&session.access_token, false).await {
-        workos.note_signup(&claims.sub);
+        workos.note_signup(&claims.sub).await;
     }
     let jar = jar
         .remove(Cookie::build(LOGIN_COOKIE).path(LOGIN_COOKIE_PATH))
@@ -436,7 +436,7 @@ async fn token_response(
             eprintln!("WorkOS returned an access token that failed verification: {err:?}");
             workos_unavailable()
         })?;
-    workos.note_signup(&claims.sub);
+    workos.note_signup(&claims.sub).await;
     Ok(Json(TokenResponse {
         access_token: session.access_token,
         refresh_token: session.refresh_token,

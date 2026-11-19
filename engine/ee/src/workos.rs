@@ -3,15 +3,13 @@ use std::fmt::Display;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::stripe::StripeConfig;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::{Cookie, Key, PrivateCookieJar, SameSite};
 use base64::Engine;
 use cadri_core::auth::bearer_token;
 use cadri_core::{ApiError, AuthFuture, Authenticated, Authenticator, Identity};
-use rusqlite::Connection;
-
-use crate::stripe::StripeConfig;
 
 pub(crate) mod billing;
 pub use billing::sign_webhook;
@@ -276,8 +274,8 @@ pub struct WorkOs {
     config: Config,
     http: reqwest::Client,
     stripe: Option<StripeConfig>,
-    db: OnceLock<std::sync::Arc<Mutex<Connection>>>,
-    signups: OnceLock<std::sync::Arc<Mutex<Connection>>>,
+    db: OnceLock<cadri_core::Database>,
+    signups: OnceLock<cadri_core::Database>,
     issuers: [String; 2],
     jwks: tokio::sync::Mutex<Jwks>,
     refreshes: tokio::sync::Mutex<HashMap<String, (Instant, Session)>>,
@@ -1054,31 +1052,52 @@ impl WorkOs {
 }
 
 impl WorkOs {
-    fn prepare_signups(&self, db: &std::sync::Arc<Mutex<Connection>>) {
-        let connection = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(err) = connection
-            .execute_batch("CREATE TABLE IF NOT EXISTS seen_users (user_id TEXT PRIMARY KEY);")
-        {
-            eprintln!("signup table setup failed: {err}");
-            return;
+    fn prepare_signups(&self, db: &cadri_core::Database) {
+        if let Some(sqlite) = db.sqlite_connection() {
+            let connection = sqlite
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Err(err) = connection.execute_batch(&cadri_core::schema::sqlite_script(
+                &cadri_core::schema::SEEN_USERS,
+                true,
+            )) {
+                eprintln!("signup table setup failed: {err}");
+                return;
+            }
+            if let Err(err) =
+                cadri_core::schema::check_sqlite(&connection, &cadri_core::schema::SEEN_USERS)
+            {
+                eprintln!("signup table setup failed: {err}");
+                return;
+            }
         }
-        drop(connection);
-        let _ = self.signups.set(std::sync::Arc::clone(db));
+        let _ = self.signups.set(db.clone());
     }
 
     /// Counts a user once. Later logins insert nothing and do not increment the counter.
-    pub(crate) fn note_signup(&self, user_id: &str) {
+    pub(crate) async fn note_signup(&self, user_id: &str) {
         let Some(user_id) = workos_object_id(user_id) else {
             return;
         };
         let Some(db) = self.signups.get() else {
             return;
         };
-        let Ok(connection) = db.lock() else {
+        if let Some(pool) = db.pg_pool() {
+            match billing::record_signup(pool, user_id).await {
+                Ok(true) => cadri_core::observe_signup(),
+                Ok(false) => {}
+                Err(err) => eprintln!("signup count failed: {err:?}"),
+            }
+            return;
+        }
+        let Some(sqlite) = db.sqlite_connection() else {
+            return;
+        };
+        let Ok(connection) = sqlite.lock() else {
             return;
         };
         let inserted = connection.execute(
-            "INSERT OR IGNORE INTO seen_users (user_id) VALUES (?1)",
+            &cadri_core::schema::insert_seen_user(cadri_core::schema::Dialect::Sqlite),
             [user_id],
         );
         if matches!(inserted, Ok(1)) {
@@ -1092,11 +1111,18 @@ impl Authenticator for WorkOs {
         "workos"
     }
 
-    fn bind_db(&self, db: std::sync::Arc<Mutex<Connection>>) {
-        self.prepare_signups(&db);
-        self.prepare_billing(&db);
-        let gauges = std::sync::Arc::clone(&db);
-        cadri_core::set_scrape_hook(move || billing::refresh_org_gauges(&gauges));
+    fn bind_db(&self, db: &cadri_core::Database) {
+        self.prepare_signups(db);
+        self.prepare_billing(db);
+        if self.stripe.is_some() {
+            let gauges = db.clone();
+            cadri_core::set_scrape_hook(move || {
+                let gauges = gauges.clone();
+                async move {
+                    billing::refresh_org_gauges(&gauges).await;
+                }
+            });
+        }
     }
 
     fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> AuthFuture<'a> {

@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::schema;
 use crate::transcript;
 
 /// Bump when the on-disk shape changes. Version 1 adds summary columns and renames
@@ -16,50 +17,21 @@ use crate::transcript;
 /// reset to 1 and are dropped.
 pub const SCHEMA_VERSION: i64 = 7;
 
-/// Columns derived from `content` by `transcript::parse`, rewritten on every upload.
-const SUMMARY_COLUMNS: &[(&str, &str)] = &[
-    ("prompt", "TEXT"),
-    ("started_at", "TEXT"),
-    ("ended_at", "TEXT"),
-    ("user_turns", "INTEGER NOT NULL DEFAULT 0"),
-    ("assistant_turns", "INTEGER NOT NULL DEFAULT 0"),
-    ("tool_calls", "INTEGER NOT NULL DEFAULT 0"),
-    ("tool_counts", "TEXT"),
-    ("has_writes", "INTEGER NOT NULL DEFAULT 0"),
+/// Columns derived from `content` by `transcript::parse`, added when upgrading a v1 file.
+const SUMMARY_COLUMNS: &[&str] = &[
+    "prompt",
+    "started_at",
+    "ended_at",
+    "user_turns",
+    "assistant_turns",
+    "tool_calls",
+    "tool_counts",
+    "has_writes",
 ];
-
-const CREATE_SESSIONS: &str = "
-CREATE TABLE sessions (
-    org_id TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    hook_event TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    user_id TEXT,
-    harness TEXT,
-    harness_version TEXT,
-    model TEXT,
-    model_version TEXT,
-    client_timestamp TEXT,
-    prompt TEXT,
-    preview TEXT NOT NULL DEFAULT '',
-    started_at TEXT,
-    ended_at TEXT,
-    user_turns INTEGER NOT NULL DEFAULT 0,
-    assistant_turns INTEGER NOT NULL DEFAULT 0,
-    tool_calls INTEGER NOT NULL DEFAULT 0,
-    tool_counts TEXT,
-    has_writes INTEGER NOT NULL DEFAULT 0,
-    bytes INTEGER NOT NULL DEFAULT 0,
-    view TEXT NOT NULL DEFAULT '{}',
-    PRIMARY KEY (org_id, session_id)
-);
-CREATE INDEX sessions_org_updated ON sessions (org_id, updated_at DESC);
-";
 
 const PREVIEW_CHARS: usize = 240;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct IncomingSession {
     /// Preferred client field; aliases `session_id`.
     #[serde(default)]
@@ -292,7 +264,8 @@ fn drop_cwd_column(connection: &Connection) -> rusqlite::Result<()> {
 pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version == SCHEMA_VERSION {
-        return Ok(());
+        return schema::check_sqlite(connection, &schema::SESSIONS)
+            .map_err(rusqlite::Error::InvalidColumnName);
     }
     let project = {
         let transaction = connection.transaction()?;
@@ -314,7 +287,7 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
                      DROP TABLE IF EXISTS sessions;
                      DROP TABLE IF EXISTS memory_repos;",
                 )?;
-                transaction.execute_batch(CREATE_SESSIONS)?;
+                transaction.execute_batch(&schema::sqlite_script(&schema::SESSIONS, false))?;
                 false
             }
         };
@@ -322,6 +295,11 @@ pub fn migrate(connection: &mut Connection) -> rusqlite::Result<()> {
         if project {
             project_sessions(&transaction)?;
         }
+        for statement in schema::index_statements(&schema::SESSIONS, true) {
+            transaction.execute_batch(&format!("{statement};"))?;
+        }
+        schema::check_sqlite(&transaction, &schema::SESSIONS)
+            .map_err(rusqlite::Error::InvalidColumnName)?;
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         transaction.commit()?;
         project
@@ -338,19 +316,9 @@ fn project_sessions(connection: &Connection) -> rusqlite::Result<()> {
     if !has_column(connection, "sessions", "content") {
         return Ok(());
     }
-    ensure_column(
-        connection,
-        "sessions",
-        "preview",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(
-        connection,
-        "sessions",
-        "bytes",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(connection, "sessions", "view", "TEXT NOT NULL DEFAULT '{}'")?;
+    ensure_column(connection, "sessions", "preview")?;
+    ensure_column(connection, "sessions", "bytes")?;
+    ensure_column(connection, "sessions", "view")?;
     let rows = {
         let mut statement = connection.prepare(
             "SELECT org_id, session_id, content, conversation, transcript_text FROM sessions",
@@ -393,18 +361,12 @@ fn project_sessions(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn ensure_column(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> rusqlite::Result<()> {
+fn ensure_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
     if has_column(connection, table, column) {
         return Ok(());
     }
-    connection.execute_batch(&format!(
-        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
-    ))
+    let definition = schema::sqlite_column_clause(&schema::SESSIONS, column);
+    connection.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {definition}"))
 }
 
 fn drop_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<()> {
@@ -426,8 +388,9 @@ fn has_column(connection: &Connection, table: &str, column: &str) -> bool {
 }
 
 fn upgrade_from_v1(connection: &Connection) -> rusqlite::Result<()> {
-    for (name, kind) in SUMMARY_COLUMNS {
-        connection.execute_batch(&format!("ALTER TABLE transcripts ADD COLUMN {name} {kind}"))?;
+    for name in SUMMARY_COLUMNS {
+        let definition = schema::sqlite_column_clause(&schema::SESSIONS, name);
+        connection.execute_batch(&format!("ALTER TABLE transcripts ADD COLUMN {definition}"))?;
     }
     let rows = {
         let mut statement = connection
@@ -476,8 +439,122 @@ pub(crate) fn check(connection: &Connection) -> rusqlite::Result<()> {
     connection.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
 }
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// Parsed session ready to store. The raw transcript is not part of this.
+pub(crate) struct SessionWrite {
+    pub thread_id: String,
+    pub preview: String,
+    pub view_json: String,
+    pub bytes: i64,
+    pub prompt: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub user_turns: i64,
+    pub assistant_turns: i64,
+    pub tool_calls: i64,
+    pub tool_counts: String,
+    pub has_writes: bool,
+    pub summary_model: Option<String>,
+}
+
+pub(crate) fn session_write(incoming: &IncomingSession) -> SessionWrite {
+    let thread_id = incoming
+        .thread_id()
+        .expect("caller validates thread_id")
+        .to_string();
+    let raw = incoming.layer_a_content();
+    let parsed = transcript::parse(&raw, incoming.conversation.as_ref());
+    let summary = summary_from(&parsed);
+    let shown = preview_text(incoming.transcript_text.as_deref(), &parsed, &raw);
+    let view = SessionView::from_parsed(parsed);
+    let view_json = serde_json::to_string(&view).unwrap_or_else(|_| "{}".into());
+    SessionWrite {
+        thread_id,
+        preview: shown,
+        bytes: view_json.len() as i64,
+        view_json,
+        prompt: summary.prompt,
+        started_at: summary.started_at,
+        ended_at: summary.ended_at,
+        user_turns: summary.user_turns,
+        assistant_turns: summary.assistant_turns,
+        tool_calls: summary.tool_calls,
+        tool_counts: summary.tool_counts,
+        has_writes: summary.has_writes,
+        summary_model: summary.model,
+    }
+}
+
+pub(crate) struct SessionFields {
+    pub session_id: String,
+    pub hook_event: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub user_id: Option<String>,
+    pub harness: Option<String>,
+    pub harness_version: Option<String>,
+    pub model: Option<String>,
+    pub model_version: Option<String>,
+    pub client_timestamp: Option<String>,
+    pub prompt: Option<String>,
+    pub preview: String,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub user_turns: i64,
+    pub assistant_turns: i64,
+    pub tool_calls: i64,
+    pub tool_counts: Option<String>,
+    pub has_writes: bool,
+    pub bytes: i64,
+}
+
+pub(crate) fn record_from_fields(fields: SessionFields) -> SessionRecord {
+    let ended_at = [
+        fields.ended_at,
+        fields.client_timestamp.as_deref().and_then(normalize_time),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or_else(|| fields.updated_at.clone());
+    let started_at = fields
+        .started_at
+        .unwrap_or_else(|| fields.created_at.clone())
+        .min(ended_at.clone());
+    let user_turns = fields.user_turns.max(0) as u64;
+    let assistant_turns = fields.assistant_turns.max(0) as u64;
+    let tool_calls = fields.tool_calls.max(0) as u64;
+    let tool_counts = fields
+        .tool_counts
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+    SessionRecord {
+        thread_id: Some(fields.session_id.clone()),
+        session_id: fields.session_id,
+        hook_event: fields.hook_event,
+        bytes: fields.bytes.max(0) as usize,
+        preview: fields.preview,
+        created_at: fields.created_at,
+        updated_at: fields.updated_at,
+        user_id: fields.user_id,
+        harness: fields.harness,
+        harness_version: fields.harness_version,
+        model: fields.model,
+        model_version: fields.model_version,
+        client_timestamp: fields.client_timestamp,
+        prompt: fields.prompt,
+        started_at,
+        ended_at,
+        user_turns,
+        assistant_turns,
+        tool_call_count: tool_calls,
+        event_count: user_turns + assistant_turns + tool_calls,
+        tool_counts,
+        has_writes: fields.has_writes,
+    }
 }
 
 fn preview(content: &str) -> String {
@@ -507,58 +584,28 @@ fn preview_text(transcript_text: Option<&str>, parsed: &transcript::Parsed, raw:
 }
 
 fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
-    let session_id: String = row.get("session_id")?;
-    let created_at: String = row.get("created_at")?;
-    let updated_at: String = row.get("updated_at")?;
-    let client_timestamp: Option<String> = row.get("client_timestamp")?;
-    let parsed_start: Option<String> = row.get("started_at")?;
-    let parsed_end: Option<String> = row.get("ended_at")?;
-    let ended_at = [
-        parsed_end,
-        client_timestamp.as_deref().and_then(normalize_time),
-    ]
-    .into_iter()
-    .flatten()
-    .max()
-    .unwrap_or_else(|| updated_at.clone());
-    let started_at = parsed_start
-        .unwrap_or_else(|| created_at.clone())
-        .min(ended_at.clone());
-    let user_turns: i64 = row.get("user_turns")?;
-    let assistant_turns: i64 = row.get("assistant_turns")?;
-    let tool_calls: i64 = row.get("tool_calls")?;
-    let user_turns = user_turns.max(0) as u64;
-    let assistant_turns = assistant_turns.max(0) as u64;
-    let tool_calls = tool_calls.max(0) as u64;
-    let bytes: i64 = row.get("bytes")?;
-    let tool_counts = row
-        .get::<_, Option<String>>("tool_counts")?
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default();
-    Ok(SessionRecord {
-        thread_id: Some(session_id.clone()),
-        session_id,
+    Ok(record_from_fields(SessionFields {
+        session_id: row.get("session_id")?,
         hook_event: row.get("hook_event")?,
-        bytes: bytes.max(0) as usize,
-        preview: row.get("preview")?,
-        created_at,
-        updated_at,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
         user_id: row.get("user_id")?,
         harness: row.get("harness")?,
         harness_version: row.get("harness_version")?,
         model: row.get("model")?,
         model_version: row.get("model_version")?,
-        client_timestamp,
+        client_timestamp: row.get("client_timestamp")?,
         prompt: row.get("prompt")?,
-        started_at,
-        ended_at,
-        user_turns,
-        assistant_turns,
-        tool_call_count: tool_calls,
-        event_count: user_turns + assistant_turns + tool_calls,
-        tool_counts,
+        preview: row.get("preview")?,
+        started_at: row.get("started_at")?,
+        ended_at: row.get("ended_at")?,
+        user_turns: row.get("user_turns")?,
+        assistant_turns: row.get("assistant_turns")?,
+        tool_calls: row.get("tool_calls")?,
+        tool_counts: row.get("tool_counts")?,
         has_writes: row.get("has_writes")?,
-    })
+        bytes: row.get("bytes")?,
+    }))
 }
 
 fn normalize_time(text: &str) -> Option<String> {
@@ -568,90 +615,62 @@ fn normalize_time(text: &str) -> Option<String> {
     })
 }
 
-const SELECT_COLS: &str = "session_id, hook_event, created_at, updated_at,
-         user_id, harness, harness_version, model, model_version, client_timestamp,
-         prompt, preview, started_at, ended_at, user_turns, assistant_turns, tool_calls,
-         tool_counts, has_writes, bytes";
-
 pub(crate) fn upsert(
     connection: &Connection,
     org_id: &str,
     user_id: &str,
     incoming: &IncomingSession,
 ) -> rusqlite::Result<SessionRecord> {
-    let thread_id = incoming
-        .thread_id()
-        .expect("caller validates thread_id")
-        .to_string();
+    let write = session_write(incoming);
     let inserted = connection
         .query_row(
             "SELECT 1 FROM sessions WHERE org_id = ?1 AND session_id = ?2",
-            params![org_id, thread_id],
+            params![org_id, &write.thread_id],
             |_| Ok(1_i64),
         )
         .optional()?
         .is_none();
-    let raw = incoming.layer_a_content();
-    let parsed = transcript::parse(&raw, incoming.conversation.as_ref());
-    let summary = summary_from(&parsed);
-    let shown = preview_text(incoming.transcript_text.as_deref(), &parsed, &raw);
-    let view = SessionView::from_parsed(parsed);
-    let view_json = serde_json::to_string(&view).unwrap_or_else(|_| "{}".into());
     let timestamp = now();
-    connection.execute(
-        "INSERT INTO sessions (
-            org_id, session_id, hook_event, created_at, updated_at,
-            user_id, harness, harness_version, model, model_version,
-            client_timestamp, preview, bytes, view
-         ) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-         ON CONFLICT(org_id, session_id) DO UPDATE SET
-           hook_event = COALESCE(excluded.hook_event, sessions.hook_event),
-           updated_at = excluded.updated_at,
-           user_id = COALESCE(excluded.user_id, sessions.user_id),
-           harness = COALESCE(excluded.harness, sessions.harness),
-           harness_version = COALESCE(excluded.harness_version, sessions.harness_version),
-           model = COALESCE(excluded.model, sessions.model),
-           model_version = COALESCE(excluded.model_version, sessions.model_version),
-           client_timestamp = COALESCE(excluded.client_timestamp, sessions.client_timestamp),
-           preview = excluded.preview,
-           bytes = excluded.bytes,
-           view = excluded.view",
-        params![
-            org_id,
-            thread_id,
-            incoming.hook_event,
-            timestamp,
-            user_id,
-            incoming.harness,
-            incoming.harness_version,
-            incoming.model,
-            incoming.model_version,
-            incoming.timestamp,
-            shown,
-            view_json.len() as i64,
-            view_json,
-        ],
-    )?;
-    write_summary(connection, org_id, &thread_id, &summary)?;
+    let sql = schema::session_upsert(schema::Dialect::Sqlite);
+    let values: [&dyn rusqlite::types::ToSql; 22] = [
+        &org_id,
+        &write.thread_id,
+        &incoming.hook_event,
+        &timestamp,
+        &user_id,
+        &incoming.harness,
+        &incoming.harness_version,
+        &incoming.model,
+        &incoming.model_version,
+        &incoming.timestamp,
+        &write.preview,
+        &write.bytes,
+        &write.view_json,
+        &write.prompt,
+        &write.started_at,
+        &write.ended_at,
+        &write.user_turns,
+        &write.summary_model,
+        &write.assistant_turns,
+        &write.tool_calls,
+        &write.tool_counts,
+        &write.has_writes,
+    ];
+    connection.execute(&sql, &values[..])?;
 
     let session = connection.query_row(
-        &format!("SELECT {SELECT_COLS} FROM sessions WHERE org_id = ?1 AND session_id = ?2"),
-        params![org_id, thread_id],
+        &schema::session_by_id(schema::Dialect::Sqlite),
+        params![org_id, write.thread_id],
         row_to_session,
     )?;
     if inserted {
-        crate::telemetry::observe_session(view_json.len() as u64);
+        crate::telemetry::observe_session(write.bytes as u64);
     }
     Ok(session)
 }
 
 pub(crate) fn list(connection: &Connection, org_id: &str) -> rusqlite::Result<Vec<SessionRecord>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {SELECT_COLS}
-         FROM sessions
-         WHERE org_id = ?1
-         ORDER BY updated_at DESC"
-    ))?;
+    let mut statement = connection.prepare(&schema::session_list(schema::Dialect::Sqlite))?;
     let rows = statement.query_map(params![org_id], row_to_session)?;
     let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     // A backfill uploads every session at once, so upload time says nothing about recency.
@@ -667,9 +686,7 @@ pub(crate) fn get(
 ) -> rusqlite::Result<Option<StoredSession>> {
     connection
         .query_row(
-            &format!(
-                "SELECT {SELECT_COLS}, view FROM sessions WHERE org_id = ?1 AND session_id = ?2"
-            ),
+            &schema::session_with_view(schema::Dialect::Sqlite),
             params![org_id, session_id],
             |row| {
                 let view = row

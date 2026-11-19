@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, Query, Request, State};
@@ -25,6 +25,7 @@ use crate::memory::{
 };
 use crate::transcript;
 use crate::ApiError;
+use crate::Database;
 
 static MEMORY_ROOTS: AtomicU64 = AtomicU64::new(0);
 
@@ -32,7 +33,7 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AppState {
-    db: Arc<Mutex<Connection>>,
+    db: Database,
     auth: Arc<dyn Authenticator>,
     memories: MemoryService,
 }
@@ -51,9 +52,17 @@ pub fn assemble(
     extra: Option<Router>,
     memories: MemoryService,
 ) -> Router {
-    let db = Arc::new(Mutex::new(db));
-    crate::telemetry::bind_db(Arc::clone(&db));
-    auth.bind_db(Arc::clone(&db));
+    assemble_db(Database::sqlite(db), auth, extra, memories)
+}
+
+fn assemble_db(
+    db: Database,
+    auth: Arc<dyn Authenticator>,
+    extra: Option<Router>,
+    memories: MemoryService,
+) -> Router {
+    crate::telemetry::bind_db(db.clone());
+    auth.bind_db(&db);
     let state = AppState { db, auth, memories };
     let protected = Router::new()
         .route("/api/me", get(me))
@@ -112,10 +121,24 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
         .ok()
         .filter(|value| !value.is_empty());
 
-    let connection = db::open(&db_path).unwrap_or_else(|err| {
-        eprintln!("failed to open database {}: {err}", db_path.display());
-        std::process::exit(1);
-    });
+    let (database, database_label) = match std::env::var("CADRI_DATABASE_URL") {
+        Ok(url) if !url.trim().is_empty() => {
+            let database = Database::connect_postgres(url.trim())
+                .await
+                .unwrap_or_else(|err| {
+                    eprintln!("failed to open postgres: {err}");
+                    std::process::exit(1);
+                });
+            (database, "postgres".to_string())
+        }
+        _ => {
+            let connection = db::open(&db_path).unwrap_or_else(|err| {
+                eprintln!("failed to open database {}: {err}", db_path.display());
+                std::process::exit(1);
+            });
+            (Database::sqlite(connection), db_path.display().to_string())
+        }
+    };
     let memories_root = match std::env::var("CADRI_MEMORIES") {
         Ok(value) if !value.is_empty() => PathBuf::from(value),
         _ => db_path
@@ -139,11 +162,10 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
         }
         _ => MemoryService::open_local(memories_root, jail_required),
     };
-    let app = assemble(connection, auth.clone(), extra, memories);
+    let app = assemble_db(database, auth.clone(), extra, memories);
     let scheme = if tls_cert.is_some() { "https" } else { "http" };
     eprintln!(
-        "cadri engine listening on {scheme}://{bind} (database {}, auth {})",
-        db_path.display(),
+        "cadri engine listening on {scheme}://{bind} (database {database_label}, auth {})",
         auth.mode()
     );
 
@@ -231,11 +253,8 @@ async fn require_auth(State(state): State<AppState>, mut request: Request, next:
     response
 }
 
-fn lock_db(state: &AppState) -> Result<MutexGuard<'_, Connection>, ApiError> {
-    state
-        .db
-        .lock()
-        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "database lock poisoned"))
+fn database_error(err: String) -> ApiError {
+    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err)
 }
 
 async fn not_found() -> ApiError {
@@ -244,8 +263,7 @@ async fn not_found() -> ApiError {
 
 async fn healthz(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let unavailable = || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "database unavailable");
-    let connection = state.db.lock().map_err(|_| unavailable())?;
-    db::check(&connection).map_err(|err| {
+    state.db.check().await.map_err(|err| {
         eprintln!("health check failed: {err}");
         unavailable()
     })?;
@@ -278,14 +296,11 @@ async fn post_session(
             "session body is required",
         ));
     }
-    let connection = lock_db(&state)?;
-    let stored =
-        db::upsert(&connection, &identity.org_id, &identity.user_id, &incoming).map_err(|err| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to store session: {err}"),
-            )
-        })?;
+    let stored = state
+        .db
+        .upsert(&identity.org_id, &identity.user_id, &incoming)
+        .await
+        .map_err(database_error)?;
     Ok(Json(stored))
 }
 
@@ -700,15 +715,11 @@ async fn list_sessions(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
-    let sessions = {
-        let connection = lock_db(&state)?;
-        db::list(&connection, &identity.org_id).map_err(|err| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to list sessions: {err}"),
-            )
-        })?
-    };
+    let sessions = state
+        .db
+        .list(&identity.org_id)
+        .await
+        .map_err(database_error)?;
     let mut by_session = commits_by_session(&state, &identity).await;
     let rows = sessions
         .into_iter()
@@ -725,15 +736,11 @@ async fn get_session(
     Extension(identity): Extension<Identity>,
     UrlPath(session_id): UrlPath<String>,
 ) -> Result<Json<SessionDetail>, ApiError> {
-    let found = {
-        let connection = lock_db(&state)?;
-        db::get(&connection, &identity.org_id, &session_id).map_err(|err| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read session: {err}"),
-            )
-        })?
-    };
+    let found = state
+        .db
+        .get(&identity.org_id, &session_id)
+        .await
+        .map_err(database_error)?;
     let stored = found.ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "session not found"))?;
     let memory_commits = commits_by_session(&state, &identity)
         .await

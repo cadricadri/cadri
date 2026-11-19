@@ -1,13 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::http::{header, HeaderMap};
-use rusqlite::Connection;
 use serde::Serialize;
 use subtle::ConstantTimeEq;
 
 use crate::ApiError;
+use crate::Database;
 
 pub const DEFAULT_ORG: &str = "default";
 
@@ -45,7 +45,7 @@ pub trait Authenticator: Send + Sync {
     fn authenticate<'a>(&'a self, headers: &'a HeaderMap) -> AuthFuture<'a>;
 
     /// The hosted edition stores subscription state in the engine database. Other editions ignore it.
-    fn bind_db(&self, _db: Arc<Mutex<Connection>>) {}
+    fn bind_db(&self, _db: &Database) {}
 
     /// `authenticate`, then any edition-specific access check for `path`.
     /// The default allows every authenticated caller.
