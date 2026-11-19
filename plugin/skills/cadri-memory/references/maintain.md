@@ -11,7 +11,11 @@ You decide subjectively from the digest (what the user asked, how the agent repl
 - **Decisions and conventions.** Why the system is shaped the way it is, team rules, naming, how to ship. Team book.
 - **Durable discoveries.** Non-obvious facts that cost real effort to find and will matter again: a gotcha in a component, the real cause of a failure pattern, why a feature exists.
 
-Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (refer to them by name, such as `$API_KEY`). Seed and join are the exception in Repository briefing below: that team snapshot may restate the repo, because the book is what later sessions load. An accepted plan or canvas is the exception to "the transcript already holds it": the decisions in it belong in memory, because a future agent should learn the design without reopening the session. Update from a pattern or an explicit instruction, not a single ambiguous event.
+Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (see Secrets). Seed and join are the exception in Repository briefing below: that team snapshot may restate the repo, because the book is what later sessions load. An accepted plan or canvas is the exception to "the transcript already holds it": the decisions in it belong in memory, because a future agent should learn the design without reopening the session. Update from a pattern or an explicit instruction, not a single ambiguous event.
+
+## Secrets
+
+Never store a secret. Cadri keeps decisions and preferences, not passwords, API keys, tokens, private keys, or connection strings. This still holds when the user pasted one, asked you to remember it, or a session, plan, or canvas contains one. Write the name and where it lives (`$API_KEY` in the deploy environment). Leave the value out of the file, the commit message, and your reply. A value that looks like a credential is removed before a session is uploaded and before a memory commit is written. Do not put the value back.
 
 ## Repository briefing
 
@@ -19,7 +23,7 @@ Seed and join write a standalone briefing of one git repository into the team bo
 
 The keeper does not re-copy the repo on later turns. The portrait changes when a session, a person, or a later join shows it is wrong.
 
-Still leave out secrets, verbatim skill steps, and a file-by-file listing. Commands that change how an agent works go in `architecture/conventions.md` as rules. A dump of every script does not. `operations/` and `incidents/` still come from sessions and runbooks. The personal book is not filled from the repo. A `CLAUDE.md` rule is a team convention unless a session shows this person overriding it.
+Still leave out secrets (see Secrets), verbatim skill steps, and a file-by-file listing. Commands that change how an agent works go in `architecture/conventions.md` as rules. A dump of every script does not. `operations/` and `incidents/` still come from sessions and runbooks. The personal book is not filled from the repo. A `CLAUDE.md` rule is a team convention unless a session shows this person overriding it.
 
 A learning that comes only from the repository omits `Sources:`. Name the files in the body (`README.md`, `services/gateway/main.ts`). Put paths in the body. The first `Sources:` token is stored as a session id, and a filename such as `README.md` matches that pattern, so a path there links the wrong session. When a session also justifies the learning, `Sources:` lists those sessions and the body names the files.
 
@@ -160,7 +164,7 @@ cadri memory push --book team \
 - The subject is the learning itself, one line, the rule or fact. `Seed memories from 12 sessions` and `Update operations/deploys.md` name the procedure, not the learning.
 - The body tells the story: what the user said or corrected, what failed or succeeded, or what pattern recurred, and why it generalizes beyond that moment. Write the event date here. The git date is when the commit was pushed.
 - The first `Sources:` line lists session ids as `harness:id`, separated by commas. The Sessions page links the first id. Then one line per source: harness, id, the event date, and what happened. When the user explicitly asked, cite that request. Take ids from the digest, `cadri discover`, or `cadri show`. Add a message id only when the transcript printed one. Do not invent a source. If no session id can be found, leave `Sources:` out and say in the body that the source could not be identified. A placeholder token after `Sources:` would be stored as a session id. A repository path is not a session id. A seed or join learning that comes only from the repo omits `Sources:` and names the files in the body, as in Repository briefing.
-- Never include secrets.
+- Never include a secret. See Secrets.
 - The keeper passes `--agent cadri-memory-keeper` and `--session`. Pass `--digest` only on its last push; that push releases the digest. When nothing was worth keeping, that only push is `-m "Nothing worth keeping"` and creates no commit.
 - Seed and join pass their own `--agent` and omit `--session` unless that one learning came from a single session. `Sources:` lists the sessions that justified that learning, not the whole window. A learning from the repo alone omits `Sources:`.
 

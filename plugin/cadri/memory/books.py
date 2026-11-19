@@ -31,6 +31,7 @@ import urllib.request
 from pathlib import Path
 
 from .. import auth
+from ..secrets import redact
 from ..state import cadri_home, read_json, safe_part, write_json
 
 REQUEST_TIMEOUT = 15
@@ -250,7 +251,7 @@ def git(
 
 
 def scrub(text: str) -> str:
-    return re.sub(r"Bearer\s+\S+", "Bearer ***", text).strip()
+    return redact(text).strip()
 
 
 def local_head(book: Book, cwd: Path | None = None) -> str | None:

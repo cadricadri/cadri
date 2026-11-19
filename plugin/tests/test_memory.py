@@ -222,6 +222,19 @@ class PushTests(BooksTestCase):
         self.assertEqual(self.head(self.team), before)
         self.assertIn("x.md", push.changed_paths(self.team))
 
+    def test_a_secret_is_removed_before_the_memory_commit(self):
+        token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        self.write(self.team, "operations/deploys.md", f"The deploy token is {token}.\n")
+        logs = Logs()
+        status = push.push_book(self.team, caller(), f"Remember the token {token}", log=logs)
+        self.assertEqual(status, 0, logs.text())
+        stored = self.remote_file("team", "operations/deploys.md")
+        self.assertNotIn(token, stored)
+        self.assertIn("[redacted]", stored)
+        self.assertIn("The deploy token is", stored)
+        self.assertNotIn(token, self.remote_log("team"))
+        self.assertNotIn(token, (self.team.path / "operations/deploys.md").read_text(encoding="utf-8"))
+
     def test_oversized_or_deep_files_are_refused_before_committing(self):
         self.write(self.team, "big.md", "x" * (push.MAX_FILE_CHARS + 1))
         self.write(self.team, "a/b/c/deep.md", "deep\n")

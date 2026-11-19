@@ -10,6 +10,7 @@ import os
 import secrets
 import sys
 
+from ..secrets import redact
 from . import sync
 from .books import Book, MemoryFailure, ensure_clone, http_json, local_head, session_id_from_env
 from .layout import TEAM_LAYOUT
@@ -35,9 +36,19 @@ def commit_files(
 ) -> int:
     ensure_clone(book)
     head = local_head(book)
+    cleaned_message = redact(message)
+    changes = []
+    rewritten = []
+    for path, content in files:
+        cleaned = redact(content)
+        if cleaned != content:
+            rewritten.append(path)
+        changes.append({"op": "write", "path": path, "content": cleaned})
+    if cleaned_message != message or rewritten:
+        print("cadri: removed secrets before writing memory", file=sys.stderr)
     body: dict = {
-        "message": message,
-        "changes": [{"op": "write", "path": path, "content": content} for path, content in files],
+        "message": cleaned_message,
+        "changes": changes,
         "agent": agent or default_agent_id(),
     }
     if head:

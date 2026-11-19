@@ -8,6 +8,9 @@ trailers the server requires.
 
 Committing needs no network, so it always happens. Pushing may fail inside an agent
 sandbox; then the commits wait for the Stop hook's detached push.
+
+A credential that slipped into a file or a commit message is removed before the
+commit. The memory instructions say not to write one; this is the backstop.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ import sys
 import time
 from dataclasses import dataclass
 
+from ..secrets import redact
 from ..state import LockTimeout, locked
 from . import edits, repair
 from .books import Book, MemoryFailure, git, local_head, record_sync
@@ -177,6 +181,28 @@ def subject_for(paths: list[str]) -> str:
 
 
 def commit(book: Book, paths: list[str], message: str, author: Author, session: str | None) -> bool:
+    cleaned = redact(message)
+    if cleaned != message:
+        print(f"cadri: removed a secret from the {book.label} book commit message", file=sys.stderr)
+        message = cleaned
+    rewritten = []
+    for path in paths:
+        file = book.path / path
+        if not file.is_file():
+            continue
+        try:
+            original = file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        cleaned = redact(original)
+        if cleaned != original:
+            file.write_text(cleaned, encoding="utf-8")
+            rewritten.append(path)
+    if rewritten:
+        print(
+            f"cadri: removed secrets from {', '.join(rewritten)} before committing them to the {book.label} book",
+            file=sys.stderr,
+        )
     git(book, "add", "-A", "--", *paths)
     staged = git(book, "diff", "--cached", "--name-only", "--", *paths).stdout.split()
     if not staged:

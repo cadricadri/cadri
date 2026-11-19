@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..secrets import redact
 from ..state import read_json, safe_part, state_dir, write_json, write_text
 
 PROMPT_CHARS = 2000
@@ -64,6 +65,17 @@ def claimed_dir() -> Path:
     return root() / "claimed"
 
 
+_DOCUMENT_SKIP = {"path", "source", "slug", "file", "id", "hash"}
+
+
+def _scrub_document(item: dict) -> dict:
+    """Drop credential values from a plan or canvas before it is kept for the keeper."""
+    return {
+        key: redact(value) if isinstance(value, str) and key not in _DOCUMENT_SKIP else value
+        for key, value in item.items()
+    }
+
+
 def signals(text: str | None) -> set[str]:
     """Hints that the *main agent* should edit memory this turn (not the keeper gate)."""
     if not text:
@@ -72,12 +84,12 @@ def signals(text: str | None) -> set[str]:
 
 
 def clip(text: str | None, limit: int) -> str:
-    text = (text or "").strip()
+    text = redact(text or "").strip()
     return text if len(text) <= limit else text[:limit].rstrip() + " …"
 
 
 def clip_reply(text: str | None) -> str:
-    text = (text or "").strip()
+    text = redact(text or "").strip()
     if len(text) <= REPLY_HEAD + REPLY_TAIL:
         return text
     return f"{text[:REPLY_HEAD].rstrip()}\n…\n{text[-REPLY_TAIL:].lstrip()}"
@@ -93,8 +105,8 @@ def save(
     plans: list[dict] | None = None,
     canvases: list[dict] | None = None,
 ) -> Path | None:
-    plans = [plan for plan in (plans or []) if plan.get("body")]
-    canvases = [canvas for canvas in (canvases or []) if canvas.get("body")]
+    plans = [_scrub_document(plan) for plan in (plans or []) if plan.get("body")]
+    canvases = [_scrub_document(canvas) for canvas in (canvases or []) if canvas.get("body")]
     if not (prompt or reply or plans or canvases):
         return None
     now = time.time()
@@ -146,11 +158,15 @@ def add_reaction(session: str, prompt: str) -> dict | None:
             # The person may have edited the plan file before this reply.
             from ..plans import absorb_files
 
-            data["plans"] = absorb_files(data["plans"], data.get("harness"), data.get("session"))
+            data["plans"] = [
+                _scrub_document(plan) for plan in absorb_files(data["plans"], data.get("harness"), data.get("session"))
+            ]
         if data.get("canvases"):
             from ..canvases import absorb_files as absorb_canvases
 
-            data["canvases"] = absorb_canvases(data["canvases"], data.get("harness"), data.get("session"))
+            data["canvases"] = [
+                _scrub_document(canvas) for canvas in absorb_canvases(data["canvases"], data.get("harness"), data.get("session"))
+            ]
         write_json(path, data)
         return data
     return None
@@ -251,21 +267,23 @@ def render(turns: list[dict], books: dict[str, Path] | None = None) -> str:
     for number, data in enumerate(sorted(turns, key=lambda item: item.get("at") or 0), start=1):
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(data.get("at") or 0)))
         parts += ["", f"## Turn {number} — {data.get('harness')} session {data.get('session')} at {when}", ""]
-        parts += ["**User asked:**", "", data.get("prompt") or "(not captured)", ""]
-        parts += ["**Agent replied:**", "", data.get("reply") or "(not captured)", ""]
+        parts += ["**User asked:**", "", redact(data.get("prompt") or "") or "(not captured)", ""]
+        parts += ["**Agent replied:**", "", redact(data.get("reply") or "") or "(not captured)", ""]
         for plan in data.get("plans") or []:
+            plan = _scrub_document(plan)
             parts += ["", f"**Plan: {plan.get('title') or 'Plan'}**", ""]
             if plan.get("overview"):
                 parts += [plan["overview"], ""]
             parts += [plan.get("body") or "", ""]
         for canvas in data.get("canvases") or []:
+            canvas = _scrub_document(canvas)
             parts += ["", f"**Canvas: {canvas.get('title') or 'Canvas'}**", ""]
             parts += [canvas.get("body") or "", ""]
         if data.get("memory_edits"):
             parts += ["**Memory files the agent already edited:** " + ", ".join(data["memory_edits"]), ""]
         if data.get("edit_count"):
             parts += [f"**Files edited during the turn:** {data['edit_count']}", ""]
-        reaction = data.get("reaction")
+        reaction = redact(data.get("reaction") or "")
         parts += ["**User's next message:**", "", reaction if reaction else "(none; the session ended or moved on)"]
     return "\n".join(parts) + "\n"
 
