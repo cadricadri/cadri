@@ -1052,6 +1052,7 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
         json!([{ "name": "Write", "at": "2026-10-07T18:01:00.000Z" }])
     );
     assert_eq!(detail["plans"], json!([]));
+    assert_eq!(detail["canvases"], json!([]));
     assert_eq!(detail["tool_call_count"], 1);
     assert_eq!(detail["memory_commits"].as_array().unwrap().len(), 2);
     assert!(detail.get("content").is_none());

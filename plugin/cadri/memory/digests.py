@@ -91,9 +91,11 @@ def save(
     edit_count: int,
     memory_edits: list[str],
     plans: list[dict] | None = None,
+    canvases: list[dict] | None = None,
 ) -> Path | None:
     plans = [plan for plan in (plans or []) if plan.get("body")]
-    if not (prompt or reply or plans):
+    canvases = [canvas for canvas in (canvases or []) if canvas.get("body")]
+    if not (prompt or reply or plans or canvases):
         return None
     now = time.time()
     path = pending_dir() / f"{time.time_ns()}-{safe_part(harness)}-{safe_part(session)}.json"
@@ -110,6 +112,7 @@ def save(
             "memory_edits": memory_edits,
             "reaction": None,
             **({"plans": plans} if plans else {}),
+            **({"canvases": canvases} if canvases else {}),
         },
     )
     return path
@@ -144,6 +147,10 @@ def add_reaction(session: str, prompt: str) -> dict | None:
             from ..plans import absorb_files
 
             data["plans"] = absorb_files(data["plans"], data.get("harness"), data.get("session"))
+        if data.get("canvases"):
+            from ..canvases import absorb_files as absorb_canvases
+
+            data["canvases"] = absorb_canvases(data["canvases"], data.get("harness"), data.get("session"))
         write_json(path, data)
         return data
     return None
@@ -231,6 +238,13 @@ def render(turns: list[dict], books: dict[str, Path] | None = None) -> str:
             "substance of that turn. The user's next message says whether they accepted",
             "it, revised it, or dropped it. Follow the maintain rules for plans.",
         ]
+    if any(turn.get("canvases") for turn in turns):
+        parts += [
+            "",
+            "A **Canvas** is a note the agent wrote beside the chat. The text below is",
+            "the readable copy, including edits the user made on the canvas itself.",
+            "Follow the maintain rules for canvases.",
+        ]
     if books:
         parts += ["", "Memory books:", ""]
         parts += [f"- {label}: {path}" for label, path in books.items()]
@@ -244,6 +258,9 @@ def render(turns: list[dict], books: dict[str, Path] | None = None) -> str:
             if plan.get("overview"):
                 parts += [plan["overview"], ""]
             parts += [plan.get("body") or "", ""]
+        for canvas in data.get("canvases") or []:
+            parts += ["", f"**Canvas: {canvas.get('title') or 'Canvas'}**", ""]
+            parts += [canvas.get("body") or "", ""]
         if data.get("memory_edits"):
             parts += ["**Memory files the agent already edited:** " + ", ".join(data["memory_edits"]), ""]
         if data.get("edit_count"):

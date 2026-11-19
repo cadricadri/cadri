@@ -54,10 +54,20 @@ export type SessionPlan = {
   after_message?: number;
 };
 
+/** A canvas written beside the chat, stored as the markdown the page can render. */
+export type SessionCanvas = {
+  slug: string;
+  title: string;
+  body: string;
+  source: string;
+  after_message?: number;
+};
+
 export type SessionDetail = SessionRow & {
   messages: ChatMessage[];
   tool_calls: ToolCall[];
   plans?: SessionPlan[];
+  canvases?: SessionCanvas[];
 };
 
 export function commitLink(commit: { id: string; book: string }): string {

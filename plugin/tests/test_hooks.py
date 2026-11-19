@@ -340,6 +340,52 @@ class CursorTests(HookTestCase):
         [(_, again)] = digests.pending()
         self.assertNotIn("plans", again)
 
+    def test_a_canvas_file_is_what_gets_uploaded_and_remembered(self):
+        home = self.tmp / "cursor-home"
+        folder = home / ".cursor" / "projects" / "app" / "canvases"
+        folder.mkdir(parents=True)
+        folder.joinpath("hosted-postgres.canvas.tsx").write_text(
+            "<H1>Hosted Postgres</H1><Text>Keep the page in the database.</Text>",
+            encoding="utf-8",
+        )
+        path = self.tmp / "k1.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "Write",
+                                "input": {
+                                    "path": "/Users/me/.cursor/projects/app/canvases/hosted-postgres.canvas.tsx",
+                                    "contents": "<H1>Draft</H1><Text>First version of the note.</Text>",
+                                },
+                            }
+                        ]
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.json_hook("cursor", "prompt", {**self.base, "prompt": "Write the decision."})
+        with mock.patch.object(Path, "home", return_value=home):
+            self.json_hook("cursor", "stop", {**self.base, "transcript_path": str(path)})
+        [(_, digest)] = digests.pending()
+        self.assertEqual(digest["canvases"][0]["title"], "Hosted Postgres")
+        self.assertIn("Keep the page in the database.", digest["canvases"][0]["body"])
+        self.assertIn("Keep the page in the database.", self.uploads[-1]["content"])
+        self.assertNotIn("First version", self.uploads[-1]["content"])
+
+        self.json_hook("cursor", "prompt", {**self.base, "prompt": "Use that decision."})
+        [reflect] = list((self.tmp / "home" / "state" / "digests" / "claimed").rglob("reflect.md"))
+        text = reflect.read_text(encoding="utf-8")
+        self.assertIn("**Canvas: Hosted Postgres**", text)
+        self.assertIn("Follow the maintain rules for canvases.", text)
+        self.assertIn("Use that decision.", text)
+
     def test_an_edit_inside_a_book_is_recorded_and_compaction_uploads(self):
         target = self.team.path / "components" / "billing.md"
         self.assertEqual(

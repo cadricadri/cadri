@@ -11,7 +11,7 @@ You decide subjectively from the digest (what the user asked, how the agent repl
 - **Decisions and conventions.** Why the system is shaped the way it is, team rules, naming, how to ship. Team book.
 - **Durable discoveries.** Non-obvious facts that cost real effort to find and will matter again: a gotcha in a component, the real cause of a failure pattern, why a feature exists.
 
-Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (refer to them by name, such as `$API_KEY`). Seed and join are the exception in Repository briefing below: that team snapshot may restate the repo, because the book is what later sessions load. An accepted plan is the exception to "the transcript already holds it": the decisions in it belong in memory, because a future agent should learn the design without reopening the session. Update from a pattern or an explicit instruction, not a single ambiguous event.
+Leave out what a future agent can cheaply rederive (file contents, command lists, current status), what the transcript already holds (what happened in a session), one-off details, and secrets (refer to them by name, such as `$API_KEY`). Seed and join are the exception in Repository briefing below: that team snapshot may restate the repo, because the book is what later sessions load. An accepted plan or canvas is the exception to "the transcript already holds it": the decisions in it belong in memory, because a future agent should learn the design without reopening the session. Update from a pattern or an explicit instruction, not a single ambiguous event.
 
 ## Repository briefing
 
@@ -41,6 +41,18 @@ Where an accepted plan goes:
 - A plan that is only a sequence of edits, with no decision beyond the code: nothing. The code is the record.
 
 One learning per decision. A plan is not a new file of its own.
+
+## Canvases
+
+A digest section named **Canvas** is a note the agent wrote beside the chat. The text is the readable copy, including edits the person made on the canvas. The short reply above it is usually narration. Read the canvas, then the user's next message.
+
+- The next message accepts it (use it, looks good, ship it, or they edited the canvas and continued): the canvas's decisions are worth keeping.
+- The next message revises it: keep the revision, not the draft. A later turn carries the revised canvas.
+- The next message rejects it, or nothing shows the canvas was followed: it is a proposal. Do not store it.
+
+Do not paste the canvas into memory. Store the decisions a future agent cannot cheaply recover from the code, the same way as an accepted plan, and put them in the same directories. A canvas is not a new file of its own.
+
+When reading a raw session with `cadri show`, a canvas is a write whose path contains `/canvases/` and ends in `.canvas.tsx`. The file on disk is the current note. The transcript write may be an older draft.
 
 ## Team or personal
 

@@ -84,6 +84,7 @@ export default function SessionDetail() {
             <ChatThread
               messages={detail.messages}
               plans={detail.plans ?? []}
+              canvases={detail.canvases ?? []}
               speaker={detail.user_id ? funName(detail.user_id, session.me?.org_id) : "You"}
             />
           </section>

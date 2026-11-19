@@ -651,6 +651,7 @@ struct SessionDetail {
     messages: Vec<transcript::Message>,
     tool_calls: Vec<transcript::ToolCall>,
     plans: Vec<transcript::Plan>,
+    canvases: Vec<transcript::Canvas>,
     memory_commits: Vec<LinkedCommit>,
 }
 
@@ -743,6 +744,7 @@ async fn get_session(
         messages: stored.view.messages,
         tool_calls: stored.view.tool_calls,
         plans: stored.view.plans,
+        canvases: stored.view.canvases,
         memory_commits,
     }))
 }

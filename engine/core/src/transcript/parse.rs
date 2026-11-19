@@ -59,6 +59,7 @@ pub struct Parsed {
     pub messages: Vec<Message>,
     pub tool_calls: Vec<ToolCall>,
     pub plans: Vec<Plan>,
+    pub canvases: Vec<super::canvas::Canvas>,
     pub model: Option<String>,
     /// Earliest and latest timestamps seen on any line, including hidden tool output.
     span: Option<(String, String)>,
@@ -544,6 +545,23 @@ fn note_tool(parsed: &mut Parsed, name: Option<&Value>, input: Option<&Value>, a
         plan.after_message = after_message;
         upsert_plan(parsed, plan);
     }
+    for mut canvas in super::canvas::from_call(name, input) {
+        canvas.after_message = after_message;
+        upsert_canvas(parsed, canvas);
+    }
+}
+
+/// A later edit of the same canvas file replaces the earlier card.
+fn upsert_canvas(parsed: &mut Parsed, next: super::canvas::Canvas) {
+    if let Some(existing) = parsed
+        .canvases
+        .iter_mut()
+        .find(|canvas| canvas.slug == next.slug)
+    {
+        *existing = next;
+        return;
+    }
+    parsed.canvases.push(next);
 }
 
 /// A later draft of the same title replaces the earlier one.
@@ -1111,6 +1129,57 @@ mod tests {
             .iter()
             .any(|message| message.text.contains("second series")));
         assert!(parsed.tool_counts().contains_key("CreatePlan"));
+    }
+
+    #[test]
+    fn a_canvas_write_is_kept_and_a_later_write_replaces_it() {
+        let draft = "<H1>Draft</H1><Text>First version of the note.</Text>";
+        let revised = "<H1>Hosted Postgres</H1><Text>Keep the page in the database.</Text>";
+        let blob = [
+            line(json!({
+                "role": "user",
+                "message": {"content": [{"type": "text", "text": "<user_query>Write the decision.</user_query>"}]}
+            })),
+            line(json!({
+                "role": "assistant",
+                "message": {"content": [
+                    {"type": "text", "text": "Writing the note."},
+                    {"type": "tool_use", "name": "Write", "input": {
+                        "path": "/Users/me/.cursor/projects/app/canvases/hosted-postgres.canvas.tsx",
+                        "contents": draft
+                    }}
+                ]}
+            })),
+            line(json!({
+                "role": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Write", "input": {
+                    "path": "/Users/me/.cursor/projects/app/canvases/hosted-postgres.canvas.tsx",
+                    "contents": revised
+                }}]}
+            })),
+            line(json!({
+                "role": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Write", "input": {
+                    "path": "/Users/me/cadri/engine/src/main.rs",
+                    "contents": "fn main() {}\n"
+                }}]}
+            })),
+        ]
+        .join("\n");
+        let parsed = parse(&blob, None);
+        assert_eq!(parsed.canvases.len(), 1);
+        assert_eq!(parsed.canvases[0].slug, "hosted-postgres");
+        assert_eq!(parsed.canvases[0].title, "Hosted Postgres");
+        assert!(parsed.canvases[0]
+            .body
+            .contains("Keep the page in the database."));
+        assert!(!parsed.canvases[0].body.contains("First version"));
+        assert_eq!(parsed.canvases[0].after_message, 1);
+        assert!(parsed.plans.is_empty());
+        assert!(!parsed
+            .messages
+            .iter()
+            .any(|message| message.text.contains("Hosted Postgres")));
     }
 
     #[test]

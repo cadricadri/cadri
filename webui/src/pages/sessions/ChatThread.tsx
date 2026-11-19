@@ -1,22 +1,25 @@
 import { Fragment } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { PlanCard } from "./Plans";
-import { formatTime, type ChatMessage, type SessionPlan } from "./types";
+import { CanvasCard, PlanCard } from "./Plans";
+import { formatTime, type ChatMessage, type SessionCanvas, type SessionPlan } from "./types";
 
 export function ChatThread({
   messages,
   plans = [],
+  canvases = [],
   speaker = "You",
 }: {
   messages: ChatMessage[];
   plans?: SessionPlan[];
+  canvases?: SessionCanvas[];
   speaker?: string;
 }) {
-  if (messages.length === 0 && plans.length === 0) {
+  if (messages.length === 0 && plans.length === 0 && canvases.length === 0) {
     return <p className="memory-empty">This session has no messages Cadri could read.</p>;
   }
-  const after = plansByMessage(plans, messages.length);
+  const after = cardsByMessage(plans, messages.length);
+  const canvasAfter = cardsByMessage(canvases, messages.length);
   return (
     <ol className="chat-thread">
       {messages.map((message, index) => (
@@ -42,20 +45,26 @@ export function ChatThread({
           {(after.get(index) ?? []).map((planIndex) => (
             <PlanCard key={`plan-${planIndex}`} plan={plans[planIndex]} index={planIndex} />
           ))}
+          {(canvasAfter.get(index) ?? []).map((canvasIndex) => (
+            <CanvasCard key={`canvas-${canvasIndex}`} canvas={canvases[canvasIndex]} index={canvasIndex} />
+          ))}
         </Fragment>
       ))}
       {(after.get(messages.length) ?? []).map((planIndex) => (
         <PlanCard key={`plan-${planIndex}`} plan={plans[planIndex]} index={planIndex} />
       ))}
+      {(canvasAfter.get(messages.length) ?? []).map((canvasIndex) => (
+        <CanvasCard key={`canvas-${canvasIndex}`} canvas={canvases[canvasIndex]} index={canvasIndex} />
+      ))}
     </ol>
   );
 }
 
-/** Plans land after the message that wrote them. Ones past the end of the thread go last. */
-function plansByMessage(plans: SessionPlan[], count: number): Map<number, number[]> {
+/** Cards land after the message that wrote them. Ones past the end of the thread go last. */
+function cardsByMessage(cards: { after_message?: number }[], count: number): Map<number, number[]> {
   const grouped = new Map<number, number[]>();
-  plans.forEach((plan, index) => {
-    const at = plan.after_message ?? count;
+  cards.forEach((card, index) => {
+    const at = card.after_message ?? count;
     const key = at >= count ? count : at;
     const bucket = grouped.get(key) ?? [];
     bucket.push(index);

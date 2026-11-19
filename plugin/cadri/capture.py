@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import auth
+from . import auth, canvases
 from .discover import cursor, opencode
 from .upload import post_session
 
@@ -81,7 +81,7 @@ def build_payload(harness: str, event: dict) -> dict | None:
         thread_id = text(event, "session_id")
     if thread_id is None:
         return None
-    content = transcript_text(harness, event)
+    content = canvases.refresh(transcript_text(harness, event), Path.home())
     if not content.strip():
         return None
     payload = {

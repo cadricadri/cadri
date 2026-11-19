@@ -64,6 +64,36 @@ export function SessionSidebar({ detail }: { detail: SessionDetail }) {
         </dl>
       </section>
 
+      {detail.canvases && detail.canvases.length > 0 ? (
+        <section className="side-card">
+          <h2>
+            Canvases <span className="side-mute">{detail.canvases.length}</span>
+          </h2>
+          <ul className="side-plans">
+            {detail.canvases.map((canvas, index) => (
+              <li key={canvas.slug || `${canvas.title}-${index}`}>
+                <a
+                  href={`#canvas-${index}`}
+                  onClick={(event) => {
+                    const node = document.getElementById(`canvas-${index}`);
+                    if (!node) {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (node instanceof HTMLDetailsElement) {
+                      node.open = true;
+                    }
+                    node.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }}
+                >
+                  {canvas.title}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       {detail.plans && detail.plans.length > 0 ? (
         <section className="side-card">
           <h2>

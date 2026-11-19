@@ -184,6 +184,8 @@ pub(crate) struct SessionView {
     pub tool_calls: Vec<transcript::ToolCall>,
     #[serde(default)]
     pub plans: Vec<transcript::Plan>,
+    #[serde(default)]
+    pub canvases: Vec<transcript::Canvas>,
 }
 
 impl SessionView {
@@ -192,6 +194,7 @@ impl SessionView {
             messages: parsed.messages,
             tool_calls: parsed.tool_calls,
             plans: parsed.plans,
+            canvases: parsed.canvases,
         }
     }
 }
