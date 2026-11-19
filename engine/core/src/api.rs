@@ -147,9 +147,6 @@ pub async fn serve(auth: Arc<dyn Authenticator>, extra: Option<Router>) {
             .unwrap_or_else(|| Path::new("."))
             .join("memories"),
     };
-    if std::env::var("CADRI_MEMORIES_MOUNT").is_ok_and(|value| !value.is_empty()) {
-        eprintln!("CADRI_MEMORIES_MOUNT is no longer used");
-    }
     let memories = match std::env::var("CADRI_MEMORIES_BUCKET") {
         Ok(bucket) if !bucket.is_empty() => {
             let books = memory::S3Books::from_env(bucket)

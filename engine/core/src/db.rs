@@ -239,8 +239,8 @@ pub fn open_in_memory() -> rusqlite::Result<Connection> {
     Ok(connection)
 }
 
-// Hosted SQLite can sit on NFS. WAL mode needs shared memory that NFS does not
-// provide reliably, so we force the classic DELETE rollback journal instead.
+// Localhost and the self-host binary use this file. DELETE journaling keeps the
+// database in one file, without WAL shared-memory sidecars.
 fn prepare(connection: &mut Connection) -> rusqlite::Result<()> {
     connection.busy_timeout(Duration::from_millis(5000))?;
     connection.pragma_update(None, "journal_mode", "DELETE")?;
