@@ -5,7 +5,11 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import subprocess
+import tempfile
+import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest import mock
 
 from test_plugin import FakeCadri
@@ -139,6 +143,56 @@ class InitJoinsAnExistingBook(InitHarness, BooksTestCase):
         self.assertIn("Your personal book starts empty.", out)
         self.assertIn("Next: follow the cadri-memory-join skill.", out)
         self.assertNotIn("cadri-memory-seed", out)
+
+
+class LocalEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.previous_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.tmp)
+        self.addCleanup(self.restore_home)
+
+    def restore_home(self):
+        if self.previous_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self.previous_home
+
+    def test_database_matches_scripts_run(self):
+        repo = Path("/tmp/cadri")
+        self.assertEqual(cli.local_engine_db(repo), repo / "engine" / "data" / "transcripts.db")
+
+    def test_an_engine_that_is_already_up_is_left_alone(self):
+        with mock.patch.object(cli, "_curl_status", return_value=0), mock.patch.object(cli.subprocess, "run") as run:
+            cli.start_local_engine()
+        run.assert_not_called()
+
+    def test_a_busy_port_does_not_start_a_second_engine(self):
+        with mock.patch.object(cli, "_curl_status", side_effect=[22, 0]):
+            with self.assertRaises(cli.CliError) as raised:
+                cli.start_local_engine()
+        self.assertIn("Port 8080 is in use", str(raised.exception))
+
+    def test_start_engine_uses_the_scripts_run_database_and_waits(self):
+        curls = iter([7, 7, 7, 0])
+        started: list[list[str]] = []
+
+        def run(cmd, **_kwargs):
+            started.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="42\n", stderr="")
+
+        with (
+            mock.patch.object(cli, "_curl_status", side_effect=lambda _url: next(curls)),
+            mock.patch.object(cli.subprocess, "run", side_effect=run),
+            mock.patch.object(cli.time, "sleep"),
+            mock.patch.object(cli.time, "monotonic", side_effect=[0, 1, 2]),
+        ):
+            cli.start_local_engine()
+        db = cli.local_engine_db(cli.PLUGIN_ROOT.parent)
+        self.assertIn(f'CADRI_DB="{db}"', started[0][2])
+        self.assertNotIn(".cadri/transcripts.db", started[0][2])
+        self.assertTrue(db.parent.is_dir())
 
 
 def cli_shipped_skills() -> tuple[str, ...]:

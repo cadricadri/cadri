@@ -10,8 +10,8 @@
 # Served as https://cadri.io/install-local.sh. When this file changes, copy it to
 # landingpage/install-local.sh and deploy the landing page.
 #
-# The engine database matches ./scripts/run (engine/data/transcripts.db). This does
-# not pass --start-engine, which stores its database at ~/.cadri/transcripts.db.
+# The engine database matches ./scripts/run (engine/data/transcripts.db). This starts
+# that engine itself, then runs `cadri init --local` without --start-engine.
 set -euo pipefail
 
 CADRI_HOME="${CADRI_HOME:-$HOME/.cadri}"

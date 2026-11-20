@@ -160,21 +160,57 @@ def backfill(base: str, since: float, max_sessions: int, max_bytes: int) -> dict
     return upload_sessions(base, sessions, max_bytes)
 
 
+def local_engine_db(repo: Path) -> Path:
+    """Same file `./scripts/run` and the local installer use."""
+    return repo / "engine" / "data" / "transcripts.db"
+
+
+def _curl_status(url: str) -> int:
+    proc = subprocess.run(
+        ["curl", "-s", "-o", "/dev/null", "--max-time", "2", url],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode
+
+
 def start_local_engine() -> None:
     repo = PLUGIN_ROOT.parent
     engine_dir = repo / "engine"
     if not engine_dir.is_dir():
-        raise CliError(f"missing {engine_dir}; run ./plugin/bin/cadri init --local --start-engine from a cadri checkout")
+        raise CliError(
+            f"missing {engine_dir}; run ./plugin/bin/cadri init --local --start-engine from a cadri checkout"
+        )
+    if _curl_status("http://127.0.0.1:8080/healthz") == 0:
+        print("Engine already running at http://127.0.0.1:8080")
+        return
+    # curl exits 7 when nothing is listening. Anything else means another process owns the port.
+    if _curl_status("http://127.0.0.1:8080/") != 7:
+        raise CliError(
+            "Port 8080 is in use, and http://127.0.0.1:8080/healthz is not responding. "
+            "Stop that process, then run this again."
+        )
+    db = local_engine_db(repo)
+    db.parent.mkdir(parents=True, exist_ok=True)
     log = Path.home() / ".cadri" / "engine.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "bash",
         "-lc",
-        f'cd "{engine_dir}" && CADRI_BIND=127.0.0.1:8080 CADRI_DB="{Path.home() / ".cadri" / "transcripts.db"}" '
+        f'cd "{engine_dir}" && CADRI_BIND=127.0.0.1:8080 CADRI_DB="{db}" '
         f'nohup cargo run --bin cadri-engine > "{log}" 2>&1 & echo $!',
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise CliError(f"could not start the engine. Log: {log}")
     print(f"Started local engine (log {log}). pid={proc.stdout.strip() or 'unknown'}")
+    print("Waiting for the engine. The first Rust build can take a few minutes.")
+    deadline = time.monotonic() + 600
+    while time.monotonic() < deadline:
+        if _curl_status("http://127.0.0.1:8080/healthz") == 0:
+            return
+        time.sleep(1)
+    raise CliError(f"the engine did not become ready. Log: {log}")
 
 
 def clone_books(url: str | None) -> tuple[str, bool | None]:
@@ -261,7 +297,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         os.environ.setdefault("CADRI_URL", "http://127.0.0.1:8080")
         if args.start_engine:
             start_local_engine()
-            time.sleep(1)
     # init picks the server afresh; the saved URL is what it leaves behind for hooks.
     base = auth.normalize_url(args.url or os.environ.get("CADRI_URL") or auth.DEFAULT_URL)
     os.environ["CADRI_URL"] = base
@@ -547,7 +582,11 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--url", default=None)
     init.add_argument("--local", action="store_true", help="Target localhost Cadri (no WorkOS by default)")
     init.add_argument("--login", action="store_true", help="Force device login even with --local")
-    init.add_argument("--start-engine", action="store_true", help="With --local, start cadri-engine in background")
+    init.add_argument(
+        "--start-engine",
+        action="store_true",
+        help="With --local, start cadri-engine in the background when it is not already running. Uses engine/data/transcripts.db. Does not start the web UI.",
+    )
     init.set_defaults(func=cmd_init)
 
     uninstall = sub.add_parser("uninstall", help="Remove Cadri's hooks, plugins, and skills")
