@@ -59,7 +59,7 @@ CADRI_REF=main bash plugin/install.sh            # or this checkout / any ref
 ~/.local/bin/cadri init
 ```
 
-Localhost: see [../docs/localhost.md](../docs/localhost.md), then `cadri init --local --start-engine`.
+Localhost: https://cadri.io/docs/localhost/, or `curl -fsSL https://cadri.io/install-local.sh | bash`.
 
 ## Release
 
@@ -69,7 +69,7 @@ Localhost: see [../docs/localhost.md](../docs/localhost.md), then `cadri init --
 plugin/scripts/release 0.2.0
 ```
 
-If `install.sh` changed, copy it to `landingpage/install.sh` and deploy the landing page.
+If `install.sh` changed, copy it to `landingpage/install.sh` and deploy the landing page. If `scripts/install-local.sh` changed, copy it to `landingpage/install-local.sh` and deploy the landing page.
 
 ## CLI
 

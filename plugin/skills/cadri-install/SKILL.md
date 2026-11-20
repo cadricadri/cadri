@@ -1,9 +1,19 @@
 ---
 name: cadri-install
-description: Installs Cadri on this machine from cadri.io/docs/installation or cadri.io/docs/joining, then seeds or joins memory in the same task. Use when the user pastes a prompt from those docs, or asks to set up, install, or repair the Cadri install. A memory push conflict is cadri-memory-repair.
+description: Installs Cadri on this machine from cadri.io/docs/installation, cadri.io/docs/joining, or cadri.io/docs/localhost, then seeds or joins memory in the same task. Use when the user pastes a prompt from those docs, or asks to set up, install, or repair the Cadri install. A memory push conflict is cadri-memory-repair.
 ---
 
 # Install Cadri
+
+If the user asked for local Cadri, or the URL is https://cadri.io/docs/localhost, or they named https://cadri.io/install-local.sh, run:
+
+```bash
+curl -fsSL https://cadri.io/install-local.sh | bash
+```
+
+Wait until it exits. There is no browser sign-in. Tell the user to open http://127.0.0.1:5173. The engine is http://127.0.0.1:8080. Then read the summary the script prints and continue from step 3 below, using those local URLs instead of https://app.cadri.io/sessions. Do not run the hosted installer.
+
+Otherwise:
 
 1. Read the URL the user gave. If they did not give one, read https://cadri.io/docs/installation. The commands are the same either way:
 
