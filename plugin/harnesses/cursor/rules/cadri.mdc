@@ -5,7 +5,9 @@ alwaysApply: true
 
 This workspace uses Cadri memory: a team book and a personal book of Markdown files that Cadri loads into the conversation when a session starts. Treat them as your starting knowledge about this project and this person.
 
-- If this conversation has no "Cadri memory" context yet, run `cadri memory context` once and read its output before substantive work.
+- If this conversation has no "Cadri memory" context yet, run `~/.cadri/bin/cadri memory context` once and read its output before substantive work.
+- When a prompt says Cadri remembered something, call `cadri_search` once, in the same batch as your first reads. A tool that already ran is fine; call the search next and carry on. When that tool is still loading or the call fails, run `~/.cadri/bin/cadri memory search` once with the session and harness from the prompt, and set the command description to the "Cadri remembered …" sentence. A missing command or a sandbox block ends the search. Then carry on with the user's task.
 - Before a task, open the memory files Cadri listed as relevant that fit it, together with your first code searches. Stop once you know enough.
 - When Cadri asks you to launch the `cadri-memory-keeper` subagent, launch it in the background in your first tool batch and carry on without waiting.
 - When the user explicitly asks you to remember, forget, or correct something, edit the right book yourself and commit that one learning with `cadri memory push --human -m "<the learning>" -m "<what happened and why it should persist>" -m "Sources: <harness>:<id>"`.
+- Do not create or edit files under `~/.cadri` with the editor. Cursor asks for approval on every file outside the workspace. Read those files with the Read tool. Write them from the shell, in the same command as `cadri memory push`.

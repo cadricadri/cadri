@@ -162,11 +162,16 @@ def recall_block(books: list[bk.Book], prompt: str, session_id: str | None, harn
     sentence = recall.status_line(count)
     session = shlex.quote(session_id or "")
     name = shlex.quote(harness)
+    # Hooks and MCP launch this shim by absolute path. Agent shells often lack it on PATH,
+    # and `cadri` then looks missing. One attempt; a block is not a reason to escalate.
+    cli = shlex.quote(str(state.cadri_home() / "bin" / "cadri"))
     request = (
-        f"{sentence}. Before any other tool, call the Cadri tool `cadri_search` "
-        f"with session {session} and harness {name}, so the user sees that sentence. "
-        f"If you cannot call it, run `cadri memory search --session {session} --harness {name}` "
-        f"and use the same sentence as the command description. Read the result, then continue."
+        f"{sentence}. Call the Cadri tool `cadri_search` once, with session {session} and harness {name}, "
+        f"in the same batch as your first memory and code reads, so the user sees that sentence. "
+        f"A tool that already ran is fine; call the search next and carry on with the task. "
+        f"When that tool is still loading or the call fails, run {cli} memory search --session {session} --harness {name} "
+        f"once, and set the command description to this same sentence. "
+        f"A missing command or a sandbox block ends the search. Then carry on with the user's task."
     )
     reminder = context.reminder()
     return request + (f"\n\n{reminder}" if reminder else "")

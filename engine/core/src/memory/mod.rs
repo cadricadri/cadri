@@ -10,6 +10,7 @@ mod types;
 pub(crate) mod jail;
 pub mod testing;
 
+pub(crate) use git::linked_sessions;
 pub(crate) use git::GitHttp;
 pub use git::{memory_repo_id, MemoryService, PublishGate};
 pub use s3::{FakeS3, LogFault, S3Books};

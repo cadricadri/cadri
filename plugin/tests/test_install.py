@@ -23,6 +23,7 @@ from cadri import auth as cadri_auth  # noqa: E402
 from cadri import cli  # noqa: E402
 from cadri.discover import codex, cursor, opencode  # noqa: E402
 from cadri.install import bundles, config  # noqa: E402
+from cadri.state import cadri_home  # noqa: E402
 from cadri.secrets import redact  # noqa: E402
 
 # The same document the transcript parser reads. OpenCode 2 stores each turn in
@@ -255,12 +256,16 @@ class CursorInstallTests(InstallTestCase):
         rule = (self.plugin() / "rules/cadri.mdc").read_text()
         self.assertIn("alwaysApply: true", rule)
         self.assertIn("cadri memory context", rule)
+        self.assertIn("Do not create or edit files under `~/.cadri`", rule)
         self.assertTrue((self.plugin() / "skills/cadri-memory/SKILL.md").is_file())
         self.assertIn(str(self.home / ".cadri/bin/cadri"), self.command("stop"))
+        sandbox = self.read(".cursor/sandbox.json")
+        self.assertEqual(sandbox["additionalReadwritePaths"], [cadri_home().as_posix()])
 
         bundles.uninstall(self.home)
         self.assertFalse(self.plugin().exists())
         self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
+        self.assertFalse((self.home / ".cursor/sandbox.json").exists())
 
     def test_stop_hook_finds_the_session_by_conversation_id(self):
         self.install("cursor")
@@ -677,6 +682,13 @@ class SeedWindowTests(unittest.TestCase):
         self.assertEqual((in_window, newest, len(chosen)), (11, 10, 10))
         self.assertEqual(cli.resolve_discover_bounds(None, None, True), (60, 100))
         self.assertEqual(cli.resolve_discover_bounds(10, 10, True), (10, 10))
+
+    def test_seed_discover_skips_the_session_that_is_running_it(self):
+        refs = [self.ref("install", 10), self.ref("older", 9)]
+        with mock.patch.dict(os.environ, {"CADRI_SESSION_ID": "install"}):
+            self.assertEqual([item.thread_id for item in cli.exclude_running_session(refs)], ["older"])
+        with mock.patch.dict(os.environ, {"CADRI_SESSION_ID": ""}):
+            self.assertEqual([item.thread_id for item in cli.exclude_running_session(refs)], ["install", "older"])
         self.assertEqual(cli.resolve_discover_bounds(None, None, False), (30.0, 50))
 
     def test_init_names_the_join_skill_when_the_team_book_has_lessons(self):

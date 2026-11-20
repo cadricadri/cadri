@@ -91,7 +91,7 @@ Push portrait gaps and stale revisions first, one learning at a time, architectu
 
 **Personal book.** If it already has files, revise them and do not add a second file for the same fact. If it has no lessons, create the files this person needs, including `MEMORY.md`. Preferences and corrections go here even when the same sessions also change the team book. The repo pass does not write this book.
 
-Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. Edit the files in the clones with your file tools.
+Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. On Cursor, do not use Write, StrReplace, or Edit on `~/.cadri`. Read a book file with the Read tool. In one shell command, write that learning's files into the clone and run `cadri memory push`.
 
 ## 7. Push each learning
 

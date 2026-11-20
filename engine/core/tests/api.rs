@@ -1058,6 +1058,60 @@ async fn memory_commits_link_to_the_session_that_wrote_them() {
     assert!(detail.get("content").is_none());
     let (status, _, _) = send(&app, get_request("/api/sessions/nope", &ada)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = send(&app, post_session("sess-src", "plain", &ada)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(&app, post_session("sess-other", "plain", &ada)).await;
+    assert_eq!(status, StatusCode::OK);
+    let sourced = "Keep the palette.\n\nSources: cursor:sess-src, claude_code:sess-other\n";
+    let (status, _, _) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?view=tree&scope=personal",
+            &json!({
+                "message": sourced,
+                "changes": [{ "op": "write", "path": "palette.md", "content": "mauve\n" }],
+                "agent": "cursor-cadri-memory-seed",
+                "session_id": "sess-1"
+            }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send(
+        &app,
+        post_json(
+            "/api/memories/commits?view=tree&scope=personal",
+            &json!({
+                "message": "The page is one file.\n",
+                "changes": [{ "op": "write", "path": "page.md", "content": "one\n" }],
+                "agent": "cursor-cadri-memory-seed",
+                "session_id": "sess-1"
+            }),
+            &ada,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, linked_list) = send(&app, get_request("/api/sessions", &ada)).await;
+    let linked_row = |id: &str| {
+        linked_list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["session_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let on = |id: &str| linked_row(id)["memory_commits"].as_array().unwrap().len();
+    assert_eq!(on("sess-src"), 1);
+    assert_eq!(on("sess-other"), 1);
+    assert_eq!(
+        linked_row("sess-src")["memory_commits"][0]["message"],
+        "Keep the palette.\n\nSources: cursor:sess-src, claude_code:sess-other"
+    );
+    assert_eq!(on("sess-1"), 2);
     let (status, _, _) = send(
         &app,
         get_request("/api/sessions/sess-1", &[("x-test-org", "org-b")]),

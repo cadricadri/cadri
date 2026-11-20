@@ -109,8 +109,11 @@ class ClaudeTests(HookTestCase):
         self.assertIn("Cadri remembered ", context)
         self.assertIn("cadri_search", context)
         self.assertIn("--session c1", context)
+        self.assertIn("bin/cadri", context)
+        self.assertIn("memory search", context)
+        self.assertIn("same batch", context)
+        self.assertNotIn("Before any other tool", context)
         self.assertNotIn("Retries back off.", context)
-        self.assertIn("batch the reads", context)
 
     def test_unrelated_prompt_adds_nothing(self):
         self.start()
@@ -292,6 +295,8 @@ class CursorTests(HookTestCase):
         self.assertIn("Deploys happen on Tuesdays", first["additional_context"])
         self.assertIn("Cadri remembered ", first["additional_context"])
         self.assertIn("cadri_search", first["additional_context"])
+        self.assertIn("A tool that already ran is fine", first["additional_context"])
+        self.assertIn("bin/cadri", first["additional_context"])
         self.assertEqual(self.json_hook("cursor", "tool-after", {**self.base, "tool_name": "Read"}), {})
 
     def test_a_plan_is_in_the_digest_once_and_the_next_message_accepts_it(self):

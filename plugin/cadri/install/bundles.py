@@ -380,7 +380,8 @@ def install_cursor(home: Path) -> str:
     strip_cursor_hooks(home / ".cursor" / "hooks.json")
     target = cursor_plugin_dir(home)
     build("cursor", target)
-    return f"Cursor: plugin at {target} (reload Cursor to load it)"
+    note = permissions.set_cursor(home, install=True)
+    return f"Cursor: plugin at {target} (reload Cursor to load it){note}"
 
 
 def uninstall_cursor(home: Path) -> bool:
@@ -388,6 +389,8 @@ def uninstall_cursor(home: Path) -> bool:
     target = cursor_plugin_dir(home)
     if target.exists():
         shutil.rmtree(target)
+        removed = True
+    if permissions.set_cursor(home, install=False):
         removed = True
     return removed
 

@@ -20,8 +20,8 @@ use serde_json::{json, Value};
 use crate::auth::{Authenticator, Identity};
 use crate::db::{self, IncomingSession, SessionRecord};
 use crate::memory::{
-    self, BlameEntry, Change, CommitDetail, EditRequest, GitHttp, MemoryCommit, MemoryService,
-    MemoryStore,
+    self, linked_sessions, BlameEntry, Change, CommitDetail, EditRequest, GitHttp, MemoryCommit,
+    MemoryService, MemoryStore,
 };
 use crate::transcript;
 use crate::ApiError;
@@ -697,11 +697,15 @@ async fn commits_by_session(
             }
         };
         for commit in commits {
-            if let Some(session) = commit.session_id.clone() {
-                by_session
-                    .entry(session)
-                    .or_default()
-                    .push(LinkedCommit { book, commit });
+            for session in linked_sessions(
+                &commit.message,
+                commit.session_id.as_deref(),
+                &commit.author,
+            ) {
+                by_session.entry(session).or_default().push(LinkedCommit {
+                    book,
+                    commit: commit.clone(),
+                });
             }
         }
     }

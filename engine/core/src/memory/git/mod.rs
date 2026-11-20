@@ -22,6 +22,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use author::linked_sessions;
 pub use ids::memory_repo_id;
 pub(crate) use protocol::GitHttp;
 pub use service::{MemoryService, PublishGate};

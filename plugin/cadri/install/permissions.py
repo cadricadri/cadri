@@ -3,7 +3,9 @@
 Claude Code: an additional directory plus allow rules in ~/.claude/settings.json.
 Codex: the memory directory as a writable root of the workspace-write sandbox.
 OpenCode 1.x: allow rules for the memory directory and `cadri memory` in opencode.json.
-Cursor needs nothing.
+Cursor: `~/.cadri` as an extra read-write path in ~/.cursor/sandbox.json, so a shell
+command can write the books without leaving the sandbox. Cursor still asks before the
+editor creates a file outside the workspace; the memory skills write from the shell.
 Uninstall removes exactly the entries install adds, and nothing else.
 """
 
@@ -14,6 +16,7 @@ from pathlib import Path
 
 from ..memory import digests
 from ..memory.books import memory_root
+from ..state import cadri_home
 from .config import InstallError, read_json, write_json, write_text
 
 CODEX_TABLE = "[sandbox_workspace_write]"
@@ -159,4 +162,51 @@ def set_codex(config: Path, install: bool) -> str:
             "so agents can edit memory without asking"
         )
     write_text(config, text + ("\n" if text and not text.endswith("\n") else "") + ("\n" if text else "") + block)
+    return ""
+
+
+def set_cursor(home: Path, install: bool) -> str:
+    """Let sandboxed shell commands write under ~/.cadri. Returns a note, or ""."""
+    path = home / ".cursor" / "sandbox.json"
+    root = cadri_home().as_posix()
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as exc:
+        raise InstallError(f"could not read {path}: {exc}") from exc
+    if not raw.strip():
+        data: dict = {}
+    else:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            if install:
+                return (
+                    f"; {path} is not plain JSON, so add {root} to additionalReadwritePaths "
+                    "so shell commands can write memory without leaving the sandbox"
+                )
+            return ""
+    if not isinstance(data, dict):
+        raise InstallError(f"{path} must hold a JSON object")
+    paths = data.get("additionalReadwritePaths", [])
+    if paths is None:
+        paths = []
+    if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
+        raise InstallError(f"{path}: \"additionalReadwritePaths\" must be a list of strings")
+    if install:
+        if root in paths:
+            return ""
+        data["additionalReadwritePaths"] = [*paths, root]
+        write_json(path, data)
+        return ""
+    if root not in paths:
+        return ""
+    kept = [item for item in paths if item != root]
+    if kept:
+        data["additionalReadwritePaths"] = kept
+    else:
+        data.pop("additionalReadwritePaths", None)
+    if data:
+        write_json(path, data)
+    elif path.exists():
+        path.unlink()
     return ""

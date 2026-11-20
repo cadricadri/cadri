@@ -14,7 +14,7 @@ Each book has a `MEMORY.md` at its root that every session loads, directories wi
 
 ## Read
 
-Follow `references/search.md`. In short: when a prompt says Cadri remembered something, call `cadri_search` before other work. Then search the books with grep, the way you search a codebase. Read a directory `MEMORY.md` when you do not know the words, and when the change must fit the existing design read `architecture/MEMORY.md` and the relevant `features/` index. Read the matching lines. Read a whole file when it is an index, or when the hits show you need the whole argument. Stop once you have what you need. Treat memory as strong defaults, not proof; if something is clearly out of date, say so.
+Follow `references/search.md`. In short: when a prompt says Cadri remembered something, call `cadri_search` once, in the same batch as your first reads, so the user sees that sentence. A tool that already ran is fine; call the search next and carry on. When that tool is still loading or the call fails, the prompt names one shell command; run that once, then carry on. Then search the books with grep, the way you search a codebase. Read a directory `MEMORY.md` when you do not know the words, and when the change must fit the existing design read `architecture/MEMORY.md` and the relevant `features/` index. Read the matching lines. Read a whole file when it is an index, or when the hits show you need the whole argument. Stop once you have what you need. Treat memory as strong defaults, not proof; if something is clearly out of date, say so.
 
 ## Write
 

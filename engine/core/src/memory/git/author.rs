@@ -101,6 +101,58 @@ pub(super) fn display_message(message: &str) -> String {
 /// id on a `Sources:` line that older memory skills put in the message body.
 const HARNESSES: &[&str] = &["claude_code", "cursor", "codex", "opencode"];
 
+/// Sessions the Sessions page should list this commit under.
+///
+/// A `Sources:` line names the sessions the learning came from. Those win over the
+/// session that wrote the commit, and every id on the line is included. A repo
+/// briefing from seed or join has no `Sources:` and is not attached to the install
+/// session. The quiet hook's "left uncommitted" placeholder is not a learning.
+pub(crate) fn linked_sessions(
+    message: &str,
+    session_id: Option<&str>,
+    author: &Author,
+) -> Vec<String> {
+    let cited = cited_sessions(message);
+    if !cited.is_empty() {
+        return cited;
+    }
+    if message.contains("Left uncommitted by session ") {
+        return Vec::new();
+    }
+    if let Author::Robot { id } = author {
+        if id.ends_with("cadri-memory-seed") || id.ends_with("cadri-memory-join") {
+            return Vec::new();
+        }
+    }
+    session_id
+        .filter(|id| valid_session(id))
+        .map(|id| vec![id.to_string()])
+        .unwrap_or_default()
+}
+
+/// Every session id on `Sources:` lines, harness prefix removed, in order, without duplicates.
+pub(crate) fn cited_sessions(message: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in message.lines() {
+        let Some(rest) = line.trim().strip_prefix("Sources:") else {
+            continue;
+        };
+        for token in rest.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+            if token.is_empty() {
+                continue;
+            }
+            let id = HARNESSES
+                .iter()
+                .find_map(|harness| token.strip_prefix(harness)?.strip_prefix(':'))
+                .unwrap_or(token);
+            if valid_session(id) && !ids.iter().any(|seen| seen == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 pub(super) fn session_from(message: &str) -> Option<String> {
     let trailer = message
         .lines()
@@ -140,6 +192,8 @@ pub(crate) fn valid_session(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::memory::types::Author;
 
     const TRAILERS: &str =
         "Cadri-Author-Kind: robot\nCadri-Author-Id: cursor-1a2b\nCadri-Author-Label: Ada";
@@ -184,5 +238,45 @@ mod tests {
         );
         let linked = format!("{message}Cadri-Session-Id: parent-session\n");
         assert_eq!(session_from(&linked).as_deref(), Some("parent-session"));
+        assert_eq!(
+            cited_sessions(&message),
+            vec!["7a9e".to_string(), "2f1c".to_string()]
+        );
+        assert_eq!(
+            linked_sessions(
+                &message,
+                Some("parent-session"),
+                &Author::Robot {
+                    id: "cursor-cadri-memory-seed".into()
+                }
+            ),
+            vec!["7a9e".to_string(), "2f1c".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_repo_briefing_and_a_placeholder_are_not_tied_to_the_writer() {
+        let robot = Author::Robot {
+            id: "cursor-cadri-memory-seed".into(),
+        };
+        assert_eq!(
+            linked_sessions("The page is one file.", Some("install"), &robot),
+            Vec::<String>::new()
+        );
+        let keeper = Author::Robot {
+            id: "cursor-main".into(),
+        };
+        assert_eq!(
+            linked_sessions("Remember the palette.", Some("install"), &keeper),
+            vec!["install".to_string()]
+        );
+        assert_eq!(
+            linked_sessions(
+                "Update 4 memory files\n\nLeft uncommitted by session install.",
+                Some("install"),
+                &keeper
+            ),
+            Vec::<String>::new()
+        );
     }
 }

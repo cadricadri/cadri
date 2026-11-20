@@ -373,9 +373,20 @@ def select_seed_sessions(refs: list[SessionRef], now: float, days: float, limit:
     return chosen, len(in_window), len(newest)
 
 
+def exclude_running_session(refs: list[SessionRef]) -> list[SessionRef]:
+    """Drop the session that is seeding. Its transcript is the install, not a source."""
+    current = os.environ.get("CADRI_SESSION_ID", "").strip()
+    if not current:
+        return refs
+    return [ref for ref in refs if ref.thread_id != current]
+
+
 def cmd_discover(args: argparse.Namespace) -> int:
     days, limit = resolve_discover_bounds(args.days, args.limit, args.seed)
-    chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), days, limit)
+    pool = discover_all()
+    if args.seed:
+        pool = exclude_running_session(pool)
+    chosen, in_window, newest = select_seed_sessions(pool, time.time(), days, limit)
     refs = chosen
     choice = None
     if args.seed:

@@ -1,7 +1,7 @@
 # Searching Cadri memory
 
 <!-- reminder -->
-Before you start, if this prompt says Cadri remembered something, call the Cadri search tool it names before any other tool, so the user sees that sentence (batch the reads with your first code searches). Then search the memory books the way you search a codebase. The search result lists lines that contain words from this prompt. A file you need can be absent, and no match means try another word. When you do not know the words yet, read that directory's `MEMORY.md` from the session-start tree. When the change must fit the existing design, read `architecture/MEMORY.md` and the `features/` index for the area you are changing. Then run grep and read the matching lines. Read a whole file when it is an index, or when the hits show the argument is the whole file. Stop once you know enough. Don't read memory speculatively.
+The search result lists lines that contain words from this prompt. A file you need can be absent, and no match means try another word. When you do not know the words yet, read that directory's `MEMORY.md` from the session-start tree. When the change must fit the existing design, read `architecture/MEMORY.md` and the `features/` index for the area you are changing. Then run grep and read the matching lines. Read a whole file when it is an index, or when the hits show the argument is the whole file. Stop once you know enough. Don't read memory speculatively.
 <!-- /reminder -->
 
 The books are ordinary markdown on disk. Look through them the way you look through a repository: a short index to learn the vocabulary, then grep for a word you can name, then the lines around a hit.
