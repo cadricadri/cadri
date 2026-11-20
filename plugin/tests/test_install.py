@@ -23,6 +23,11 @@ from cadri import auth as cadri_auth  # noqa: E402
 from cadri import cli  # noqa: E402
 from cadri.discover import codex, cursor, opencode  # noqa: E402
 from cadri.install import bundles, config  # noqa: E402
+from cadri.secrets import redact  # noqa: E402
+
+# The same document the transcript parser reads. OpenCode 2 stores each turn in
+# session_message.data, with the role in the type column and assistant parts inline.
+OPENCODE_V2 = Path(__file__).resolve().parents[2] / "engine/core/src/transcript/fixtures/opencode_v2.json"
 
 # Older hook entries named only the harness; install still recognizes and replaces them.
 LEGACY_COMMAND = "/usr/bin/python3 /opt/cadri/plugin/bin/cadri_cli.py hook {harness}"
@@ -420,18 +425,40 @@ class OpenCodeInstallTests(InstallTestCase):
         self.assertEqual(content["messages"], [{"id": "m1", "role": "user", "parts": [{"type": "text", "text": "ping"}]}])
 
     def test_exports_opencode_2_sessions(self):
+        document = json.loads(OPENCODE_V2.read_text(encoding="utf-8"))
+        info = document["info"]
         db = self.home / "opencode.db"
         connection = sqlite3.connect(db)
+        columns = list(info)
         with connection:
-            connection.execute("CREATE TABLE session_v2 (id TEXT, title TEXT, time_updated INTEGER)")
+            connection.execute(f"CREATE TABLE session_v2 ({', '.join(f'{name} TEXT' for name in columns)})")
             connection.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
-            connection.execute("INSERT INTO session_v2 VALUES ('ses_2', 'pong', 1)")
-            connection.execute("INSERT INTO session_message VALUES ('b', 'ses_2', 'assistant', 2, '{\"text\":\"pong\"}')")
-            connection.execute("INSERT INTO session_message VALUES ('a', 'ses_2', 'user', 1, '{\"text\":\"ping\"}')")
+            connection.execute(
+                f"INSERT INTO session_v2 ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+                [info[name] for name in columns],
+            )
+            for seq, message in enumerate(document["messages"]):
+                if isinstance(message.get("content"), list):
+                    kind = "assistant"
+                elif isinstance(message.get("text"), str):
+                    kind = "user"
+                else:
+                    kind = "idle"
+                connection.execute(
+                    "INSERT INTO session_message VALUES (?, ?, ?, ?, ?)",
+                    (f"msg_{seq}", info["id"], kind, seq, json.dumps(message)),
+                )
         connection.close()
-        content = json.loads(opencode.export_session_json(db, "ses_2"))
-        self.assertEqual(content["info"]["title"], "pong")
-        self.assertEqual(content["messages"], [{"text": "ping"}, {"text": "pong"}])
+        content = json.loads(opencode.export_session_json(db, info["id"]))
+        self.assertEqual(content["info"]["title"], "Fetch the setup doc")
+        self.assertEqual(content["messages"], document["messages"])
+        # The upload redacts this blob. A real assistant turn carries time.firstToken.
+        parsed = json.loads(redact(json.dumps(content)))
+        self.assertEqual(parsed["messages"][0]["text"], "Fetch the setup doc and follow it.")
+        self.assertEqual(
+            [message["time"]["firstToken"] for message in parsed["messages"] if "firstToken" in message.get("time", {})],
+            [message["time"]["firstToken"] for message in document["messages"] if "firstToken" in message.get("time", {})],
+        )
 
     def test_lets_agents_use_memory_and_uninstall_restores_the_config(self):
         original = {"model": "opencode/x", "permission": {"external_directory": "ask", "edit": "ask"}}

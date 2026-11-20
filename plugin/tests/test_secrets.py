@@ -74,6 +74,37 @@ class RedactTests(unittest.TestCase):
             '{"api_token": "[redacted]"}',
         )
 
+    def test_real_transcripts_stay_parseable_and_opencode_keeps_first_token(self):
+        root = Path(__file__).resolve().parents[2] / "engine/core/src/transcript/fixtures"
+        opencode = json.loads((root / "opencode_v2.json").read_text(encoding="utf-8"))
+        self.assertTrue(
+            any(isinstance(message.get("time"), dict) and isinstance(message["time"].get("firstToken"), int) for message in opencode["messages"])
+        )
+        secret = GITHUB
+        dirty = (root / "opencode_v2.json").read_text(encoding="utf-8").replace(
+            "Fetch the setup doc and follow it.",
+            f"Fetch the setup doc and follow it. {secret}",
+            1,
+        )
+        cleaned = redact(dirty)
+        parsed = json.loads(cleaned)
+        self.assertNotIn(secret, cleaned)
+        self.assertIn("Fetch the setup doc and follow it.", parsed["messages"][0]["text"])
+        self.assertEqual(
+            [message["time"].get("firstToken") for message in parsed["messages"]],
+            [message["time"].get("firstToken") for message in opencode["messages"]],
+        )
+        for path in sorted(root.iterdir()):
+            if path.suffix not in {".json", ".jsonl"}:
+                continue
+            redacted = redact(path.read_text(encoding="utf-8"))
+            if path.suffix == ".jsonl":
+                for line in redacted.splitlines():
+                    if line.strip():
+                        json.loads(line)
+            else:
+                json.loads(redacted)
+
     def test_a_bearer_token_and_a_jwt_are_removed(self):
         jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signaturevalue1"
         cleaned = redact(f"Authorization: Bearer {jwt}")
