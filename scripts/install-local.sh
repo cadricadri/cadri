@@ -102,7 +102,7 @@ ensure_node() {
     Linux-aarch64) target=linux-arm64 ;;
     *) die "Install Node.js 20 or newer, then run this again ($os $arch)." ;;
   esac
-  say "Installing Node.js…"
+  say "Installing Node.js..."
   local work sums name hash file
   work="$(mktemp -d)"
   sums="$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt </dev/null)"
@@ -134,7 +134,7 @@ ensure_rust() {
   if command -v cargo >/dev/null 2>&1; then
     return
   fi
-  say "Installing Rust…"
+  say "Installing Rust..."
   curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
   # shellcheck disable=SC1091
   source "$HOME/.cargo/env"
@@ -169,8 +169,8 @@ wait_http() {
       return 0
     fi
     i=$((i + 1))
-    if (( i % 30 == 0 )); then
-      say "Still waiting for $label…"
+    if (( i > 0 && i % 30 == 0 )); then
+      say "Still waiting for ${label}..."
     fi
     sleep 1
   done
