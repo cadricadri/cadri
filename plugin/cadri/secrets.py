@@ -143,7 +143,7 @@ _ASSIGN = re.compile(
     ["']?
     \s*[:=]\s*
     ["']?
-    (?P<value>[^"'\\\s]{6,200})
+    (?P<value>[^"'\\\s,}\]]{6,200})
     """
 )
 
@@ -341,6 +341,11 @@ def _secret_name(words: list[str]) -> bool:
 
 def _literal_secret(words: list[str], value: str) -> bool:
     if not _plausible_literal(value):
+        return False
+    # OpenCode records the first streamed token as `time.firstToken`, a millisecond
+    # timestamp. A bare integer assigned to a token-shaped name is a count or a
+    # clock, and replacing it (or the comma after it) makes the session JSON unreadable.
+    if words[-1] in {"token", "tokens"} and value.isdigit():
         return False
     if words[-1] in _PASSWORD_WORDS or len(value) >= 20:
         return True

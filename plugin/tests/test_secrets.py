@@ -53,6 +53,27 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(parsed["password"], "[redacted]")
         self.assertEqual(parsed["note"], "keep the host")
 
+    def test_an_opencode_first_token_timestamp_stays_so_the_session_json_parses(self):
+        raw = json.dumps(
+            {
+                "info": {"id": "ses_1"},
+                "messages": [
+                    {
+                        "time": {"created": 1795191015032, "firstToken": 1795191017586},
+                        "text": "rename the button",
+                    }
+                ],
+            }
+        )
+        cleaned = redact(raw)
+        parsed = json.loads(cleaned)
+        self.assertEqual(parsed["messages"][0]["time"]["firstToken"], 1795191017586)
+        self.assertEqual(parsed["messages"][0]["text"], "rename the button")
+        self.assertEqual(
+            redact('{"api_token": "not-a-provider-token-value"}'),
+            '{"api_token": "[redacted]"}',
+        )
+
     def test_a_bearer_token_and_a_jwt_are_removed(self):
         jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signaturevalue1"
         cleaned = redact(f"Authorization: Bearer {jwt}")
