@@ -91,7 +91,7 @@ Push portrait gaps and stale revisions first, one learning at a time, architectu
 
 **Personal book.** If it already has files, revise them and do not add a second file for the same fact. If it has no lessons, create the files this person needs, including `MEMORY.md`. Preferences and corrections go here even when the same sessions also change the team book. The repo pass does not write this book.
 
-Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. On Cursor, do not use Write, StrReplace, or Edit on `~/.cadri`. Read a book file with the Read tool. In one shell command, write that learning's files into the clone and run `cadri memory push`.
+Team top-level directories are only `architecture/`, `components/`, `features/`, `incidents/`, `operations/`, `path-to-prod/`, and `external/`. On Cursor, do not use Write, StrReplace, or Edit on `~/.cadri`. Read a book file with the Read tool. Draft each file inside the workspace, then publish it with `cadri memory write` as its own command. `cadri init` allowlists `cadri memory`, so that command does not ask.
 
 ## 7. Push each learning
 
@@ -110,7 +110,7 @@ cadri memory push --agent cadri-memory-join --book <team|personal> -m "<the lear
 - cursor:<id> (<YYYY-MM-DD>): <what happened there>"
 ```
 
-Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
+Do not pass `--human`. On Cursor, publish each file with `cadri memory write <path> --file <workspace-file> --agent cadri-memory-join --scope <team|personal>` and the same `-m` paragraphs. On other harnesses, edit the clone and `cadri memory push` instead of `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
 
 Each push lands on the shared branch your teammates already have. Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue --book <team|personal>`, then the next learning.
 

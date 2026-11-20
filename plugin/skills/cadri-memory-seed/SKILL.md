@@ -71,7 +71,7 @@ Split the sessions into batches of about five. Run at most three subagents at a 
 
 You integrate the notes yourself. Subagent notes are not memory until you put them in the books.
 
-Cursor asks for approval every time the editor creates or edits a file outside the workspace, and the books live under `~/.cadri`. Do not use Write, StrReplace, or Edit on those paths. Read a book file with the Read tool. In one shell command, write that learning's files into the clone (`cadri memory path` or `cadri memory path --scope personal`) and run `cadri memory push` for it.
+Cursor asks for approval every time the editor creates or edits a file outside the workspace, and the books live under `~/.cadri`. Do not use Write, StrReplace, or Edit on those paths. Read a book file with the Read tool. Draft each file inside the workspace, then publish it with `cadri memory write` as its own command. `cadri init` allowlists `cadri memory`, so that command does not ask. One file per command. A learning that touches several files is one command per file.
 
 Push the portrait first, one learning at a time. Architecture before components and features, so the root `MEMORY.md` and the directory indexes land with the first real file. Then push each session lesson. A learning may touch several files, including the indexes that link a new file. Re-read a file immediately before you change it.
 
@@ -94,7 +94,13 @@ cadri memory push --agent cadri-memory-seed --book <team|personal> -m "<the lear
 - cursor:<id> (<YYYY-MM-DD>): <what happened there>"
 ```
 
-Do not pass `--human`. Do not use `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
+Do not pass `--human`. On Cursor, `cadri memory write` is how a file gets into the book without an approval card:
+
+```bash
+cadri memory write <path> --file <workspace-file> --agent cadri-memory-seed --scope <team|personal> -m "<the learning>" -m "<what happened and why it should persist>"
+```
+
+On other harnesses, edit the clone and `cadri memory push` instead of `cadri memory write`. Leave `--session` unset unless one session is clearly the source of this learning.
 
 Exit status 3 means a conflict: follow `cadri-memory-repair`, then `cadri memory push --continue --book <team|personal>`, then the next learning.
 

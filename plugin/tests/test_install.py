@@ -22,7 +22,7 @@ sys.path.insert(0, str(PLUGIN))
 from cadri import auth as cadri_auth  # noqa: E402
 from cadri import cli  # noqa: E402
 from cadri.discover import codex, cursor, opencode  # noqa: E402
-from cadri.install import bundles, config  # noqa: E402
+from cadri.install import bundles, config, permissions  # noqa: E402
 from cadri.state import cadri_home  # noqa: E402
 from cadri.secrets import redact  # noqa: E402
 
@@ -251,7 +251,9 @@ class CursorInstallTests(InstallTestCase):
         mine = {"command": "./audit.sh", "failClosed": True}
         old = {"command": LEGACY_COMMAND.format(harness="cursor"), "timeout": 30}
         self.write(".cursor/hooks.json", {"version": 1, "hooks": {"stop": [mine, old], "sessionEnd": [old]}})
-        self.install("cursor")
+        [line] = self.install("cursor")
+        self.assertIn("cadri memory", line)
+        self.assertIn("permissions.json", line)
         self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
         rule = (self.plugin() / "rules/cadri.mdc").read_text()
         self.assertIn("alwaysApply: true", rule)
@@ -261,11 +263,59 @@ class CursorInstallTests(InstallTestCase):
         self.assertIn(str(self.home / ".cadri/bin/cadri"), self.command("stop"))
         sandbox = self.read(".cursor/sandbox.json")
         self.assertEqual(sandbox["additionalReadwritePaths"], [cadri_home().as_posix()])
+        self.assertEqual(self.read(".cursor/permissions.json"), {"terminalAllowlist": ["cadri memory"]})
 
         bundles.uninstall(self.home)
         self.assertFalse(self.plugin().exists())
         self.assertEqual(self.read(".cursor/hooks.json"), {"version": 1, "hooks": {"stop": [mine]}})
         self.assertFalse((self.home / ".cursor/sandbox.json").exists())
+        self.assertFalse((self.home / ".cursor/permissions.json").exists())
+
+    def cursor_settings(self, commands: list[str]) -> None:
+        db = permissions.cursor_state_db(self.home)
+        db.parent.mkdir(parents=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        payload = json.dumps({"composerState": {"yoloCommandAllowlist": commands}})
+        con.execute("INSERT INTO ItemTable (key, value) VALUES (?, ?)", (permissions.CURSOR_STATE_KEY, payload))
+        con.commit()
+        con.close()
+
+    def test_allowlist_keeps_commands_from_cursor_settings(self):
+        self.cursor_settings(["git", "npm"])
+        [line] = self.install("cursor")
+        self.assertIn("replaces the command allowlist", line)
+        self.assertEqual(
+            self.read(".cursor/permissions.json")["terminalAllowlist"],
+            ["git", "npm", "cadri memory"],
+        )
+        bundles.uninstall(self.home)
+        self.assertFalse((self.home / ".cursor/permissions.json").exists())
+
+    def test_allowlist_appends_to_an_existing_file(self):
+        self.write(".cursor/permissions.json", {"mcpAllowlist": ["linear"], "terminalAllowlist": ["git"]})
+        self.install("cursor")
+        self.assertEqual(
+            self.read(".cursor/permissions.json"),
+            {"mcpAllowlist": ["linear"], "terminalAllowlist": ["git", "cadri memory"]},
+        )
+        bundles.uninstall(self.home)
+        self.assertEqual(
+            self.read(".cursor/permissions.json"),
+            {"mcpAllowlist": ["linear"], "terminalAllowlist": ["git"]},
+        )
+
+    def test_an_allowlist_that_already_covers_cadri_is_left_alone(self):
+        self.cursor_settings(["git", "cadri"])
+        [line] = self.install("cursor")
+        self.assertNotIn("permissions.json", line)
+        self.assertFalse((self.home / ".cursor/permissions.json").exists())
+
+    def test_a_permissions_file_with_comments_is_left_alone(self):
+        path = self.write(".cursor/permissions.json", '{ "terminalAllowlist": ["git"] } // kept\n')
+        [line] = self.install("cursor")
+        self.assertIn("left unchanged", line)
+        self.assertEqual(path.read_text(encoding="utf-8"), '{ "terminalAllowlist": ["git"] } // kept\n')
 
     def test_stop_hook_finds_the_session_by_conversation_id(self):
         self.install("cursor")

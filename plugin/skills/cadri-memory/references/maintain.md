@@ -173,7 +173,7 @@ cadri memory push --book team \
 Other agents may be editing the same books right now.
 
 - Re-read a file immediately before editing it.
-- On Cursor, do not use the editor's Write, StrReplace, or Edit tools on `~/.cadri`. Each of those files is outside the workspace, and Cursor asks for approval on every one. Read the file with the Read tool. Write it from the shell in the same command as `cadri memory push`, using the path `cadri memory path` prints.
+- On Cursor, do not use the editor's Write, StrReplace, or Edit tools on `~/.cadri`. Each of those files is outside the workspace, and Cursor asks for approval on every one. Read the file with the Read tool. Draft the new text inside the workspace, then publish that one file with `cadri memory write <path> --file <workspace-file>` as its own command. `cadri init` allowlists `cadri memory`, so that command does not ask. Do not combine it with another command.
 - Make targeted edits to the lines that change. Never rewrite a whole file to change a few lines.
 - Publish with the commit above. Push commits only your session's files.
 - If `cadri memory push` reports a conflict and you are not already following `cadri-memory-repair`, load that skill. It applies the file rules and "How to write it" above, then continues the push. Do not follow this bullet again from inside that skill. If the push says the server was not reachable, the commit is saved and pushed after the turn.
