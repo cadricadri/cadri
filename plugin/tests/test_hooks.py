@@ -225,15 +225,33 @@ class ClaudeTests(HookTestCase):
         self.assertIn("we deploy on Thursdays now", text)
         self.assertEqual(digests.pending(), [])
 
-    def test_any_next_message_wakes_the_keeper_not_only_corrections(self):
-        # The keeper (maintain.md), not keyword rules, decides what to keep.
+    def test_an_operational_follow_up_does_not_wake_the_keeper(self):
+        # Starting and stopping work is not feedback. The keeper still judges a turn that is.
         self.start()
         self.hook("claude", "prompt", {"session_id": "c1", "prompt": "How do retries work?"})
         self.hook("claude", "stop", {"session_id": "c1", "last_assistant_message": "They back off."})
         data = self.json_hook("claude", "prompt", {"session_id": "c1", "prompt": "Thanks — and what about timeouts?"})
+        context = (data.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+        self.assertNotIn("cadri-memory-keeper", context)
+        self.assertEqual(digests.pending(), [])
+
+    def test_a_spoken_correction_wakes_the_keeper_without_an_edit(self):
+        self.start()
+        self.hook("claude", "prompt", {"session_id": "c1", "prompt": "When do we deploy?"})
+        self.hook("claude", "stop", {"session_id": "c1", "last_assistant_message": "On Tuesdays."})
+        data = self.json_hook("claude", "prompt", {"session_id": "c1", "prompt": "No, that's wrong: we deploy on Thursdays now."})
         context = data["hookSpecificOutput"]["additionalContext"]
         self.assertIn("launch the `cadri:cadri-memory-keeper` subagent", context)
-        self.assertIn("ready for the keeper to review", context)
+        self.assertIn("we deploy on Thursdays now", Path(context.split("Reflect on ", 1)[1].split(" for session", 1)[0]).read_text())
+
+    def test_a_spoken_preference_wakes_the_keeper_without_an_edit(self):
+        self.start()
+        self.hook("claude", "prompt", {"session_id": "c1", "prompt": "Leave finished tasks on the page."})
+        self.hook("claude", "stop", {"session_id": "c1", "last_assistant_message": "I will."})
+        data = self.json_hook("claude", "prompt", {"session_id": "c1", "prompt": "Thanks."})
+        context = data["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("launch the `cadri:cadri-memory-keeper` subagent", context)
+        self.assertIn("Leave finished tasks on the page.", Path(context.split("Reflect on ", 1)[1].split(" for session", 1)[0]).read_text())
 
     def test_remember_language_is_only_a_main_agent_hint(self):
         self.assertEqual(digests.signals('"Remember this: we use vitest."'), {"remember"})
@@ -446,7 +464,7 @@ class OpenCodeTests(HookTestCase):
     def test_the_next_prompt_asks_the_main_agent_for_the_keeper(self):
         self.json_hook("opencode", "prompt", {"session_id": "o1", "prompt": "how do retries work"})
         self.json_hook("opencode", "stop", {"session_id": "o1", "last_message": "They back off."})
-        data = self.json_hook("opencode", "prompt", {"session_id": "o1", "prompt": "Thanks, that helps."})
+        data = self.json_hook("opencode", "prompt", {"session_id": "o1", "prompt": "No, retry immediately instead."})
         self.assertIn("launch the `cadri-memory-keeper` subagent", data["context"])
         self.assertIn("Reflect on ", data["context"])
 

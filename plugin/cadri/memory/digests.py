@@ -7,10 +7,10 @@ of what was worth remembering — and asks whether it is time to wake the keeper
 the cadri-memory-keeper subagent reads the digest and follows
 `skills/cadri-memory/references/maintain.md`. Often the answer is nothing.
 
-Wake when the user has replied to a prior turn in this session (so the keeper can see
-prompt, reply, and reaction together), or when digests from a session that ended without
-another prompt have sat idle. Explicit "remember" / "forget" language is a separate path:
-the main agent edits and pushes with `--human` in the same turn.
+Wake when a ready turn has an edit, a plan, a canvas, or the user said something that
+may be a correction, preference, or decision. A turn that is only an operational
+exchange is released without a keeper. Explicit "remember" / "forget" language is also
+a separate path: the main agent edits and pushes with `--human` in the same turn.
 
     Digests from sessions that ended without another prompt are picked up by the next
     session's first gate. Nothing here leaves the machine.
@@ -41,6 +41,19 @@ MAX_CLAIM = 8
 # They do not decide what the keeper writes into memory.
 REMEMBER = re.compile(
     r"\b(remember|don'?t forget|forget that|note that|keep in mind|make a note|save this|write this down)\b",
+    re.IGNORECASE,
+)
+
+# Whether a turn is worth a keeper at all. The agent's reply is not scanned: an
+# ordinary answer is full of words like "no" and "should". The keeper still decides
+# what, if anything, to write.
+FEEDBACK = re.compile(
+    r"\b("
+    r"actually|always|decided|decision|don't|dont|forget|hate|incorrect|instead|"
+    r"keep|leave|lets|like|meant|never|no|nope|prefer|rather|remember|rule|"
+    r"should|shouldn't|want|wrong"
+    r")\b"
+    r"|let's|from now on|going forward|do not|i meant|that(?:'s| is) not",
     re.IGNORECASE,
 )
 
@@ -191,15 +204,37 @@ def release_stale(now: float) -> None:
         shutil.rmtree(claim, ignore_errors=True)
 
 
+def reviewable(data: dict) -> bool:
+    """True when a keeper might still find something the books should hold.
+
+    An edit, a plan, or a canvas can carry a decision even when the wording is
+    ordinary. Otherwise only the user's own words count: the prompt, and their
+    next message once it is attached.
+    """
+    if data.get("memory_edits") or data.get("plans") or data.get("canvases"):
+        return True
+    if int(data.get("edit_count") or 0) > 0:
+        return True
+    user = f"{data.get('prompt') or ''}\n{data.get('reaction') or ''}"
+    return FEEDBACK.search(user) is not None
+
+
+def release_unreviewed(items: list[tuple[Path, dict]]) -> None:
+    """Drop a turn the keeper will not see. Same end state as an empty reflection."""
+    for path, _data in items:
+        path.unlink(missing_ok=True)
+
+
 def gate(session: str, now: float | None = None, books: dict[str, Path] | None = None) -> Claim | None:
-    """Wake the keeper when there is an unreflected turn ready for an LLM to review.
+    """Wake the keeper when a ready turn might be worth keeping.
 
     This is not a classifier of what belongs in memory. The keeper reads the claimed
-    digest and applies `references/maintain.md`; most turns change nothing.
+    digest and applies `references/maintain.md`; most turns it does see change nothing.
 
     Ready means: this session has at least one digest whose next user message is
     attached (the usual turn N+1 case), or digests from another session have been
-    idle long enough that no further reply is coming.
+    idle long enough that no further reply is coming. A ready turn with no edit,
+    plan, canvas, or user feedback is deleted instead of claimed.
     """
     now = time.time() if now is None else now
     release_stale(now)
@@ -210,11 +245,16 @@ def gate(session: str, now: float | None = None, books: dict[str, Path] | None =
         for path, data in waiting
         if data.get("session") != session and now - float(data.get("at") or 0) >= ORPHAN_IDLE_SECONDS
     ]
-    reasons = []
     ready = [(path, data) for path, data in mine if data.get("reaction") is not None]
-    if ready:
+    ready_paths = {path for path, _data in ready}
+    review, skip = [], []
+    for item in ready + orphans:
+        (review if reviewable(item[1]) else skip).append(item)
+    release_unreviewed(skip)
+    reasons = []
+    if any(path in ready_paths for path, _data in review):
         reasons.append("a prior turn is ready for the keeper to review")
-    if orphans:
+    if any(path not in ready_paths for path, _data in review):
         reasons.append("turns from an earlier session were never reflected on")
     if not reasons:
         return None
@@ -222,7 +262,7 @@ def gate(session: str, now: float | None = None, books: dict[str, Path] | None =
     directory.mkdir(parents=True, exist_ok=True)
     taken: list[dict] = []
     # Prefer digests that already have the user's next message; then orphans.
-    for path, data in (ready + orphans)[:MAX_CLAIM]:
+    for path, data in review[:MAX_CLAIM]:
         try:
             os.replace(path, directory / path.name)
         except OSError:

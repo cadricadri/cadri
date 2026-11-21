@@ -365,7 +365,7 @@ class CliTests(BooksTestCase):
     def test_memory_push_both_books_and_finish_the_digest(self):
         from cadri.memory import digests
 
-        digests.save("claude", "s1", "how do we deploy?", "On Tuesdays.", 0, [])
+        digests.save("claude", "s1", "We should deploy on Tuesdays.", "On Tuesdays.", 0, [])
         claim = digests.gate("s9", now=time.time() + 3 * 3600) or self.fail("expected an orphan claim")
         self.write(self.team, "operations.md", "Deploys need a freeze notice.\n")
         code, _, err = self.cli(
