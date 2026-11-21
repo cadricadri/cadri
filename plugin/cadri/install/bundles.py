@@ -29,7 +29,9 @@ from .config import (
     InstallError,
     claude_dir,
     codex_dir,
+    is_cadri_command,
     opencode_dir,
+    read_json,
     remove_tree,
     set_grouped_hooks,
     strip_cadri_hooks,
@@ -101,15 +103,50 @@ def shim_path() -> Path:
     return cadri_home() / "bin" / "cadri"
 
 
-def write_shim() -> Path:
-    """Point ~/.cadri/bin/cadri at the Python and checkout running this install."""
+def under_managed_tree(origin: Path | None = None) -> bool:
+    """True when this code is the copy installed under ~/.cadri, not a source checkout."""
+    resolved = (origin or Path(__file__)).resolve()
+    home = cadri_home().resolve()
+    for base in (home / "versions", home / "install"):
+        try:
+            resolved.relative_to(base)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def stable_shim_script() -> str:
+    """Run whatever ~/.cadri/install currently points at, without resolving the symlink."""
+    install = cadri_home() / "install"
+    python = install / ".venv" / "bin" / "python"
+    cli = install / "bin" / "cadri_cli.py"
+    return f'#!/bin/sh\nexec {shlex.quote(str(python))} {shlex.quote(str(cli))} "$@"\n'
+
+
+def write_script(script: str) -> Path:
     path = shim_path()
-    script = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(PLUGIN_ROOT / "bin" / "cadri_cli.py"))} "$@"\n'
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.is_file() or path.read_text(encoding="utf-8") != script:
         write_text(path, script)
         path.chmod(0o755)
     return path
+
+
+def write_stable_shim() -> Path:
+    return write_script(stable_shim_script())
+
+
+def write_shim() -> Path:
+    """Point ~/.cadri/bin/cadri at the Python and checkout running this install.
+
+    A managed install keeps the shim on the ~/.cadri/install symlink, so replacing
+    that symlink is what moves every harness onto the new code.
+    """
+    if under_managed_tree():
+        return write_stable_shim()
+    script = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(PLUGIN_ROOT / "bin" / "cadri_cli.py"))} "$@"\n'
+    return write_script(script)
 
 
 def command(cli: str, hook: Hook, harness: str) -> str:
@@ -456,6 +493,47 @@ INSTALLERS = {
     "cursor": (install_cursor, uninstall_cursor, "Cursor plugin"),
     "opencode": (install_opencode, uninstall_opencode, "OpenCode plugin"),
 }
+
+
+def _hooks_have_cadri(path: Path) -> bool:
+    try:
+        data = read_json(path)
+    except InstallError:
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            if is_cadri_command(group.get("command")):
+                return True
+            for hook in group.get("hooks") or []:
+                if isinstance(hook, dict) and is_cadri_command(hook.get("command")):
+                    return True
+    return False
+
+
+def cadri_installed(home: Path | None = None) -> list[str]:
+    """Harnesses `cadri init` already installed into, in init's order."""
+    home = home or Path.home()
+    found = []
+    claude_skills = claude_dir(home) / "skills" / "cadri-memory" / "SKILL.md"
+    if bundle_dir("claude").is_dir() or claude_skills.is_file() or _hooks_have_cadri(claude_dir(home) / "settings.json"):
+        found.append("claude_code")
+    if cursor_plugin_dir(home).is_dir():
+        found.append("cursor")
+    keeper = codex_agent(home)
+    keeper_ours = keeper.is_file() and MARKER in keeper.read_text(encoding="utf-8", errors="replace")
+    if keeper_ours or _hooks_have_cadri(codex_dir(home) / "hooks.json"):
+        found.append("codex")
+    plugin, _agent = opencode_files(home)
+    if plugin.is_file() and MARKER in plugin.read_text(encoding="utf-8", errors="replace"):
+        found.append("opencode")
+    return found
 
 
 def install(harnesses: list[str], home: Path | None = None) -> list[str]:

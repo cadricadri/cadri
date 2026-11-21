@@ -38,3 +38,5 @@ Otherwise:
 If the user's message names a tighter window, pass it through to that skill. Otherwise the default is whichever is smaller: the last 60 days, or the 100 most recent sessions.
 
 To remove Cadri's hooks and skills later: `cadri uninstall`.
+
+After this install, Cadri checks for a CLI update once a day. `cadri update` checks now. A source checkout stays on that checkout.

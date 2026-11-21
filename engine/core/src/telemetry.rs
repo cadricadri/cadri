@@ -88,6 +88,7 @@ const PLUGIN_COMMANDS: &[&str] = &[
     "uninstall",
     "discover",
     "show",
+    "update",
     "memory_push",
     "memory_sync",
     "memory_search",

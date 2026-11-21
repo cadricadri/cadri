@@ -25,7 +25,7 @@ from .memory import context, digests, editapi, push, repair, sync
 from . import mcp as mcp_server
 from .state import Session
 from .memory.layout import has_lessons
-from . import telemetry
+from . import telemetry, update
 from .upload import post_session
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -311,6 +311,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("Installing Cadri into each agent…")
     for line in bundles.install(harnesses):
         print(f"  {line}")
+    if harnesses:
+        update.record_bundle_version()
     print(f"  CLI: {bundles.shim_path()}")
     chosen, in_window, newest = select_seed_sessions(discover_all(), time.time(), SEED_DAYS, SEED_LIMIT)
     print(
@@ -332,6 +334,18 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(memory_time_warning(joining))
     print(next_memory_step(joining))
     return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    try:
+        if args.apply:
+            for line in update.apply():
+                print(line)
+            return 0
+        print(update.manual())
+        return 0
+    except update.UpdateError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def cmd_uninstall(_: argparse.Namespace) -> int:
@@ -599,6 +613,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --local, start cadri-engine in the background when it is not already running. Uses engine/data/transcripts.db. Does not start the web UI.",
     )
     init.set_defaults(func=cmd_init)
+
+    update_cmd = sub.add_parser("update", help="Update the Cadri CLI and refresh each agent's copy")
+    update_cmd.add_argument("--apply", action="store_true", help="Refresh harness copies from this CLI, without downloading")
+    update_cmd.set_defaults(func=cmd_update)
 
     uninstall = sub.add_parser("uninstall", help="Remove Cadri's hooks, plugins, and skills")
     uninstall.set_defaults(func=cmd_uninstall)

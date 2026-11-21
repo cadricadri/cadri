@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install the Cadri CLI: uv, a uv-managed Python, and the plugin tree in ~/.cadri/install.
+# Install the Cadri CLI: uv, a uv-managed Python, and the plugin tree at ~/.cadri/install.
+# ~/.cadri/install is a symlink to ~/.cadri/versions/<version>.
 #
 #   curl -fsSL https://cadri.io/install.sh | bash
 #
@@ -72,12 +73,49 @@ uv_quiet() {
   PATH="$path" uv "$@"
 }
 
-copy_tree() {
-  local src="$1"
-  mkdir -p "$INSTALL_DIR"
-  # Keep the existing virtualenv so upgrades only re-sync it.
-  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name .venv -exec rm -rf {} +
-  (cd "$src" && tar -cf - --exclude .venv --exclude __pycache__ --exclude .pytest_cache .) | (cd "$INSTALL_DIR" && tar -xf -)
+version_name() {
+  local file="$1/VERSION" version="source"
+  if [[ -f "$file" ]]; then
+    version="$(tr -cd 'A-Za-z0-9._-' <"$file")"
+    [[ -n "$version" ]] || version="source"
+  fi
+  printf '%s\n' "$version"
+}
+
+# ~/.cadri/install points at ~/.cadri/versions/<version>. Reinstalling the same
+# version keeps that directory's virtualenv. An older layout, where install was
+# a real directory, is moved aside first.
+place_tree() {
+  local src="$1" version dest link previous=""
+  version="$(version_name "$src")"
+  dest="$CADRI_HOME/versions/$version"
+  link="$CADRI_HOME/install"
+  mkdir -p "$CADRI_HOME/versions"
+  if [[ -L "$link" ]]; then
+    previous="$(readlink "$link")"
+  elif [[ -d "$link" ]]; then
+    local old parked
+    old="$(version_name "$link")"
+    parked="$CADRI_HOME/versions/$old"
+    if [[ "$old" == "$version" && ! -d "$dest" ]]; then
+      mv "$link" "$dest"
+    elif [[ ! -e "$parked" ]]; then
+      mv "$link" "$parked"
+      previous="$parked"
+    else
+      rm -rf "$link"
+    fi
+  fi
+  mkdir -p "$dest"
+  find "$dest" -mindepth 1 -maxdepth 1 ! -name .venv -exec rm -rf {} +
+  (cd "$src" && tar -cf - --exclude .venv --exclude __pycache__ --exclude .pytest_cache .) | (cd "$dest" && tar -xf -)
+  ln -sfn "$dest" "$link"
+  local dir
+  for dir in "$CADRI_HOME/versions"/*; do
+    [[ -d "$dir" ]] || continue
+    [[ "$dir" == "$dest" || "$dir" == "$previous" ]] && continue
+    rm -rf "$dir"
+  done
 }
 
 # Agent hooks run $CADRI_HOME/bin/cadri by absolute path; ~/.local/bin/cadri points at it.
@@ -111,7 +149,7 @@ main() {
   ensure_uv
   local src
   src="$(fetch_source)"
-  copy_tree "$src"
+  place_tree "$src"
   say "Setting up Python ${PYTHON_VERSION}…"
   UV_PYTHON_PREFERENCE=only-managed uv_quiet sync --quiet --project "$INSTALL_DIR" --python "$PYTHON_VERSION"
   write_shim
@@ -120,6 +158,17 @@ main() {
   version="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo source)"
   say ""
   say "Cadri $version installed to $INSTALL_DIR."
+  # A machine that already ran `cadri init` gets its harness copies refreshed.
+  # The bootstrap has no virtualenv python yet when uv is stubbed, and a fresh
+  # machine has nothing to refresh: both still end on `cadri init`.
+  if [[ -x "$INSTALL_DIR/.venv/bin/python" ]]; then
+    local applied
+    applied="$("$CADRI_HOME/bin/cadri" update --apply 2>/dev/null || true)"
+    if [[ -n "${applied// /}" ]]; then
+      printf '%s\n' "$applied"
+      return
+    fi
+  fi
   say "Next: $BIN_DIR/cadri init"
 }
 

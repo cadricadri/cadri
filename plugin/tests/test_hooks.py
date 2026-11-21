@@ -66,6 +66,15 @@ class ClaudeTests(HookTestCase):
     def start(self, **extra):
         return self.json_hook("claude", "session-start", {"session_id": "c1", "source": "startup", "cwd": str(self.tmp), **extra})
 
+    def test_session_start_shows_an_update_notice_once(self):
+        path = Path(os.environ["CADRI_HOME"]) / "state" / "update-notice"
+        path.parent.mkdir(parents=True)
+        path.write_text("Cadri updated. Reload Cursor to load the new skills.\n", encoding="utf-8")
+        data = self.start()
+        self.assertIn("Reload Cursor", data["systemMessage"])
+        self.assertNotIn("Reload Cursor", data["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("systemMessage", self.start())
+
     def test_session_start_loads_both_books_and_the_instructions(self):
         env_file = self.tmp / "claude.env"
         with mock.patch.dict(os.environ, {"CLAUDE_ENV_FILE": str(env_file)}):

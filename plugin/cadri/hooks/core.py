@@ -21,7 +21,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .. import auth, canvases, capture, plans, state
+from .. import auth, canvases, capture, plans, state, update
 from ..memory import books as bk
 from ..memory import context, digests, edits, push, recall, repair, sync
 from . import events as ev
@@ -117,10 +117,30 @@ def repair_request(book: bk.Book, names: context.Names) -> str:
     )
 
 
+def attach_update_notice(result: Result) -> None:
+    text = update.take_notice()
+    if not text:
+        return
+    if result.output.notice:
+        result.output.context = f"{result.output.context}\n\n{text}" if result.output.context else text
+        return
+    result.output.notice = text
+
+
+def background_update() -> Job:
+    def run() -> None:
+        message = update.automatic()
+        if message:
+            print(message, flush=True)
+
+    return run
+
+
 def session_start(inp: HookInput, adapter: Adapter) -> Result:
     deadline = time.monotonic() + SESSION_START_NETWORK_SECONDS
     base = auth.server_url()
     result = Result()
+    result.background.append(background_update())
     notices: list[str] = []
     status = check_auth(base, deadline, result, notices)
     signed_in = status == auth.OK
@@ -130,6 +150,7 @@ def session_start(inp: HookInput, adapter: Adapter) -> Result:
     if not books:
         if signed_in:
             result.output.context = "Cadri memory is not set up on this machine yet. If the user asks about it, suggest `cadri memory clone`."
+        attach_update_notice(result)
         return result
     statuses: dict[str, sync.Status] = {}
     if bk.git_ready():
@@ -148,6 +169,7 @@ def session_start(inp: HookInput, adapter: Adapter) -> Result:
     current = session(inp)
     if current:
         current.update(seeded_at=time.time(), cwd=inp.cwd, seed_delivered=inp.harness != "cursor")
+    attach_update_notice(result)
     return result
 
 

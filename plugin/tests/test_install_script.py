@@ -53,6 +53,8 @@ class InstallScriptTests(unittest.TestCase):
         self.assertIn(f"Installing from this checkout: {PLUGIN}", result.stderr)
         self.assertNotIn("Downloading", result.stderr)
         installed = self.home / ".cadri" / "install"
+        self.assertTrue(installed.is_symlink())
+        self.assertEqual(installed.resolve(), (self.home / ".cadri" / "versions" / "source").resolve())
         self.assertTrue((installed / "cadri" / "cli.py").is_file())
         self.assertTrue((installed / "pyproject.toml").is_file())
         shim = (self.home / ".cadri" / "bin" / "cadri").read_text(encoding="utf-8")

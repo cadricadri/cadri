@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Publish plugin/ from origin/main as GitHub release plugin-v<version>.
-# `curl -fsSL https://cadri.io/install.sh | bash` installs the newest one.
+#
+# Installed clients check this release once a day and only move forward, so cut
+# a release when the plugin is ready to leave running for a day. Not on every
+# commit: a broken intermediate commit would be the version some machines run
+# until their next check. Engine and web UI commits are not plugin releases.
+#
+#   plugin/scripts/release <major.minor.patch>
 set -euo pipefail
 
 version="${1:-}"
@@ -20,13 +26,15 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 git archive --format=tar --prefix=cadri-plugin/ "$commit:plugin" | tar -x -C "$work"
 printf '%s\n' "$version" >"$work/cadri-plugin/VERSION"
+printf '%s\n' "$version" >"$work/VERSION"
 "$work/cadri-plugin/scripts/build-plugins" "$work/cadri-plugin/dist/plugins" >/dev/null
 tar -czf "$work/cadri-plugin.tar.gz" -C "$work" cadri-plugin
 
-gh release create "$tag" "$work/cadri-plugin.tar.gz" \
+gh release create "$tag" "$work/cadri-plugin.tar.gz" "$work/VERSION" \
   --target "$commit" \
   --title "Cadri plugin $version" \
-  --notes "Install or upgrade: curl -fsSL https://cadri.io/install.sh | bash" \
+  --notes "Install: curl -fsSL https://cadri.io/install.sh | bash
+Installed copies check once a day. \`cadri update\` checks now." \
   --latest
 echo "Released $tag from ${commit:0:12}."
 

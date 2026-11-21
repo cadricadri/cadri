@@ -59,11 +59,13 @@ CADRI_REF=main bash plugin/install.sh            # or this checkout / any ref
 ~/.local/bin/cadri init
 ```
 
+`~/.cadri/install` is a symlink to `~/.cadri/versions/<version>`. After init, a session start checks for a newer release once a day and flips that symlink, then refreshes each harness's skills, hooks, and keeper. `cadri update` does it now. `CADRI_NO_UPDATE=1` skips the daily check. A shim that points at a source checkout is left on that checkout.
+
 Localhost: https://cadri.io/docs/localhost/, or `curl -fsSL https://cadri.io/install-local.sh | bash`.
 
 ## Release
 
-`install.sh` installs the newest `plugin-v*` GitHub release. To publish what is on `main`:
+`install.sh` installs the newest `plugin-v*` GitHub release. Installed copies check that release once a day and only move forward, so cut one when the plugin is ready to leave running for a day, not on every commit. A broken intermediate commit would be what some machines run until their next check. Engine and web UI commits are not plugin releases.
 
 ```sh
 plugin/scripts/release 0.2.0
@@ -76,6 +78,7 @@ If `install.sh` changed, copy it to `landingpage/install.sh` and deploy the land
 ```sh
 cadri login [--logout]
 cadri init [--local [--start-engine]]
+cadri update [--apply]   # download the latest release, or only refresh harness copies
 cadri uninstall
 cadri discover [--json] [--days 30] [--limit 50]
 cadri discover --seed [--json] [--days 60] [--limit 100]   # smaller of the day window and the recency cap; --json includes which git repo to brief
