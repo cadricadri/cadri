@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Link } from "react-router";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { MemoryMarkdown } from "./MemoryMarkdown";
 import { displayAuthorName } from "../../funNames";
 import { HumanMark, RobotMark } from "../../icons";
 import { useSession } from "../../session";
@@ -258,7 +257,7 @@ export function FileView({
       </div>
       {shownTab === "preview" ? (
         <section className="memory-preview" id="file-panel-preview" role="tabpanel" aria-labelledby="file-tab-preview">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{buffer}</ReactMarkdown>
+          <MemoryMarkdown path={nextPath ?? file.path}>{buffer}</MemoryMarkdown>
         </section>
       ) : (
         <section className="memory-edit" id="file-panel-code" role="tabpanel" aria-labelledby="file-tab-code">
