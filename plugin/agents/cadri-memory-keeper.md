@@ -35,4 +35,4 @@ The task names a book, for example: "Repair the team memory book." Follow the `c
 
 ## Your reply
 
-One line: what you saved and where, or that nothing was worth saving, or what is left for the user. For example: "Saved the deploy-freeze rule to team operations/deploys.md." Do not repeat the digest.
+One line: what you saved and where, or what is left for the user. When nothing was worth saving, reply exactly: "The Cadri memory keeper found nothing new to save. No further action is needed." When you saved something, name it, for example: "Saved the deploy-freeze rule to team operations/deploys.md." Do not repeat the digest.
